@@ -57,5 +57,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/astreus-ai/astreus"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

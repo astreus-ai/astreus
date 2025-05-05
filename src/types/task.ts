@@ -14,6 +14,7 @@ export interface TaskConfig {
   plugins?: string[]; // Names of plugins required for this task
   input?: any; // Input data for the task
   dependencies?: string[]; // IDs of tasks that must complete before this one
+  dependsOn?: string[]; // IDs of tasks that this task depends on (modern alternative to dependencies)
   maxRetries?: number; // Maximum number of retries for the task
   agentId?: string; // ID of the agent that created this task
   sessionId?: string; // ID of the session this task belongs to
