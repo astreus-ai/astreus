@@ -427,44 +427,166 @@ export class TaskManager implements TaskManagerInstance {
       logger.info(`Running all ${tasksToRun.length} tasks`);
     }
 
-    // Execute tasks with proper concurrency
-    const concurrency = this.config.concurrency || 5;
-    const runningTasks: Promise<void>[] = [];
+    // Create a dependency graph and task execution order
+    const taskDependencyMap = new Map<string, Set<string>>();
+    const dependentTasksMap = new Map<string, Set<string>>();
     
+    // Build dependency maps
     for (const task of tasksToRun) {
-      // Create a promise that executes the task and stores its result
-      const taskPromise = task.execute().then(result => {
-        results.set(task.id, result);
-      }).catch(error => {
-        logger.error(`Error executing task ${task.id}:`, error);
-        results.set(task.id, {
-          success: false,
-          error: error instanceof Error ? error : new Error(String(error))
-        });
-      });
+      const taskId = task.id;
+      const dependencies = new Set<string>();
       
-      runningTasks.push(taskPromise);
-      
-      // If we've reached concurrency limit, wait for one task to complete
-      if (runningTasks.length >= concurrency) {
-        await Promise.race(runningTasks);
-        // Remove completed tasks from the array
-        const completedTaskPromises = runningTasks.filter(promise => 
-          promise.then(() => true, () => true)
-        );
-        for (const completedPromise of completedTaskPromises) {
-          const index = runningTasks.indexOf(completedPromise);
-          if (index >= 0) {
-            runningTasks.splice(index, 1);
+      // Check both dependencies and dependsOn fields (for backward compatibility)
+      if (task.config.dependencies && task.config.dependencies.length > 0) {
+        for (const depId of task.config.dependencies) {
+          if (this.getTask(depId)) {
+            dependencies.add(depId);
           }
         }
       }
+      
+      // Add dependsOn dependencies (newer approach)
+      if (task.config.dependsOn && task.config.dependsOn.length > 0) {
+        for (const depId of task.config.dependsOn) {
+          if (this.getTask(depId)) {
+            dependencies.add(depId);
+          }
+        }
+      }
+      
+      // Store in the dependency map
+      taskDependencyMap.set(taskId, dependencies);
+      
+      // Update dependent tasks map (reverse mapping)
+      for (const depId of dependencies) {
+        if (!dependentTasksMap.has(depId)) {
+          dependentTasksMap.set(depId, new Set<string>());
+        }
+        dependentTasksMap.get(depId)!.add(taskId);
+      }
     }
     
-    // Wait for all remaining tasks to complete
-    await Promise.all(runningTasks);
+    // Track completed tasks and their results
+    const completedTasks = new Set<string>();
+    const taskQueue: TaskInstance[] = [];
     
-    logger.info(`Completed running ${tasksToRun.length} tasks`);
+    // Initial pass: find tasks with no dependencies
+    for (const task of tasksToRun) {
+      const dependencies = taskDependencyMap.get(task.id) || new Set<string>();
+      if (dependencies.size === 0) {
+        taskQueue.push(task);
+      }
+    }
+    
+    logger.debug(`Initial task queue: ${taskQueue.length} tasks ready to run`);
+    
+    // Execute tasks in dependency order with proper concurrency
+    const concurrency = this.config.concurrency || 5;
+    
+    while (taskQueue.length > 0) {
+      // Take up to concurrency tasks from the queue
+      const batchTasks = taskQueue.splice(0, concurrency);
+      
+      // Execute this batch in parallel
+      const batchPromises = batchTasks.map(async (task) => {
+        try {
+          // Pass in any dependent task outputs as input
+          const dependencies = taskDependencyMap.get(task.id) || new Set<string>();
+          
+          // If there are dependencies, prepare to collect their outputs
+          if (dependencies.size > 0) {
+            const dependencyOutputs: Record<string, any> = {};
+            let hasOutputs = false;
+            
+            // Collect outputs from all dependencies
+            for (const depId of dependencies) {
+              if (results.has(depId)) {
+                const depResult = results.get(depId)!;
+                if (depResult.success && depResult.output) {
+                  dependencyOutputs[depId] = depResult.output;
+                  hasOutputs = true;
+                }
+              }
+            }
+            
+            // If we have dependency outputs, merge them with task input
+            if (hasOutputs) {
+              // Create merged input that preserves original task input
+              const mergedInput = {
+                ...(task.config.input || {}),
+                _dependencyOutputs: dependencyOutputs
+              };
+              
+              logger.debug(`Task ${task.id} received outputs from ${Object.keys(dependencyOutputs).length} dependencies`);
+              
+              // Execute task with merged input
+              const result = await task.execute(mergedInput);
+              results.set(task.id, result);
+            } else {
+              // No usable outputs from dependencies, just run normally
+              const result = await task.execute();
+              results.set(task.id, result);
+            }
+          } else {
+            // No dependencies, run task with original input
+            const result = await task.execute();
+            results.set(task.id, result);
+          }
+          
+          // Mark this task as completed
+          completedTasks.add(task.id);
+          
+          // Check if this task completion unblocks any dependent tasks
+          if (dependentTasksMap.has(task.id)) {
+            const dependentTasks = dependentTasksMap.get(task.id)!;
+            
+            for (const dependentId of dependentTasks) {
+              // Get the dependent task
+              const dependentTask = this.getTask(dependentId);
+              if (!dependentTask) continue;
+              
+              // Check if all dependencies of this dependent task are completed
+              const allDependenciesCompleted = Array.from(taskDependencyMap.get(dependentId) || new Set<string>())
+                .every(depId => completedTasks.has(depId));
+              
+              // If all dependencies are completed, add this task to the queue
+              if (allDependenciesCompleted && !completedTasks.has(dependentId)) {
+                taskQueue.push(dependentTask);
+                logger.debug(`Task ${dependentId} unblocked and added to queue`);
+              }
+            }
+          }
+        } catch (error) {
+          logger.error(`Error executing task ${task.id}:`, error);
+          results.set(task.id, {
+            success: false,
+            error: error instanceof Error ? error : new Error(String(error))
+          });
+          
+          // Mark as completed even though it failed
+          completedTasks.add(task.id);
+        }
+      });
+      
+      // Wait for this batch to complete before processing next batch
+      await Promise.all(batchPromises);
+    }
+    
+    // Check for unresolved tasks (might be due to circular dependencies)
+    const unresolvedTasks = tasksToRun.filter(t => !completedTasks.has(t.id));
+    if (unresolvedTasks.length > 0) {
+      logger.warn(`${unresolvedTasks.length} tasks were not executed due to dependency issues or circular dependencies`);
+      
+      // Add failed results for these tasks
+      for (const task of unresolvedTasks) {
+        results.set(task.id, {
+          success: false,
+          error: new Error("Task not executed due to unresolved dependencies")
+        });
+      }
+    }
+    
+    logger.info(`Completed running ${completedTasks.size} tasks`);
     return results;
   }
 

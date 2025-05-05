@@ -30,7 +30,15 @@ An AI Agent Framework designed to help you easily build, deploy, and manage inte
 
 ### 💿 Installation
 
-Clone the repository and install dependencies:
+You can install Astreus directly from npm:
+
+```bash
+npm install @astreus-ai/astreus
+# or using yarn
+# yarn add @astreus-ai/astreus
+```
+
+Or clone the repository for development:
 
 ```bash
 git clone https://github.com/astreus-ai/astreus.git
@@ -47,42 +55,41 @@ import {
   createAgent, 
   createProvider,
   createMemory,
-  createDatabase
-} from 'astreus';
+  createDatabase,
+  logger
+} from '@astreus-ai/astreus';
 
 (async () => {
   // Initialize the database
-  const db = await createDatabase({
-    type: 'sqlite',
-    filename: 'astreus.db'
-  });
+  const db = await createDatabase();
   
   // Create memory instance
   const memory = await createMemory({
     database: db,
     tableName: "memories",
-    maxEntries: 100
+    maxEntries: 100,
+    enableEmbeddings: true
   });
 
   // Configure your provider
   const provider = createProvider({
     type: 'openai',
-    apiKey: process.env.OPENAI_API_KEY!,
-    model: "gpt-4-turbo"
+    model: 'gpt-4o-mini'  // Simply specify a single model name
   });
 
   // Create an agent instance
   const agent = await createAgent({
     name: 'MyAssistant',
-    model: provider.getModel(provider.getDefaultModel()),
+    description: 'A helpful AI assistant',
+    provider: provider,
     memory: memory,
-    systemPrompt: "You are a helpful AI assistant.",
-    database: db
+    database: db,
+    systemPrompt: "You are a helpful AI assistant."
   });
 
   // Chat with your agent
   const response = await agent.chat("Tell me about TypeScript");
-  console.log('Agent response:', response);
+  logger.info('Agent response:', response);
 })();
 ```
 
@@ -96,8 +103,7 @@ You can use different LLM providers:
 // For OpenAI
 const openaiProvider = createProvider({
   type: 'openai',
-  apiKey: process.env.OPENAI_API_KEY!,
-  model: "gpt-4-turbo"
+  model: 'gpt-4o-mini'
 });
 
 // For Ollama (local models)
@@ -108,27 +114,28 @@ const ollamaProvider = createProvider({
 });
 ```
 
-### Adding Custom Tools
+### Adding Custom Plugins
 
-Extend your agent with custom tools:
+Extend your agent with custom plugins:
 
 ```typescript
-const weatherTool = {
-  name: "get_weather",
-  description: "Get current weather for a location",
-  parameters: {
-    location: {
-      type: "string",
-      description: "The city and state, e.g. San Francisco, CA"
-    }
-  },
-  execute: async (params) => {
-    // Implement weather lookup logic
-    return { temperature: 72, conditions: "sunny" };
-  }
-};
+import { XPlugin } from 'astreus-x-plugin';
 
-agent.addTool(weatherTool);
+// Create and initialize plugin
+const xPlugin = new XPlugin();
+await xPlugin.init();
+
+// Create an agent with the plugin
+const agent = await createAgent({
+  name: 'Social Media Agent',
+  description: 'An assistant that can interact with X',
+  provider: provider,
+  memory: memory,
+  database: db,
+  systemPrompt: `You are a helpful assistant that can interact with X (formerly Twitter).
+Help the user search, post, and analyze content on X.`,
+  plugins: [xPlugin]  // Add plugins directly, tools will be automatically registered
+});
 ```
 
 ### Working with RAG (Retrieval Augmented Generation)
@@ -136,7 +143,7 @@ agent.addTool(weatherTool);
 Astreus provides built-in RAG capabilities:
 
 ```typescript
-import { createRAG, parsePDF } from 'astreus';
+import { createRAG, parsePDF } from '@astreus-ai/astreus';
 
 // Parse a PDF document
 const document = await parsePDF('path/to/document.pdf');
@@ -151,8 +158,10 @@ const rag = await createRAG({
 // Use RAG with your agent
 const agent = await createAgent({
   name: 'DocumentAssistant',
-  model: provider.getModel('gpt-4-turbo'),
+  description: 'An assistant that can answer questions about documents',
+  provider: provider,
   memory: memory,
+  database: db,
   rag: rag,
   systemPrompt: 'You are a helpful assistant that can answer questions about documents.'
 });
@@ -161,74 +170,82 @@ const agent = await createAgent({
 const response = await agent.chat("What does the document say about climate change?");
 ```
 
-### Using Plugins
-
-Plugins provide a convenient way to add multiple related tools to your agent at once:
-
-```typescript
-import { PluginManager } from 'astreus';
-
-// Create a plugin manager
-const pluginManager = new PluginManager();
-
-// Register a custom plugin
-pluginManager.registerPlugin({
-  name: 'weather',
-  description: 'Get weather information',
-  tools: [weatherTool]
-});
-
-// Create the agent with the plugin manager
-const agent = await createAgent({
-  name: 'Weather Assistant',
-  model: provider.getModel('gpt-4-turbo'),
-  memory: memory,
-  systemPrompt: 'You are a helpful assistant that can provide weather information.',
-  pluginManager: pluginManager
-});
-
-// All tools from the plugins will be automatically available to the agent
-```
-
 ### Using the Task System
 
+Creating and running tasks is straightforward:
+
 ```typescript
-// Enable task system for complex requests
-const response = await agent.chat(
-  "Plan a trip to Japan and create an itinerary", 
-  "session123",
-  "user456", 
-  { useTaskSystem: true }
-);
+// Create a data processing task
+const analysisTask = agent.createTask({
+  name: "Analyze Data",
+  description: "Analyze the provided data set and extract key insights",
+  input: {
+    dataSource: "sales_data_2024.csv",
+    metrics: ["revenue", "growth", "customer_retention"]
+  }
+});
+
+// Run the task
+try {
+  const taskResults = await agent.runTasks([analysisTask.id]);
+  const analysisResult = taskResults.get(analysisTask.id);
+  
+  if (analysisResult?.success) {
+    logger.success("Task completed successfully!");
+    console.log(analysisResult.output);
+  } else {
+    logger.warn("Task failed");
+    if (analysisResult?.output?.error) {
+      logger.error(`Error: ${analysisResult.output.error}`);
+    }
+  }
+} catch (error) {
+  logger.error("Error running task:", error);
+}
 ```
 
-Tasks allow your agent to break down complex requests into manageable steps:
+You can create complex workflows with task dependencies using the `dependsOn` property:
 
 ```typescript
-import { createTask } from 'astreus';
-
-// Create a new task
-const task = await createTask({
-  name: "Research Tokyo attractions",
+// Create multiple tasks with dependencies
+const researchTask = agent.createTask({
+  name: "Research Tokyo Attractions",
   description: "Find top 5 tourist attractions in Tokyo",
-  agent: agent,
   input: { city: "Tokyo" }
 });
 
-// Execute the task
-const result = await task.execute();
+const plannerTask = agent.createTask({
+  name: "Create Itinerary",
+  description: "Create a 3-day itinerary based on research",
+  dependsOn: [researchTask.id],  // This task depends on researchTask
+  input: { duration: "3 days" }
+});
 
-// The task results will be stored in memory and can be accessed in future interactions
+// Run all tasks
+const results = await agent.runTasks([researchTask.id, plannerTask.id]);
+
+// Tasks run in proper order with dependency outputs automatically passed
+// You can access outputs from each task
+console.log("Research results:", results.get(researchTask.id).output);
+console.log("Itinerary:", results.get(plannerTask.id).output);
 ```
+
+When using `dependsOn`, the system automatically:
+1. Executes tasks in the correct dependency order
+2. Passes the outputs from dependency tasks to dependent tasks in `_dependencyOutputs`
+3. Handles failed dependencies gracefully
 
 ## 🔧 Configuration
 
 Environment variables:
 
 - `OPENAI_API_KEY` - Your OpenAI API key
-- `OPENAI_EMBEDDING_MODEL` - Optional embedding model name (default: "text-embedding-3-small")
-- `DATABASE_URL` - Connection string for PostgreSQL (if using PG)
-- `SQLITE_PATH` - Path for SQLite database (if using SQLite)
+- `OPENAI_BASE_URL` - Optional custom base URL for OpenAI API
+- `OPENAI_EMBEDDING_API_KEY` - Optional separate key for embeddings (falls back to main key)
+- `DATABASE_TYPE` - Type of database to use (sqlite or postgresql)
+- `DATABASE_PATH` - Path for SQLite database (if using SQLite)
+- `DATABASE_URL` - Connection string for PostgreSQL (if using PostgreSQL)
+- `OLLAMA_BASE_URL` - Base URL for Ollama API (if using Ollama)
 - `LOG_LEVEL` - Logging level (default: "info")
 
 ## 🤝 Contributing
