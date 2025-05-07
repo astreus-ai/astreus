@@ -1,11 +1,11 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AI Agent Framework",
   "author": "Astreus Team",
   "license": "MIT",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/index.cjs",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "scripts": {
