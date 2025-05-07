@@ -16,7 +16,7 @@ An AI Agent Framework designed to help you easily build, deploy, and manage inte
 - **Persistence Layer**: Automatic storage using SQLite or PostgreSQL
 - **RAG Support**: Built-in Retrieval Augmented Generation with PDF parsing
 - **Embeddings Support**: Semantic search across conversations and documents
-- **Type Safety**: Fully typed with TypeScript and Zod schema validation
+- **Type Safety**: Fully typed with TypeScript
 - **Advanced Logging**: Structured logging system for improved debugging and monitoring
 - **Flexible Configuration**: Enhanced parameter validation and smart defaults
 
