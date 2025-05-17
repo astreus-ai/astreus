@@ -6,7 +6,7 @@ export interface MemoryEntry {
   agentId: string;
   sessionId: string;
   userId?: string; // Optional user ID
-  role: "system" | "user" | "assistant" | "task_context";
+  role: "system" | "user" | "assistant" | "task_context" | "task_event" | "task_tool" | "task_result";
   content: string;
   timestamp: Date;
   metadata?: Record<string, unknown>;

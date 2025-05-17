@@ -52,7 +52,7 @@ export interface AgentInstance {
   addTool(tool: Plugin): void;
 
   // Task system methods
-  createTask(config: TaskConfig, sessionId?: string): TaskInstance;
+  createTask(config: TaskConfig, sessionId?: string): Promise<TaskInstance>;
   getTasks(): TaskInstance[];
   getAgentTasks(): TaskInstance[];
   getSessionTasks(sessionId: string): TaskInstance[];

@@ -12,6 +12,12 @@ import dotenv from "dotenv";
 import { OpenAIProvider, OllamaProvider, Embedding } from "./providers";
 import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
 import { logger } from "./utils/logger";
+import { 
+  PROVIDER_TYPES,
+  DEFAULT_OPENAI_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
+  DEFAULT_MODEL_CONFIGS
+} from './constants';
 
 // Load environment variables
 dotenv.config();
@@ -30,47 +36,7 @@ type DefaultModelConfigs = {
   ollama: OllamaDefaultConfigs;
 };
 
-// Default model configurations
-const DEFAULT_MODEL_CONFIGS: DefaultModelConfigs = {
-  openai: {
-    "gpt-4o": {
-      apiKey: process.env.OPENAI_API_KEY || '',
-      baseUrl: process.env.OPENAI_BASE_URL,
-      temperature: 0.7,
-      maxTokens: 4096
-    },
-    "gpt-4o-mini": {
-      apiKey: process.env.OPENAI_API_KEY || '',
-      baseUrl: process.env.OPENAI_BASE_URL,
-      temperature: 0.7,
-      maxTokens: 2048
-    },
-    "gpt-4": {
-      apiKey: process.env.OPENAI_API_KEY || '',
-      baseUrl: process.env.OPENAI_BASE_URL,
-      temperature: 0.7,
-      maxTokens: 4096
-    },
-    "gpt-3.5-turbo": {
-      apiKey: process.env.OPENAI_API_KEY || '',
-      baseUrl: process.env.OPENAI_BASE_URL,
-      temperature: 0.7,
-      maxTokens: 2048
-    }
-  },
-  ollama: {
-    "llama3": {
-      baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-      temperature: 0.7,
-      maxTokens: 2048
-    },
-    "mistral": {
-      baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-      temperature: 0.7,
-      maxTokens: 2048
-    }
-  }
-};
+// Using DEFAULT_MODEL_CONFIGS imported from constants
 
 // Provider factory
 class Provider implements ProviderInstance {

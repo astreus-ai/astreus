@@ -1,11 +1,18 @@
 import { v4 as uuidv4 } from "uuid";
-import { AgentConfig, AgentInstance, AgentFactory, Plugin, ProviderMessage, MemoryEntry, TaskManagerInstance, TaskConfig, TaskResult, ProviderModel, MemoryInstance } from "./types";
+import { AgentConfig, AgentInstance, AgentFactory, Plugin, ProviderMessage, MemoryEntry, TaskManagerInstance, TaskConfig, TaskResult, ProviderModel, MemoryInstance, TaskInstance, StructuredCompletionResponse } from "./types";
 import { createDatabase } from "./database";
 import { Embedding } from "./providers";
 import { createTaskManager } from "./tasks";
 import { PluginManager } from "./plugin";
 import { validateRequiredParams, validateRequiredParam } from "./utils/validation";
 import { logger } from "./utils/logger";
+import { 
+  DEFAULT_AGENT_NAME, 
+  DEFAULT_TEMPERATURE, 
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_TASK_CONCURRENCY
+} from "./constants";
 
 // Agent implementation
 class Agent implements AgentInstance {
@@ -20,7 +27,7 @@ class Agent implements AgentInstance {
     validateRequiredParam(config, "config", "Agent constructor");
     validateRequiredParams(
       config,
-      ["memory", "name"],
+      ["memory"],  // 'name' is optional now since we have a default
       "Agent constructor"
     );
     
@@ -48,7 +55,8 @@ class Agent implements AgentInstance {
     this.id = config.id || uuidv4();
     this.config = {
       ...config,
-      description: config.description || `Agent ${config.name}`,
+      name: config.name || DEFAULT_AGENT_NAME,
+      description: config.description || `Agent ${config.name || DEFAULT_AGENT_NAME}`,
       tools: config.tools || [],
       plugins: config.plugins || []
     };
@@ -59,7 +67,8 @@ class Agent implements AgentInstance {
     this.taskManager = createTaskManager({
       agentId: this.id,
       memory: this.memory,
-      database: this.config.database
+      database: this.config.database,
+      concurrency: DEFAULT_TASK_CONCURRENCY
     });
 
     // Initialize tools if provided
@@ -164,6 +173,8 @@ class Agent implements AgentInstance {
       metadata?: Record<string, unknown>; // Change from any to unknown
       embedding?: number[];
       useTaskSystem?: boolean;
+      temperature?: number;
+      maxTokens?: number;
     }
   ): Promise<string> {
     // Validate required parameters
@@ -175,11 +186,16 @@ class Agent implements AgentInstance {
     const opts = {
       metadata: options?.metadata || {},
       embedding: options?.embedding,
-      useTaskSystem: options?.useTaskSystem !== false  // Default to true unless explicitly disabled
+      useTaskSystem: options?.useTaskSystem !== false,  // Default to true unless explicitly disabled
+      temperature: options?.temperature ?? DEFAULT_TEMPERATURE,
+      maxTokens: options?.maxTokens ?? DEFAULT_MAX_TOKENS
     };
 
     // Set the current session ID in the task manager
     this.taskManager.setSessionId(sid);
+
+    // Get conversation history first 
+    const history = await this.memory.getBySession(sid);
 
     // Add message to memory
     await this.memory.add({
@@ -188,12 +204,18 @@ class Agent implements AgentInstance {
       userId,
       role: "user",
       content: message,
-      metadata: opts.metadata,
+      metadata: {
+        ...opts.metadata,
+        timestamp: new Date().toISOString(),
+        agentName: this.config.name,
+        useTaskSystem: opts.useTaskSystem,
+        conversationLength: history.length
+      },
       embedding: opts.embedding,
     });
 
-    // Get conversation history
-    const history = await this.memory.getBySession(sid);
+    // Update history with the new message
+    const updatedHistory = await this.memory.getBySession(sid);
 
     // Add system prompt
     if (this.config.systemPrompt) {
@@ -204,7 +226,7 @@ class Agent implements AgentInstance {
     }
 
     // Add conversation history
-    history.forEach((entry: MemoryEntry) => {
+    updatedHistory.forEach((entry: MemoryEntry) => {
       messages.push({
         role: entry.role as "system" | "user" | "assistant",
         content: entry.content,
@@ -232,7 +254,7 @@ class Agent implements AgentInstance {
       }
     }
 
-    let response: string;
+    let response: string | StructuredCompletionResponse;
 
     // Determine if we should use task-based approach
     if (opts.useTaskSystem && this.tools.size > 0) {
@@ -256,12 +278,14 @@ If no tasks are needed, respond with "NO_TASKS_NEEDED".`,
       ]);
 
       // Check if the analysis identified tasks
-      if (analysisResponse.includes("[") && analysisResponse.includes("]")) {
+      const responseText = typeof analysisResponse === 'string' ? analysisResponse : analysisResponse.content;
+      
+      if (responseText.includes("[") && responseText.includes("]")) {
         try {
           // Extract JSON array from the response
-          const jsonString = analysisResponse.substring(
-            analysisResponse.indexOf("["),
-            analysisResponse.lastIndexOf("]") + 1
+          const jsonString = responseText.substring(
+            responseText.indexOf("["),
+            responseText.lastIndexOf("]") + 1
           );
 
           // Parse the tasks
@@ -271,10 +295,11 @@ If no tasks are needed, respond with "NO_TASKS_NEEDED".`,
           const taskResults = await this.processTasks(taskConfigs, sid);
 
           // Generate response based on task results
-          response = await this.generateTaskResultResponse(
+          const taskResponse = await this.generateTaskResultResponse(
             taskResults,
             messages
           );
+          response = taskResponse;
         } catch (error) {
           logger.error("Error processing tasks:", error);
           // Fallback to standard completion if task processing fails
@@ -285,8 +310,13 @@ If no tasks are needed, respond with "NO_TASKS_NEEDED".`,
         response = await this.getModel().complete(messages);
       }
     } else {
-      // Standard completion without task system
-      response = await this.getModel().complete(messages);
+      // Regular chat completion
+      response = await this.getModel().complete(messages, {
+        tools: availableTools.length > 0 ? availableTools : undefined,
+        toolCalling: availableTools.length > 0,
+        temperature: opts.temperature,
+        maxTokens: opts.maxTokens
+      });
     }
 
     // Generate embedding for assistant response if needed
@@ -295,7 +325,9 @@ If no tasks are needed, respond with "NO_TASKS_NEEDED".`,
 
     if (enableEmbeddings && opts.embedding) {
       try {
-        assistantEmbedding = await Embedding.generateEmbedding(response);
+        // Convert response to string for embedding generation
+        const responseText = typeof response === 'string' ? response : response.content;
+        assistantEmbedding = await Embedding.generateEmbedding(responseText);
       } catch (error) {
         logger.warn(
           "Error generating embedding for assistant response:",
@@ -310,12 +342,21 @@ If no tasks are needed, respond with "NO_TASKS_NEEDED".`,
       sessionId: sid,
       userId,
       role: "assistant",
-      content: response,
-      metadata: opts.metadata,
+      content: typeof response === 'string' ? response : response.content,
+      metadata: {
+        ...opts.metadata,
+        timestamp: new Date().toISOString(),
+        agentName: this.config.name,
+        modelUsed: this.config.model?.name,
+        taskSystemUsed: opts.useTaskSystem,
+        temperature: opts.temperature,
+        responseLength: (typeof response === 'string' ? response : response.content).length
+      },
       embedding: assistantEmbedding,
     });
 
-    return response;
+    // Return the response (convert to string if it's a structured response)
+    return typeof response === 'string' ? response : response.content;
   }
 
   /**
@@ -366,7 +407,7 @@ If no tasks are needed, respond with "NO_TASKS_NEEDED".`,
     );
 
     // Ask the model to generate a response based on task results
-    const response = await this.getModel().complete([
+    const modelResponse = await this.getModel().complete([
       ...conversationMessages,
       {
         role: "system",
@@ -379,40 +420,35 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
       },
     ]);
 
-    return response;
+    // Convert response to string if it's a structured response
+    return typeof modelResponse === 'string' ? modelResponse : modelResponse.content;
   }
 
   /**
-   * Create and add a task to the task manager
+   * Create a task for this agent
+   * @param config Task configuration
+   * @param sessionId Optional session ID for the task
+   * @returns The created task
    */
-  createTask(config: TaskConfig, sessionId?: string) {
-    // Validate required parameters
-    validateRequiredParam(config, "config", "createTask");
-    validateRequiredParams(
-      config,
-      ["name", "description"],
-      "createTask"
-    );
-    
-    // If a task has plugin names that aren't strings, filter them out
-    if (config.plugins) {
-      const validPlugins = config.plugins.filter(plugin => typeof plugin === 'string');
-      if (validPlugins.length !== config.plugins.length) {
-        logger.warn(`Filtered out ${config.plugins.length - validPlugins.length} invalid plugins from task config`);
-        config.plugins = validPlugins;
-      }
-    }
-    
-    // Set the session ID for this task if provided
+  async createTask(config: TaskConfig, sessionId?: string): Promise<TaskInstance> {
+    // Set agent ID and session ID if not provided
+    const taskConfig = {
+      ...config,
+      agentId: config.agentId || this.id,
+      sessionId: config.sessionId || sessionId || "default",
+    };
+
+    // Ensure task manager has latest session ID
     if (sessionId) {
       this.taskManager.setSessionId(sessionId);
     }
-    
-    // Add agent's model to the task config for tool selection
+
+    // Use agent's model for the task if available
     const model = this.getModel();
+    this.taskManager.setProviderModel(model);
     
-    // Create the task (agent ID is already set in the task manager)
-    return this.taskManager.addExistingTask(config, model);
+    // Create the task
+    return this.taskManager.createTask(taskConfig);
   }
 
   /**
@@ -447,6 +483,61 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
     return await this.memory.getBySession(sessionId || "default");
   }
 
+  /**
+   * Get filtered chat history from memory
+   * @param sessionId Session ID to get history for
+   * @param filter Optional filter criteria for memory entries
+   * @returns Filtered memory entries
+   */
+  async getFilteredHistory(
+    sessionId?: string, 
+    filter?: {
+      roles?: string[];
+      limit?: number;
+      includeMetadata?: boolean;
+      fromDate?: Date;
+      toDate?: Date;
+    }
+  ): Promise<MemoryEntry[]> {
+    const sid = sessionId || "default";
+    let memories = await this.memory.getBySession(sid);
+    
+    // Apply role filter if specified
+    if (filter?.roles && filter.roles.length > 0) {
+      memories = memories.filter(entry => 
+        filter.roles!.includes(entry.role)
+      );
+    }
+    
+    // Apply date filters if specified
+    if (filter?.fromDate) {
+      memories = memories.filter(entry => 
+        entry.timestamp >= filter.fromDate!
+      );
+    }
+    
+    if (filter?.toDate) {
+      memories = memories.filter(entry => 
+        entry.timestamp <= filter.toDate!
+      );
+    }
+    
+    // If not including metadata, remove it from the results
+    if (filter?.includeMetadata === false) {
+      memories = memories.map(entry => ({
+        ...entry,
+        metadata: undefined
+      }));
+    }
+    
+    // Apply limit if specified
+    if (filter?.limit && filter.limit > 0) {
+      memories = memories.slice(0, filter.limit);
+    }
+    
+    return memories;
+  }
+
   async clearHistory(sessionId?: string): Promise<void> {
     return await this.memory.clear(sessionId || "default");
   }
@@ -472,7 +563,7 @@ export const createAgent: AgentFactory = async (config: AgentConfig) => {
   validateRequiredParam(config, "config", "createAgent");
   validateRequiredParams(
     config,
-    ["memory", "name"],
+    ["memory"],
     "createAgent"
   );
   

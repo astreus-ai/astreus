@@ -18,6 +18,7 @@ export interface TaskConfig {
   maxRetries?: number; // Maximum number of retries for the task
   agentId?: string; // ID of the agent that created this task
   sessionId?: string; // ID of the session this task belongs to
+  model?: ProviderModel; // Model to use for executing the task with tools
 }
 
 // Task result
@@ -43,6 +44,7 @@ export interface TaskInstance {
   sessionId?: string; // ID of the session this task belongs to
   contextId?: string;
   memory?: MemoryInstance;
+  model?: ProviderModel; // Provider model to use
 
   // Methods
   execute(input?: any): Promise<TaskResult>;
@@ -59,6 +61,7 @@ export interface TaskManagerConfig {
   sessionId?: string; // Default session ID for all tasks created by this manager
   memory?: MemoryInstance; // Memory instance for storing task contexts
   database?: DatabaseInstance; // Database instance for storage
+  providerModel?: ProviderModel; // Provider model to use for tasks
 }
 
 export interface TaskManagerInstance {
@@ -69,6 +72,9 @@ export interface TaskManagerInstance {
   cancelTask(id: string): boolean;
   waitForTasksLoaded(): Promise<void>;
   executeTask(id: string, input?: any): Promise<TaskResult>;
+  // Provider model methods
+  setProviderModel(model: ProviderModel): void;
+  getProviderModel(): ProviderModel | undefined;
   // Deprecated methods kept for backward compatibility
   getTasks(): TaskInstance[]; // Use getAllTasks() instead
   getTasksByAgent(agentId: string): TaskInstance[]; // Get tasks for a specific agent
