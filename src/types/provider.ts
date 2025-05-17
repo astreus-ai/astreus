@@ -53,12 +53,59 @@ export interface ProviderMessage {
   content: string;
 }
 
+// Provider tools
+export interface ProviderTool {
+  name: string;
+  description?: string;
+  parameters?: any; // Supports both array of parameters and structured JSONSchema
+}
+
+// Tool parameter for easier use
+export interface ProviderToolParameterSchema {
+  name: string;
+  type: "string" | "number" | "boolean" | "object" | "array" | "null" | "integer";
+  description?: string;
+  required?: boolean;
+  enum?: string[] | number[] | boolean[];
+  format?: string;
+}
+
+// Completion options for more advanced model calls
+export interface CompletionOptions {
+  tools?: ProviderTool[];
+  toolCalling?: boolean;
+  systemMessage?: string;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+// Provider tool call response structure
+export interface ProviderToolCall {
+  type: string;
+  id: string;
+  name: string;
+  arguments: Record<string, any>;
+}
+
+// Structured response with tool calls
+export interface StructuredCompletionResponse {
+  content: string;
+  tool_calls: ProviderToolCall[];
+}
+
 // Provider model instance
 export interface ProviderModel {
   provider: ProviderType;
   name: string;
-  config: ProviderModelConfig;
-  complete(messages: ProviderMessage[]): Promise<string>;
+  config: ModelConfig;
+  
+  /**
+   * Complete a prompt with messages
+   * @param messages Array of messages to send to the model
+   * @param options Additional options like tools to use
+   * @returns The completion text or structured response with tool calls
+   */
+  complete(messages: ProviderMessage[], options?: CompletionOptions): Promise<string | StructuredCompletionResponse>;
   generateEmbedding?(text: string): Promise<number[]>; // Optional method to generate embeddings
 }
 

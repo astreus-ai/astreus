@@ -1,12 +1,10 @@
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import logger from "../utils/logger";
+import { DEFAULT_OPENAI_EMBEDDING_MODEL } from "../constants";
 
 // Initialize environment variables
 dotenv.config();
-
-// Default embedding model to use - this model is more widely supported than the newer models
-const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 
 /**
  * Simple utility for generating embeddings without requiring provider setup
@@ -46,7 +44,7 @@ export class Embedding {
   static async generateEmbedding(
     text: string,
     model: string = process.env.OPENAI_EMBEDDING_MODEL ||
-      DEFAULT_EMBEDDING_MODEL
+      DEFAULT_OPENAI_EMBEDDING_MODEL
   ): Promise<number[]> {
     try {
       if (!text || typeof text !== "string") {

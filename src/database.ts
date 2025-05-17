@@ -13,6 +13,7 @@ import { createPostgresqlDatabase } from "./database/postgresql";
 import { v4 as uuidv4 } from "uuid";
 import { logger } from "./utils";
 import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
+import { DEFAULT_DB_PATH } from "./constants";
 
 // Load environment variables
 dotenv.config();
@@ -391,11 +392,7 @@ export const createDatabase: DatabaseFactory = async (
 
     if (dbType === "sqlite") {
       // For SQLite, create a default file-based database
-      const dbPath = process.env.DATABASE_PATH;
-      
-      if (!dbPath) {
-        throw new Error("DATABASE_PATH environment variable is not set");
-      }
+      const dbPath = process.env.DATABASE_PATH || DEFAULT_DB_PATH;
       
       // Create database directory if it doesn't exist (for file-based SQLite)
       const dir = path.dirname(dbPath);

@@ -9,6 +9,7 @@ import {
 import { Embedding } from "./providers";
 import { logger } from "./utils";
 import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
+import { DEFAULT_MEMORY_SIZE } from "./constants";
 
 /**
  * Memory manager implementation using database storage
@@ -30,7 +31,7 @@ export class MemoryManager implements MemoryInstance {
     this.config = {
       ...config,
       tableName: config.tableName || "memories",
-      maxEntries: config.maxEntries || 100,
+      maxEntries: config.maxEntries || DEFAULT_MEMORY_SIZE,
       enableEmbeddings: config.enableEmbeddings || false
     };
     
@@ -56,6 +57,7 @@ export class MemoryManager implements MemoryInstance {
       const fullConfig = {
         ...config,
         tableName: config.tableName || "memories",
+        maxEntries: config.maxEntries || DEFAULT_MEMORY_SIZE,
         enableEmbeddings: config.enableEmbeddings || false
       };
       

@@ -12,6 +12,12 @@ import {
 import { logger } from "../utils";
 import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
 import { createVectorDatabaseConnector, VectorDatabaseConnector } from "./vector-db";
+import { 
+  DEFAULT_CHUNK_SIZE, 
+  DEFAULT_CHUNK_OVERLAP, 
+  DEFAULT_VECTOR_SIMILARITY_THRESHOLD,
+  DEFAULT_MAX_RESULTS
+} from "../constants";
 
 /**
  * Vector-based RAG implementation
@@ -34,9 +40,9 @@ export class VectorRAG implements VectorRAGInstance {
     this.config = {
       ...config,
       tableName: config.tableName || "rag_chunks",
-      maxResults: config.maxResults || 10,
-      chunkSize: config.chunkSize || 1000,
-      chunkOverlap: config.chunkOverlap || 200,
+      maxResults: config.maxResults || DEFAULT_MAX_RESULTS,
+      chunkSize: config.chunkSize || DEFAULT_CHUNK_SIZE,
+      chunkOverlap: config.chunkOverlap || DEFAULT_CHUNK_OVERLAP,
       vectorDatabase: config.vectorDatabase || { type: VectorDatabaseType.SAME_AS_MAIN },
     };
     
@@ -487,7 +493,7 @@ export class VectorRAG implements VectorRAGInstance {
   async searchByVector(
     embedding: number[],
     limit?: number,
-    threshold: number = 0.7
+    threshold: number = DEFAULT_VECTOR_SIMILARITY_THRESHOLD
   ): Promise<RAGResult[]> {
     try {
       const maxResults = limit || this.config.maxResults || 10;

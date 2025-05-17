@@ -28,8 +28,6 @@ export class IntentRecognizer {
       return [];
     }
     
-    logger.info(`Using LLM to select tools for task "${taskName}"`);
-    
     // Prepare tool information for the model
     const toolsInfo = availableTools.map(tool => ({
       name: tool.name,

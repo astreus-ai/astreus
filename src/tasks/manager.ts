@@ -29,6 +29,7 @@ export class TaskManager implements TaskManagerInstance {
   private sessionId?: string;
   private memory?: MemoryInstance;
   private database?: DatabaseInstance;
+  private providerModel?: ProviderModel;
 
   /**
    * Create a new TaskManager instance
@@ -40,6 +41,7 @@ export class TaskManager implements TaskManagerInstance {
     this.sessionId = config?.sessionId;
     this.memory = config?.memory;
     this.database = config?.database;
+    this.providerModel = config?.providerModel;
 
     // Load existing tasks from the database
     this.loadTasksFromDatabase().catch((err) => {
@@ -76,6 +78,22 @@ export class TaskManager implements TaskManagerInstance {
         }
       }
       
+      // Determine which model to use, in order of preference:
+      // 1. Explicitly provided model parameter
+      // 2. Task's model (if task is a config with model)
+      // 3. TaskManager's providerModel
+      let taskModel = model;
+      if (!taskModel) {
+        if (task instanceof Task) {
+          taskModel = task.config.model;
+        } else if ('model' in task) {
+          taskModel = task.model;
+        }
+      }
+      if (!taskModel && this.providerModel) {
+        taskModel = this.providerModel;
+      }
+      
       // If this is not already a Task instance, create one
       const taskInstance =
         task instanceof Task
@@ -85,9 +103,10 @@ export class TaskManager implements TaskManagerInstance {
                 ...(task as TaskConfig),
                 agentId: task.agentId || this.agentId,
                 sessionId: task.sessionId || this.sessionId,
+                model: taskModel  // Pass the determined model to the task
               },
               this.memory,
-              model,
+              undefined,  // No need to pass model here as we already set it in config
               this.database
             );
 
@@ -168,15 +187,28 @@ export class TaskManager implements TaskManagerInstance {
    */
   public async createTask(config: TaskConfig, model?: ProviderModel): Promise<TaskInstance> {
     try {
+      // Determine which model to use, in order of preference:
+      // 1. Explicitly provided model parameter
+      // 2. Task's model (from config)
+      // 3. TaskManager's providerModel
+      let taskModel = model;
+      if (!taskModel && config.model) {
+        taskModel = config.model;
+      }
+      if (!taskModel && this.providerModel) {
+        taskModel = this.providerModel;
+      }
+      
       // Create task with the manager's agent and session IDs if not provided
       const updatedConfig = {
         ...config,
         agentId: config.agentId || this.agentId,
         sessionId: config.sessionId || this.sessionId,
+        model: taskModel
       };
 
       // Create the task with memory and database
-      const task = await Task.createTask(updatedConfig, this.memory, model, this.database);
+      const task = await Task.createTask(updatedConfig, this.memory, undefined, this.database);
 
       // Add task to manager
       this.addExistingTask(task);
@@ -402,6 +434,23 @@ export class TaskManager implements TaskManagerInstance {
       logger.error("Error setting memory for task manager:", error);
       throw error;
     }
+  }
+
+  /**
+   * Set the provider model to use for tasks
+   * @param model Provider model to use
+   */
+  public setProviderModel(model: ProviderModel): void {
+    this.providerModel = model;
+    logger.debug(`Task manager provider model set to ${model.name}`);
+  }
+
+  /**
+   * Get the current provider model
+   * @returns The current provider model or undefined
+   */
+  public getProviderModel(): ProviderModel | undefined {
+    return this.providerModel;
   }
 
   /**
