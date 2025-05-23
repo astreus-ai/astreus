@@ -61,22 +61,41 @@ export class MemoryManager implements MemoryInstance {
         enableEmbeddings: config.enableEmbeddings || false
       };
       
-      // Check if embeddings are enabled in the config
-      if (fullConfig.enableEmbeddings) {
-        logger.info("Initializing memory with embedding support");
+      // Ensure the memory table exists with proper schema
+      const { database, tableName } = fullConfig;
+      const hasTable = await database.knex.schema.hasTable(tableName);
+      
+      if (!hasTable) {
+        // Create the memory table with full schema
+        logger.info(`Creating memory table: ${tableName}`);
+        await database.knex.schema.createTable(tableName, (table) => {
+          table.string("id").primary();
+          table.string("agentId").notNullable().index();
+          table.string("sessionId").notNullable().index();
+          table.string("userId").nullable().index();
+          table.string("role").notNullable();
+          table.text("content").notNullable();
+          table.timestamp("timestamp").defaultTo(database.knex.fn.now());
+          table.json("embedding").nullable();
+          table.json("metadata");
+        });
+        logger.info(`Created memory table: ${tableName}`);
+      } else {
+        // Check if embeddings are enabled and ensure embedding column exists
+        if (fullConfig.enableEmbeddings) {
+          logger.info("Initializing memory with embedding support");
 
-        // Ensure the database has the embedding column
-        const { database, tableName } = fullConfig;
-        const hasEmbeddingColumn = await database.knex.schema.hasColumn(
-          tableName,
-          "embedding"
-        );
+          const hasEmbeddingColumn = await database.knex.schema.hasColumn(
+            tableName,
+            "embedding"
+          );
 
-        if (!hasEmbeddingColumn) {
-          logger.warn("Adding embedding column to memory table");
-          await database.knex.schema.table(tableName, (table) => {
-            table.json("embedding"); // Store as JSON to properly represent array structure
-          });
+          if (!hasEmbeddingColumn) {
+            logger.warn("Adding embedding column to memory table");
+            await database.knex.schema.table(tableName, (table) => {
+              table.json("embedding"); // Store as JSON to properly represent array structure
+            });
+          }
         }
       }
 
