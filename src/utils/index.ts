@@ -1,4 +1,3 @@
-
 export { 
   logger, 
   configure as configureLogger, 
@@ -8,3 +7,4 @@ export {
 
 
 export { validateRequiredParam, validateRequiredParams } from "./validation"; 
+export { createRAGTools } from "./rag-tools"; 
