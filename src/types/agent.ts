@@ -2,6 +2,7 @@ import { Plugin, ProviderModel, ProviderInstance } from ".";
 import { TaskConfig, TaskInstance, TaskResult } from "./task";
 import { MemoryInstance } from "./memory";
 import { DatabaseInstance } from "./database";
+import { RAGInstance } from "./rag";
 
 // Plugin instance interface for objects with getTools method
 export interface PluginWithTools {
@@ -31,6 +32,8 @@ export interface AgentConfig {
   tools?: Plugin[];
   /** Optional: Array of plugins the agent can use (plugins can provide multiple tools) */
   plugins?: (Plugin | PluginWithTools)[];
+  /** Optional: RAG instance for document retrieval and search */
+  rag?: RAGInstance;
 }
 
 // Agent instance
@@ -49,6 +52,7 @@ export interface AgentInstance {
   ): Promise<string>;
   getHistory(sessionId?: string): Promise<any[]>;
   clearHistory(sessionId?: string): Promise<void>;
+  getAvailableTools(): string[];
   addTool(tool: Plugin): void;
 
   // Task system methods

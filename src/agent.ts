@@ -6,6 +6,7 @@ import { createTaskManager } from "./tasks";
 import { PluginManager } from "./plugin";
 import { validateRequiredParams, validateRequiredParam } from "./utils/validation";
 import { logger } from "./utils/logger";
+import { createRAGTools } from "./utils/rag-tools";
 import { 
   DEFAULT_AGENT_NAME, 
   DEFAULT_TEMPERATURE, 
@@ -76,6 +77,15 @@ class Agent implements AgentInstance {
       this.config.tools.forEach((tool) => {
         this.tools.set(tool.name, tool);
       });
+    }
+
+    // Create RAG tools if RAG instance is provided
+    if (this.config.rag) {
+      const ragTools = createRAGTools(this.config.rag);
+      ragTools.forEach((tool) => {
+        this.tools.set(tool.name, tool);
+      });
+      logger.debug(`Added ${ragTools.length} RAG tools to agent ${this.config.name}`);
     }
 
     // Initialize plugins and register their tools if provided
@@ -540,6 +550,14 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
 
   async clearHistory(sessionId?: string): Promise<void> {
     return await this.memory.clear(sessionId || "default");
+  }
+
+  /**
+   * Get available tool names
+   * @returns Array of tool names available to the agent
+   */
+  getAvailableTools(): string[] {
+    return Array.from(this.tools.keys());
   }
 
   addTool(tool: Plugin): void {
