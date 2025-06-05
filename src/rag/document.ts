@@ -137,31 +137,14 @@ export class DocumentRAG implements DocumentRAGInstance {
       if (storeEmbeddings) {
         let embedding = document.embedding;
         
-        // Generate embedding if not provided but memory supports it
-        if (!embedding && memory && memory.searchByEmbedding) {
+        // Generate embedding if not provided
+        if (!embedding) {
           try {
-            // Create temporary memory entry to get embedding
-            const tempEntry = {
-              agentId: "rag_system",
-              sessionId: "document_embedding",
-              role: "user" as const,
-              content: document.content.substring(0, 8000), // Limit to avoid token limits
-              metadata: { source: "rag_document" },
-            };
+            // Use the Embedding utility directly
+            const { Embedding } = await import("../providers");
+            embedding = await Embedding.generateEmbedding(document.content.substring(0, 8000));
             
-            // Add to memory to get embedding
-            const tempId = await memory.add(tempEntry);
-            
-            // Retrieve the entry to get the embedding
-            const entries = await memory.getBySession("document_embedding", 1);
-            const entry = entries.find(e => e.id === tempId);
-            
-            if (entry && entry.embedding) {
-              embedding = entry.embedding;
-              
-              // Clean up temporary entry
-              await memory.clear("document_embedding");
-            }
+            logger.debug(`Generated embedding for document ${id} (${embedding.length} dimensions)`);
           } catch (embeddingError) {
             logger.warn("Error generating embedding for document:", embeddingError);
           }
@@ -263,36 +246,19 @@ export class DocumentRAG implements DocumentRAGInstance {
     validateRequiredParam(query, "query", "search");
     
     try {
-      const { memory, storeEmbeddings } = this.config;
+      const { storeEmbeddings } = this.config;
       
-      // Use vector search if embeddings and memory are available
-      if (storeEmbeddings && memory && memory.searchByEmbedding) {
+      // Use vector search if embeddings are available
+      if (storeEmbeddings) {
         try {
-          // Generate embedding for query
-          const tempEntry = {
-            agentId: "rag_system",
-            sessionId: "query_embedding",
-            role: "user" as const,
-            content: query,
-            metadata: { source: "rag_query" },
-          };
+          // Generate embedding for query using Embedding utility directly
+          const { Embedding } = await import("../providers");
+          const queryEmbedding = await Embedding.generateEmbedding(query);
           
-          // Add query to memory to get embedding
-          const tempId = await memory.add(tempEntry);
-          
-          // Retrieve the entry to get the embedding
-          const entries = await memory.getBySession("query_embedding", 1);
-          const entry = entries.find(e => e.id === tempId);
-          
-          if (entry && entry.embedding) {
-            // Clean up temporary entry
-            await memory.clear("query_embedding");
-            
-            // Search using the embedding
-            return this.searchWithEmbedding(entry.embedding, limit);
-          }
-        } catch (error) {
-          logger.warn("Error performing embedding search, falling back to keyword search:", error);
+          // Search using the embedding
+          return this.searchWithEmbedding(queryEmbedding, limit);
+        } catch (embeddingError) {
+          logger.warn("Error performing embedding search, falling back to keyword search:", embeddingError);
         }
       }
       

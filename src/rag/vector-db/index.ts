@@ -97,6 +97,8 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
         // Create vector table with proper schema
         await this.knex.schema.createTable(this.tableName, (table) => {
           table.string('id').primary();
+          table.string('documentId').notNullable();
+          table.text('content').notNullable();
           table.specificType('embedding', 'vector');
           table.jsonb('metadata');
           table.timestamp('created_at').defaultTo(this.knex.fn.now());
@@ -124,12 +126,19 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       await this.ensureConnection();
       
       // Convert vectors to pgvector format and prepare batch insert
-      const rows = vectors.map(({ id, vector, metadata }) => ({
-        id,
-        embedding: this.knex.raw(`'[${vector.join(',')}]'::vector`),
-        metadata: JSON.stringify(metadata),
-        created_at: new Date()
-      }));
+      const rows = vectors.map(({ id, vector, metadata }) => {
+        // Extract documentId and content from metadata for table schema
+        const { documentId, content, ...restMetadata } = metadata;
+        
+        return {
+          id,
+          documentId: documentId || 'unknown', // Provide default to prevent null constraint violation
+          content: content || '', // Provide default to prevent null constraint violation
+          embedding: this.knex.raw(`'[${vector.join(',')}]'::vector`),
+          metadata: JSON.stringify(restMetadata),
+          created_at: new Date()
+        };
+      });
       
       // Use batch insert for better performance
       const batchSize = 50;
@@ -260,11 +269,19 @@ class MainDatabaseVectorConnector extends BaseVectorDatabaseConnector {
   
   async addVectors(vectors: Array<{ id: string, vector: number[], metadata: Record<string, any> }>): Promise<void> {
     try {
-      const records = vectors.map(({ id, vector, metadata }) => ({
-        id,
-        embedding: JSON.stringify(vector),
-        metadata: JSON.stringify(metadata),
-      }));
+      const records = vectors.map(({ id, vector, metadata }) => {
+        // Extract documentId and content from metadata for table schema
+        const { documentId, content, ...restMetadata } = metadata;
+        
+        return {
+          id,
+          documentId: documentId || 'unknown', // Provide default to prevent null constraint violation
+          content: content || '', // Provide default to prevent null constraint violation
+          embedding: JSON.stringify(vector),
+          metadata: JSON.stringify(restMetadata),
+          createdAt: new Date()
+        };
+      });
       
       // Use batch insert for better performance
       const batchSize = 50;
@@ -287,12 +304,53 @@ class MainDatabaseVectorConnector extends BaseVectorDatabaseConnector {
       
       // Calculate cosine similarity for each vector
       const results = rows
-        .map((row: { id: string, embedding: string }) => {
-          const storedVector = JSON.parse(row.embedding);
-          const similarity = this.calculateCosineSimilarity(vector, storedVector);
-          return { id: row.id, similarity };
+        .map((row: { id: string, embedding: string | any[] }) => {
+          try {
+            let storedVector: number[];
+            
+            // Handle different embedding data types
+            if (!row.embedding) {
+              logger.warn(`Empty embedding for vector ${row.id}, skipping`);
+              return null;
+            }
+            
+            // If embedding is already an array (parsed by database driver)
+            if (Array.isArray(row.embedding)) {
+              storedVector = row.embedding;
+            }
+            // If embedding is a string, parse it
+            else if (typeof row.embedding === 'string') {
+              if (row.embedding.trim() === '') {
+                logger.warn(`Empty embedding string for vector ${row.id}, skipping`);
+                return null;
+              }
+              storedVector = JSON.parse(row.embedding);
+            }
+            // If embedding is an object, try to extract array
+            else if (typeof row.embedding === 'object') {
+              storedVector = row.embedding;
+            }
+            else {
+              logger.warn(`Unknown embedding type for vector ${row.id}, skipping`);
+              return null;
+            }
+            
+            // Validate that we have a valid array
+            if (!Array.isArray(storedVector) || storedVector.length === 0) {
+              logger.warn(`Invalid embedding format for vector ${row.id}, skipping`);
+              return null;
+            }
+            
+            const similarity = this.calculateCosineSimilarity(vector, storedVector);
+            return { id: row.id, similarity };
+          } catch (parseError) {
+            logger.warn(`Failed to parse embedding for vector ${row.id}:`, parseError);
+            return null;
+          }
         })
-        .filter((result: { similarity: number }) => result.similarity >= threshold)
+        .filter((result): result is { id: string, similarity: number } => 
+          result !== null && result.similarity >= threshold
+        )
         .sort((a: { similarity: number }, b: { similarity: number }) => b.similarity - a.similarity)
         .slice(0, limit);
       
@@ -386,7 +444,9 @@ export function createVectorDatabaseConnector(
     if (!database) {
       throw new Error("Database instance is required when using SAME_AS_MAIN vector database type");
     }
-    return new MainDatabaseVectorConnector({ type: VectorDatabaseType.SAME_AS_MAIN }, database);
+    // Use the provided config instead of creating a new one
+    const mainDbConfig = config || { type: VectorDatabaseType.SAME_AS_MAIN };
+    return new MainDatabaseVectorConnector(mainDbConfig, database);
   }
   
   // Create the appropriate connector based on type

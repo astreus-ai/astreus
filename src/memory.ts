@@ -107,8 +107,8 @@ export class MemoryManager implements MemoryInstance {
   }
 
   /**
-   * Add an entry to memory
-   * @param entry The memory entry without ID or timestamp
+   * Add a new memory entry
+   * @param entry Memory entry to add (without id and timestamp)
    * @returns Promise resolving to the ID of the new entry
    */
   async add(entry: Omit<MemoryEntry, "id" | "timestamp">): Promise<string> {
@@ -121,7 +121,7 @@ export class MemoryManager implements MemoryInstance {
     );
     
     try {
-      const { database, tableName } = this.config;
+      const { database, tableName, enableEmbeddings } = this.config;
 
       // Generate ID and timestamp
       const id = uuidv4();
@@ -129,6 +129,22 @@ export class MemoryManager implements MemoryInstance {
 
       // Create a copy to avoid modifying the original
       const entryToInsert = { ...entry };
+
+      // Validate and normalize the role for OpenRouter compatibility
+      entryToInsert.role = this.validateRole(entryToInsert.role);
+
+      // Generate embedding if enabled and not provided
+      if (enableEmbeddings && !entryToInsert.embedding && entryToInsert.content) {
+        try {
+          logger.debug(`Generating embedding for memory entry ${id}`);
+          const generatedEmbedding = await Embedding.generateEmbedding(entryToInsert.content);
+          entryToInsert.embedding = generatedEmbedding;
+          logger.debug(`Generated embedding for memory entry ${id} (${generatedEmbedding.length} dimensions)`);
+        } catch (embeddingError) {
+          logger.warn(`Failed to generate embedding for memory entry ${id}:`, embeddingError);
+          // Continue without embedding rather than failing the entire operation
+        }
+      }
 
       // Prepare entry for database insertion with proper JSON serialization
       const dbEntry = {
@@ -162,7 +178,7 @@ export class MemoryManager implements MemoryInstance {
 
       // Store in database
       await database.getTable(tableName!).insert(dbEntry);
-      logger.debug(`Added memory entry ${id}`);
+      logger.debug(`Added memory entry ${id}${entryToInsert.embedding ? ' with embedding' : ''} with role: ${entryToInsert.role}`);
 
       return id;
     } catch (error) {
@@ -533,9 +549,7 @@ export class MemoryManager implements MemoryInstance {
       }
 
       // Just a simple summary for now - could be enhanced with AI summarization
-      const summary = `Conversation with ${
-        memories.length
-      } messages starting at ${memories[0].timestamp.toISOString()}.`;
+      const summary = `Conversation with ${memories.length} messages starting at ${memories[0].timestamp.toISOString()}.`;
       
       logger.debug(`Generated summary for session ${sessionId}`);
       return summary;
@@ -579,10 +593,16 @@ export class MemoryManager implements MemoryInstance {
 
   // Add a helper method to validate role values
   private validateRole(role: string): MemoryEntry['role'] {
-    const validRoles: MemoryEntry['role'][] = ['system', 'user', 'assistant', 'task_context'];
+    const validRoles: MemoryEntry['role'][] = ['system', 'user', 'assistant', 'task_context', 'task_event', 'task_tool', 'task_result'];
+    
+    // For OpenRouter compatibility, convert task_* roles to user
+    if (role.startsWith('task_')) {
+      return 'user';
+    }
+    
     return validRoles.includes(role as MemoryEntry['role']) 
       ? (role as MemoryEntry['role']) 
-      : 'system'; // Default to system if invalid
+      : 'user'; // Default to user instead of system for better OpenRouter compatibility
   }
 }
 

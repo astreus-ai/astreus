@@ -329,6 +329,85 @@ If no tasks are needed, respond with "NO_TASKS_NEEDED".`,
       });
     }
 
+    // Handle tool execution if the response contains tool calls
+    if (typeof response === 'object' && response.tool_calls && Array.isArray(response.tool_calls)) {
+      logger.debug(`Agent ${this.id} received ${response.tool_calls.length} tool calls to execute`);
+      
+      const toolResults = [];
+      for (const toolCall of response.tool_calls) {
+        try {
+          if (toolCall.type === 'function' && toolCall.name) {
+            logger.debug(`Executing tool: ${toolCall.name} with arguments:`, toolCall.arguments);
+            
+            // Find the tool to execute
+            const tool = this.tools.get(toolCall.name);
+            if (tool && tool.execute) {
+              // Execute the tool
+              const result = await tool.execute(toolCall.arguments || {});
+              
+              toolResults.push({
+                name: toolCall.name,
+                arguments: toolCall.arguments,
+                result: result,
+                success: true
+              });
+              
+              logger.debug(`Tool ${toolCall.name} executed successfully`);
+            } else {
+              logger.warn(`Tool ${toolCall.name} not found or not executable`);
+              toolResults.push({
+                name: toolCall.name,
+                arguments: toolCall.arguments,
+                error: `Tool ${toolCall.name} not found or not executable`,
+                success: false
+              });
+            }
+          }
+        } catch (error) {
+          logger.error(`Error executing tool ${toolCall.name}:`, error);
+          toolResults.push({
+            name: toolCall.name,
+            arguments: toolCall.arguments,
+            error: error instanceof Error ? error.message : String(error),
+            success: false
+          });
+        }
+      }
+      
+      // Generate a final response based on tool results
+      if (toolResults.length > 0) {
+        try {
+          logger.debug(`Generating final response based on ${toolResults.length} tool results`);
+          
+          const toolResultsMessage = {
+            role: "system" as const,
+            content: `You called the following tools and got these results:
+${toolResults.map(tr => `Tool: ${tr.name}
+Arguments: ${JSON.stringify(tr.arguments)}
+Result: ${tr.success ? JSON.stringify(tr.result) : 'ERROR: ' + tr.error}`).join('\n\n')}
+
+Based on these tool results, generate a helpful response to the user. Be natural and conversational - don't mention the technical details of the tool calls.`
+          };
+          
+          // Call the model again with the tool results to generate the final response
+          const finalResponse = await this.getModel().complete([
+            ...messages,
+            toolResultsMessage
+          ]);
+          
+          // Update response to the final result
+          response = typeof finalResponse === 'string' ? finalResponse : finalResponse.content;
+          
+          logger.debug(`Generated final response after tool execution: ${response.length} characters`);
+        } catch (error) {
+          logger.error('Error generating final response from tool results:', error);
+          // Fallback to original content plus tool results summary
+          const originalContent = typeof response === 'string' ? response : response.content;
+          response = `${originalContent}\n\nTool execution completed with ${toolResults.filter(r => r.success).length} successful results.`;
+        }
+      }
+    }
+
     // Generate embedding for assistant response if needed
     let assistantEmbedding: number[] | undefined = undefined;
     const enableEmbeddings = this.memory.config?.enableEmbeddings;

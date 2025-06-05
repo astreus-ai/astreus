@@ -1,4 +1,3 @@
-
 export { OpenAIProvider, createOpenAIConfig } from "./openai";
 
 export { OllamaProvider, createOllamaConfig } from "./ollama";
@@ -38,6 +37,18 @@ export const createProvider = (config: Record<string, unknown>): ProviderInstanc
       
       getEmbeddingModel(): string {
         return config.embeddingModel as string || 'text-embedding-3-small';
+      },
+
+      // Add generateEmbedding method for RAG support
+      async generateEmbedding(text: string): Promise<number[] | null> {
+        try {
+          const { Embedding } = await import('./embedding');
+          const embeddingModel = config.embeddingModel as string || 'text-embedding-3-small';
+          return await Embedding.generateEmbedding(text, embeddingModel);
+        } catch (error) {
+          console.error('Error generating embedding:', error);
+          return null;
+        }
       }
     };
   } else if (config.type === 'ollama') {

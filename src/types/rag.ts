@@ -1,5 +1,6 @@
 import { DatabaseInstance } from "./database";
 import { MemoryInstance } from "./memory";
+import { ProviderInstance } from "./provider";
 
 // Vector database type enum
 export enum VectorDatabaseType {
@@ -60,6 +61,8 @@ export interface RAGConfig {
   database: DatabaseInstance;
   /** Optional: Memory instance for storing vector embeddings */
   memory?: MemoryInstance;
+  /** Optional: Provider instance for generating embeddings */
+  provider?: ProviderInstance;
   /** Optional: Custom table name for storing data */
   tableName?: string;
   /** Optional: Maximum number of results to retrieve */

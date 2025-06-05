@@ -46,6 +46,14 @@ export class VectorRAG implements VectorRAGInstance {
       vectorDatabase: config.vectorDatabase || { type: VectorDatabaseType.SAME_AS_MAIN },
     };
     
+    // Ensure vectorDatabase config has the correct tableName
+    if (this.config.vectorDatabase && this.config.vectorDatabase.type === VectorDatabaseType.SAME_AS_MAIN) {
+      this.config.vectorDatabase.options = {
+        ...this.config.vectorDatabase.options,
+        tableName: this.config.tableName
+      };
+    }
+    
     // Initialize vector database connector
     this.vectorDatabaseConnector = createVectorDatabaseConnector(
       this.config.vectorDatabase,
@@ -180,7 +188,8 @@ export class VectorRAG implements VectorRAGInstance {
       const chunks = this.chunkDocument(documentId, document);
       
       // Generate embeddings for chunks and store them
-      if (this.config.memory && this.config.memory.searchByEmbedding) {
+      // Prefer provider over memory for embedding generation
+      if (this.config.provider && this.config.provider.generateEmbedding) {
         // Process chunks in batches to avoid overloading
         const batchSize = 10;
         for (let i = 0; i < chunks.length; i += batchSize) {
@@ -191,9 +200,21 @@ export class VectorRAG implements VectorRAGInstance {
             })
           );
         }
-        logger.debug(`Added ${chunks.length} chunks with embeddings for document ${documentId}`);
+        logger.debug(`Added ${chunks.length} chunks with provider-based embeddings for document ${documentId}`);
+      } else if (this.config.memory && this.config.memory.searchByEmbedding) {
+        // Fallback to memory if provider is not available
+        const batchSize = 10;
+        for (let i = 0; i < chunks.length; i += batchSize) {
+          const batch = chunks.slice(i, i + batchSize);
+          await Promise.all(
+            batch.map(async (chunk) => {
+              await this.storeChunkWithEmbedding(chunk);
+            })
+          );
+        }
+        logger.debug(`Added ${chunks.length} chunks with memory-based embeddings for document ${documentId}`);
       } else {
-        logger.warn("No memory with embedding support provided, chunks stored without embeddings");
+        logger.warn("No provider or memory with embedding support provided, chunks stored without embeddings");
         // Store chunks without embeddings
         if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
           for (const chunk of chunks) {
@@ -266,38 +287,59 @@ export class VectorRAG implements VectorRAGInstance {
   private async storeChunkWithEmbedding(
     chunk: Omit<Chunk, "id" | "embedding">
   ): Promise<string> {
-    const { database, tableName, memory } = this.config;
+    const { database, tableName, provider, memory } = this.config;
     
     try {
-      // Get embedding using memory provider
+      // Get embedding using provider or memory
       let embedding: number[] = [];
       
-      if (memory && memory.searchByEmbedding) {
-        // Use the first part of the chunk to generate embedding
-        // Limit to 8000 characters to avoid token limits
-        const textForEmbedding = chunk.content.substring(0, 8000);
-        
-        // Add temporary entry to memory to get embedding
-        const tempEntry = {
-          agentId: "rag_system",
-          sessionId: "embedding_generation",
-          role: "user" as const,
-          content: textForEmbedding,
-          metadata: { source: "rag_chunk" },
-        };
-        
-        // Use memory's implementation to get embedding
-        const tempId = await memory.add(tempEntry);
-        const tempMemory = await memory.getById(tempId);
-        
-        if (tempMemory && tempMemory.embedding) {
-          embedding = tempMemory.embedding;
-        } else {
-          logger.warn("Failed to generate embedding for chunk");
+      // Prefer provider over memory for embedding generation
+      if (provider && provider.generateEmbedding) {
+        try {
+          // Use the first part of the chunk to generate embedding
+          // Limit to 8000 characters to avoid token limits
+          const textForEmbedding = chunk.content.substring(0, 8000);
+          
+          // Use provider directly for embedding generation
+          const embeddingResult = await provider.generateEmbedding(textForEmbedding);
+          embedding = embeddingResult || [];
+          
+          logger.debug(`Generated embedding using provider (${embedding.length} dimensions)`);
+        } catch (embeddingError) {
+          logger.warn("Failed to generate embedding using provider, trying memory fallback:", embeddingError);
+          
+          // Fallback to memory if provider fails
+          if (memory && memory.searchByEmbedding) {
+            try {
+              const textForEmbedding = chunk.content.substring(0, 8000);
+              const { Embedding } = await import("../providers");
+              embedding = await Embedding.generateEmbedding(textForEmbedding);
+              logger.debug(`Generated embedding using memory fallback (${embedding.length} dimensions)`);
+            } catch (memoryError) {
+              logger.warn("Failed to generate embedding using memory fallback:", memoryError);
+              embedding = [];
+            }
+          } else {
+            embedding = [];
+          }
         }
-        
-        // Clean up temporary memory entry
-        await memory.delete(tempId);
+      } else if (memory && memory.searchByEmbedding) {
+        try {
+          // Use the first part of the chunk to generate embedding
+          // Limit to 8000 characters to avoid token limits
+          const textForEmbedding = chunk.content.substring(0, 8000);
+          
+          // Use the Embedding utility directly instead of memory to avoid complexity
+          const { Embedding } = await import("../providers");
+          embedding = await Embedding.generateEmbedding(textForEmbedding);
+          
+          logger.debug(`Generated embedding using memory (${embedding.length} dimensions)`);
+        } catch (embeddingError) {
+          logger.warn("Failed to generate embedding using memory:", embeddingError);
+          embedding = [];
+        }
+      } else {
+        logger.warn("No provider or memory with embedding support provided for chunk storage");
       }
       
       // Generate a unique ID for the chunk
@@ -439,10 +481,10 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
-   * Search for relevant documents based on a query
+   * Search for similar documents using text query
    * @param query The search query
    * @param limit Maximum number of results to return
-   * @returns Promise resolving to an array of search results
+   * @returns Promise resolving to array of search results
    */
   async search(query: string, limit?: number): Promise<RAGResult[]> {
     // Validate required parameters
@@ -451,32 +493,64 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const maxResults = limit || this.config.maxResults || 10;
       
-      // Use semantic search if memory with embedding support is available
-      if (this.config.memory && this.config.memory.searchByEmbedding) {
-        // Generate embedding for query
-        const queryTempEntry = {
-          agentId: "rag_system",
-          sessionId: "query_embedding",
-          role: "user" as const,
-          content: query,
-          metadata: { source: "query" },
-        };
-        
-        // Get query embedding
-        const queryTempId = await this.config.memory.add(queryTempEntry);
-        const queryMemory = await this.config.memory.getById(queryTempId);
-        
-        // Clean up temporary entry
-        await this.config.memory.delete(queryTempId);
-        
-        if (queryMemory && queryMemory.embedding) {
-          // Use embedding for semantic search
-          return this.searchByVector(queryMemory.embedding, maxResults);
+      // Use semantic search if provider or memory with embedding support is available
+      if (this.config.provider && this.config.provider.generateEmbedding) {
+        try {
+          logger.debug(`Generating embedding for search query using provider: "${query}"`);
+          // Generate embedding for query using provider directly
+          const queryEmbedding = await this.config.provider.generateEmbedding(query);
+          
+          if (queryEmbedding && queryEmbedding.length > 0) {
+            logger.debug(`Generated embedding with ${queryEmbedding.length} dimensions`);
+            // Use embedding for semantic search
+            return this.searchByVector(queryEmbedding, maxResults);
+          } else {
+            logger.warn("Provider returned empty embedding, falling back to keyword search");
+            return this.searchByKeyword(query, maxResults);
+          }
+        } catch (embeddingError) {
+          logger.warn("Failed to generate embedding using provider, trying memory fallback:", embeddingError);
+          
+          // Fallback to memory if provider fails
+          if (this.config.memory && this.config.memory.searchByEmbedding) {
+            try {
+              logger.debug(`Generating embedding for search query using memory fallback: "${query}"`);
+              const { Embedding } = await import("../providers");
+              const queryEmbedding = await Embedding.generateEmbedding(query);
+              
+              logger.debug(`Generated embedding with ${queryEmbedding.length} dimensions`);
+              return this.searchByVector(queryEmbedding, maxResults);
+            } catch (memoryError) {
+              logger.warn("Failed to generate embedding using memory fallback, using keyword search:", memoryError);
+              return this.searchByKeyword(query, maxResults);
+            }
+          } else {
+            // Fall back to keyword search
+            logger.debug("No memory fallback available, using keyword search");
+            return this.searchByKeyword(query, maxResults);
+          }
         }
+      } else if (this.config.memory && this.config.memory.searchByEmbedding) {
+        try {
+          logger.debug(`Generating embedding for search query using memory: "${query}"`);
+          // Generate embedding for query using Embedding utility directly
+          const { Embedding } = await import("../providers");
+          const queryEmbedding = await Embedding.generateEmbedding(query);
+          
+          logger.debug(`Generated embedding with ${queryEmbedding.length} dimensions`);
+          
+          // Use embedding for semantic search
+          return this.searchByVector(queryEmbedding, maxResults);
+        } catch (embeddingError) {
+          logger.warn("Failed to generate embedding using memory, falling back to keyword search:", embeddingError);
+          // Fall back to keyword search
+          return this.searchByKeyword(query, maxResults);
+        }
+      } else {
+        // Fall back to keyword search
+        logger.debug("No provider or memory with embedding support, using keyword search");
+        return this.searchByKeyword(query, maxResults);
       }
-      
-      // Fall back to keyword search
-      return this.searchByKeyword(query, maxResults);
     } catch (error) {
       logger.error("Error searching in vector RAG:", error);
       throw error;
@@ -498,6 +572,8 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const maxResults = limit || this.config.maxResults || 10;
       
+      logger.debug(`Searching by vector with ${embedding.length} dimensions, limit: ${maxResults}`);
+      
       // Use the vector database connector to search for similar vectors
       const similarVectors = await this.vectorDatabaseConnector.searchVectors(
         embedding, 
@@ -505,9 +581,13 @@ export class VectorRAG implements VectorRAGInstance {
         threshold
       );
       
+      logger.debug(`Found ${similarVectors.length} similar vectors`);
+      
       // If using the same database, we need to fetch the detailed data
       if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
         const { database, tableName } = this.config;
+        
+        logger.debug(`Fetching chunk details from table: ${tableName}`);
         
         // Get detailed information for each chunk
         const chunkDetails = await database.knex(tableName!)
@@ -517,15 +597,28 @@ export class VectorRAG implements VectorRAGInstance {
           )
           .select("*");
         
+        logger.debug(`Retrieved ${chunkDetails.length} chunk details`);
+        
         // Map to the expected result format
         return chunkDetails.map((chunk: any) => {
           const similarityResult = similarVectors.find((v) => v.id === chunk.id);
-          return {
-            content: chunk.content,
-            metadata: JSON.parse(chunk.metadata),
-            similarity: similarityResult?.similarity || 0,
-            sourceId: chunk.id,
-          };
+          try {
+            const metadata = typeof chunk.metadata === 'string' ? JSON.parse(chunk.metadata) : chunk.metadata;
+            return {
+              content: chunk.content,
+              metadata: metadata,
+              similarity: similarityResult?.similarity || 0,
+              sourceId: chunk.id,
+            };
+          } catch (parseError) {
+            logger.warn(`Error parsing metadata for chunk ${chunk.id}, using empty object:`, parseError);
+            return {
+              content: chunk.content,
+              metadata: {},
+              similarity: similarityResult?.similarity || 0,
+              sourceId: chunk.id,
+            };
+          }
         });
       } else {
         // For external vector databases, we need to map the results 
@@ -596,11 +689,23 @@ export class VectorRAG implements VectorRAGInstance {
       .limit(maxResults)
       .select("*");
     
-    return results.map((result: any) => ({
-      content: result.content,
-      metadata: JSON.parse(result.metadata),
-      sourceId: result.id,
-    }));
+    return results.map((result: any) => {
+      try {
+        const metadata = typeof result.metadata === 'string' ? JSON.parse(result.metadata) : result.metadata;
+        return {
+          content: result.content,
+          metadata: metadata,
+          sourceId: result.id,
+        };
+      } catch (parseError) {
+        logger.warn(`Error parsing metadata for chunk ${result.id}, using empty object:`, parseError);
+        return {
+          content: result.content,
+          metadata: {},
+          sourceId: result.id,
+        };
+      }
+    });
   }
 
   /**
