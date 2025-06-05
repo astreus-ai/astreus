@@ -3,6 +3,7 @@ import path from 'path';
 import { PDFDocument } from 'pdf-lib';
 import { Document } from '../types';
 import { logger } from '../utils';
+import { v4 as uuidv4 } from 'uuid';
 
 export interface PDFParseOptions {
   /**
@@ -49,6 +50,11 @@ export interface PDFParseResult {
     numPages: number;
     creationDate?: Date;
   };
+  
+  /**
+   * Unique identifier for this PDF document
+   */
+  documentId: string;
 }
 
 /**
@@ -63,6 +69,9 @@ export async function parsePDF(
 ): Promise<PDFParseResult> {
   try {
     logger.debug(`Parsing PDF: ${filePath}`);
+    
+    // Generate a unique document ID for this PDF
+    const documentId = uuidv4();
     
     // Set default options
     const opts: Required<PDFParseOptions> = {
@@ -105,9 +114,12 @@ export async function parsePDF(
       allText = `PDF document with ${numPages} pages. Text extraction failed.`;
     }
     
-    // Create base metadata
+    // Create base metadata with document identification
     const baseMetadata = {
       source: path.basename(filePath),
+      documentId: documentId,  // Add document ID to all chunks
+      fileName: path.basename(filePath),
+      filePath: filePath,
       ...opts.metadata,
     };
     
@@ -122,11 +134,12 @@ export async function parsePDF(
     // Get documents based on splitting strategy
     const documents = await splitPDFContent(allText, numPages, opts, baseMetadata);
     
-    logger.debug(`PDF parsed successfully: ${documents.length} chunks created`);
+    logger.debug(`PDF parsed successfully: ${documents.length} chunks created for document ${documentId}`);
     
     return {
       documents,
       pdfMetadata,
+      documentId,
     };
   } catch (error) {
     logger.error(`Error parsing PDF ${filePath}:`, error);
