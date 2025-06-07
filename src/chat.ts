@@ -518,7 +518,7 @@ Based on these tool results, generate a helpful response to the user. Be natural
   } = {}): Promise<ChatSummary[]> {
     let query = this.config.database.knex(this.tableName)
       .select('*')
-      .orderBy('updatedAt', 'desc');
+      .orderBy('"updatedAt"', 'desc');
 
     if (params.userId) {
       query = query.where({ userId: params.userId });
@@ -564,8 +564,8 @@ Based on these tool results, generate a helpful response to the user. Be natural
     let query = this.config.database.knex(this.tableName)
       .select('*')
       .where('title', 'like', `%${params.query}%`)
-      .orWhere('lastMessage', 'like', `%${params.query}%`)
-      .orderBy('updatedAt', 'desc');
+      .orWhere('"lastMessage"', 'like', `%${params.query}%`)
+      .orderBy('"updatedAt"', 'desc');
 
     if (params.userId) {
       query = query.andWhere({ userId: params.userId });
@@ -625,7 +625,7 @@ Based on these tool results, generate a helpful response to the user. Be natural
         lastMessageAt: now,
         updatedAt: now,
         lastMessage: params.content.substring(0, 200), // Store first 200 chars
-        messageCount: this.config.database.knex.raw('messageCount + 1')
+        messageCount: this.config.database.knex.raw('"messageCount" + 1')
       });
 
     // Auto-generate title if this is the first user message and no title exists
@@ -699,7 +699,7 @@ Based on these tool results, generate a helpful response to the user. Be natural
         this.config.database.knex.raw('COUNT(*) as totalChats'),
         this.config.database.knex.raw('SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as activeChats', ['active']),
         this.config.database.knex.raw('SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as archivedChats', ['archived']),
-        this.config.database.knex.raw('SUM(messageCount) as totalMessages')
+        this.config.database.knex.raw('SUM("messageCount") as totalMessages')
       )
       .first();
 
