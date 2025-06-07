@@ -6,3 +6,4 @@ export * from "./plugin";
 export * from "./provider";
 export * from "./task";
 export * from "./rag";
+export * from "./chat";

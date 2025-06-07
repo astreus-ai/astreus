@@ -7,6 +7,7 @@ import {
   DatabaseInstance,
   DatabaseFactory,
   TableOperations,
+  TableNamesConfig,
 } from "./types";
 import { createSqliteDatabase } from "./database/sqlite";
 import { createPostgresqlDatabase } from "./database/postgresql";
@@ -42,6 +43,7 @@ class Database implements DatabaseInstance {
   public knex: Knex;
   public config: DatabaseConfig;
   private initialized: boolean = false;
+  private tableNames: Required<TableNamesConfig>;
 
   constructor(config: DatabaseConfig) {
     // Validate required parameters
@@ -53,6 +55,13 @@ class Database implements DatabaseInstance {
     );
     
     this.config = config;
+    
+    // Set table names with defaults
+    this.tableNames = {
+      agents: config.tableNames?.agents || 'agents',
+      users: config.tableNames?.users || 'users',
+      tasks: config.tableNames?.tasks || 'tasks'
+    };
 
     // Initialize knex instance based on database type
     if (config.type === "sqlite") {
@@ -106,14 +115,11 @@ class Database implements DatabaseInstance {
   }
 
   /**
-   * Initialize the database schema with all required tables
+   * Initialize database schema
    * This will create tables if they don't exist and migrate legacy data if needed
    */
   async initializeSchema(): Promise<void> {
     try {
-      // Create memories table if it doesn't exist
-      await this.initializeMemoriesTable();
-      
       // Migrate and remove legacy tables
       await this.migrateLegacyTables();
       
@@ -132,35 +138,10 @@ class Database implements DatabaseInstance {
   }
 
   /**
-   * Initialize the memories table
-   */
-  private async initializeMemoriesTable(): Promise<void> {
-    const hasMemoriesTable = await this.knex.schema.hasTable("memories");
-    if (!hasMemoriesTable) {
-      await this.knex.schema.createTable(
-        "memories",
-        (table: Knex.TableBuilder) => {
-          table.string("id").primary();
-          table.string("agentId").notNullable().index();
-          table.string("sessionId").notNullable().index();
-          table.string("userId").nullable().index();
-          table.string("role").notNullable();
-          table.text("content").notNullable();
-          table.timestamp("timestamp").defaultTo(this.knex.fn.now());
-          table.json("embedding").nullable();
-          table.json("metadata");
-        }
-      );
-      logger.database("InitializeSchema", "Created memories table");
-    } else {
-      logger.database("InitializeSchema", "Using existing memories table");
-    }
-  }
-
-  /**
    * Migrate legacy tables and remove deprecated ones
+   * @param memoriesTableName Optional table name for memories (defaults to 'memories')
    */
-  private async migrateLegacyTables(): Promise<void> {
+  private async migrateLegacyTables(memoriesTableName: string = 'memories'): Promise<void> {
     // Check for task_contexts table (deprecated) and migrate data
     const hasTaskContextsTable = await this.knex.schema.hasTable("task_contexts");
     if (hasTaskContextsTable) {
@@ -169,23 +150,29 @@ class Database implements DatabaseInstance {
         if (contextRecords.length > 0) {
           logger.database("InitializeSchema", `Migrating ${contextRecords.length} task contexts to memory system...`);
 
-          // Batch insert to memories table
-          const memoryRecords = contextRecords.map((record: any) => ({
-            id: uuidv4(),
-            agentId: "system",
-            sessionId: record.sessionId,
-            userId: "",
-            role: "task_context",
-            content: record.data,
-            timestamp: record.updatedAt || new Date(),
-            metadata: JSON.stringify({
-              contextType: "task_execution_context",
-              migratedFrom: "task_contexts",
-            }),
-          }));
+          // Check if memories table exists before migration
+          const hasMemoriesTable = await this.knex.schema.hasTable(memoriesTableName);
+          if (!hasMemoriesTable) {
+            logger.warn(`Memories table '${memoriesTableName}' does not exist. Skipping task contexts migration.`);
+          } else {
+            // Batch insert to memories table
+            const memoryRecords = contextRecords.map((record: any) => ({
+              id: uuidv4(),
+              agentId: "system",
+              sessionId: record.sessionId,
+              userId: "",
+              role: "task_context",
+              content: record.data,
+              timestamp: record.updatedAt || new Date(),
+              metadata: JSON.stringify({
+                contextType: "task_execution_context",
+                migratedFrom: "task_contexts",
+              }),
+            }));
 
-          await this.knex("memories").insert(memoryRecords);
-          logger.database("InitializeSchema", "Task contexts migration completed successfully");
+            await this.knex(memoriesTableName).insert(memoryRecords);
+            logger.database("InitializeSchema", "Task contexts migration completed successfully");
+          }
         }
       } catch (migrationError) {
         logger.error("Error migrating task contexts:", migrationError);
@@ -201,10 +188,10 @@ class Database implements DatabaseInstance {
    * Initialize the agents table
    */
   private async initializeAgentsTable(): Promise<void> {
-    const hasAgentsTable = await this.knex.schema.hasTable("agents");
+    const hasAgentsTable = await this.knex.schema.hasTable(this.tableNames.agents);
     if (!hasAgentsTable) {
       await this.knex.schema.createTable(
-        "agents",
+        this.tableNames.agents,
         (table: Knex.TableBuilder) => {
           table.string("id").primary();
           table.string("name").notNullable();
@@ -216,9 +203,9 @@ class Database implements DatabaseInstance {
           table.json("configuration").nullable();
         }
       );
-      logger.database("InitializeSchema", "Created agents table");
+      logger.database("InitializeSchema", `Created ${this.tableNames.agents} table`);
     } else {
-      logger.database("InitializeSchema", "Using existing agents table");
+      logger.database("InitializeSchema", `Using existing ${this.tableNames.agents} table`);
     }
   }
 
@@ -226,10 +213,10 @@ class Database implements DatabaseInstance {
    * Initialize the users table
    */
   private async initializeUsersTable(): Promise<void> {
-    const hasUsersTable = await this.knex.schema.hasTable("users");
+    const hasUsersTable = await this.knex.schema.hasTable(this.tableNames.users);
     if (!hasUsersTable) {
       await this.knex.schema.createTable(
-        "users",
+        this.tableNames.users,
         (table: Knex.TableBuilder) => {
           table.string("id").primary();
           table.string("username").notNullable().unique();
@@ -237,9 +224,9 @@ class Database implements DatabaseInstance {
           table.json("preferences").nullable();
         }
       );
-      logger.database("InitializeSchema", "Created users table");
+      logger.database("InitializeSchema", `Created ${this.tableNames.users} table`);
     } else {
-      logger.database("InitializeSchema", "Using existing users table");
+      logger.database("InitializeSchema", `Using existing ${this.tableNames.users} table`);
     }
   }
 
@@ -247,10 +234,10 @@ class Database implements DatabaseInstance {
    * Initialize the tasks table
    */
   private async initializeTasksTable(): Promise<void> {
-    const hasTasksTable = await this.knex.schema.hasTable("tasks");
+    const hasTasksTable = await this.knex.schema.hasTable(this.tableNames.tasks);
     if (!hasTasksTable) {
       await this.knex.schema.createTable(
-        "tasks",
+        this.tableNames.tasks,
         (table: Knex.TableBuilder) => {
           table.string("id").primary();
           table.string("name").notNullable();
@@ -269,9 +256,9 @@ class Database implements DatabaseInstance {
           table.string("contextId").nullable().index();
         }
       );
-      logger.database("InitializeSchema", "Created tasks table");
+      logger.database("InitializeSchema", `Created ${this.tableNames.tasks} table`);
     } else {
-      logger.database("InitializeSchema", "Using existing tasks table");
+      logger.database("InitializeSchema", `Using existing ${this.tableNames.tasks} table`);
     }
   }
 
@@ -378,6 +365,14 @@ class Database implements DatabaseInstance {
    */
   isInitialized(): boolean {
     return this.initialized;
+  }
+
+  /**
+   * Get configured table names
+   * @returns Object containing all configured table names
+   */
+  getTableNames(): Required<TableNamesConfig> {
+    return this.tableNames;
   }
 }
 

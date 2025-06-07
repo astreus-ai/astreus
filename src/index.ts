@@ -7,12 +7,14 @@ import { createMemory } from './memory';
 import { createDatabase } from './database';
 import { createRAG, parsePDF, parseDirectoryOfPDFs } from './rag';
 import { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv } from './rag/vector-db';
+import { createChat } from './chat';
 
 export { createAgent };
 export { createProvider };
 export { createMemory };
 export { createDatabase };
 export { createRAG };
+export { createChat };
 export { parsePDF, parseDirectoryOfPDFs };
 export { logger };
 export { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv };

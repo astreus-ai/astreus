@@ -123,7 +123,8 @@ class Agent implements AgentInstance {
     try {
       // Use database from config if provided, otherwise create a new one
       const db = this.config.database || await createDatabase();
-      const agentsTable = db.getTable("agents");
+      const tableNames = db.getTableNames();
+      const agentsTable = db.getTable(tableNames.agents);
 
       // Check if agent already exists
       const existingAgent = await agentsTable.findOne({ id: this.id });

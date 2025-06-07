@@ -71,6 +71,49 @@ export class OpenAIProvider implements ProviderModel {
       throw error;
     }
   }
+
+  async streamComplete(
+    messages: ProviderMessage[], 
+    options?: CompletionOptions,
+    onChunk?: (chunk: string) => void
+  ): Promise<string> {
+    try {
+      // Prepare messages
+      const formattedMessages = this.prepareMessages(messages, options?.systemMessage);
+      
+      // Build request options with streaming enabled
+      const requestOptions = this.buildRequestOptions(formattedMessages, options);
+      requestOptions.stream = true;
+      
+      // Log request info
+      logger.debug(`OpenAI streaming request: model=${this.name}`, { 
+        messages: formattedMessages.length, 
+        hasTools: !!requestOptions.tools,
+        toolCount: requestOptions.tools?.length || 0 
+      });
+      
+      // Make streaming API request
+      const stream = await this.client.chat.completions.create(requestOptions) as any;
+      
+      let fullResponse = '';
+      
+      // Process streaming response
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content || '';
+        if (content) {
+          fullResponse += content;
+          if (onChunk) {
+            onChunk(fullResponse);
+          }
+        }
+      }
+      
+      return fullResponse;
+    } catch (error) {
+      this.handleError(error);
+      throw error;
+    }
+  }
   
   private prepareMessages(messages: ProviderMessage[], systemMessage?: string) {
     // Convert to OpenAI message format
