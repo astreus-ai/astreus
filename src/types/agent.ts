@@ -3,6 +3,7 @@ import { TaskConfig, TaskInstance, TaskResult } from "./task";
 import { MemoryInstance } from "./memory";
 import { DatabaseInstance } from "./database";
 import { RAGInstance } from "./rag";
+import { ChatInstance } from "./chat";
 
 // Plugin instance interface for objects with getTools method
 export interface PluginWithTools {
@@ -34,33 +35,20 @@ export interface AgentConfig {
   plugins?: (Plugin | PluginWithTools)[];
   /** Optional: RAG instance for document retrieval and search */
   rag?: RAGInstance;
+  /** Optional: Chat instance for chat management and metadata */
+  chat?: ChatInstance;
 }
 
 // Agent instance
 export interface AgentInstance {
   id: string;
   config: AgentConfig;
-  chat(
-    message: string,
-    sessionId?: string,
-    userId?: string,
-    options?: {
-      metadata?: Record<string, any>;
-      embedding?: number[];
-      useTaskSystem?: boolean;
-    }
-  ): Promise<string>;
-  getHistory(sessionId?: string): Promise<any[]>;
-  clearHistory(sessionId?: string): Promise<void>;
   getAvailableTools(): string[];
   addTool(tool: Plugin): void;
 
-  // Task system methods
-  createTask(config: TaskConfig, sessionId?: string): Promise<TaskInstance>;
-  getTasks(): TaskInstance[];
-  getAgentTasks(): TaskInstance[];
-  getSessionTasks(sessionId: string): TaskInstance[];
-  runTasks(taskIds?: string[]): Promise<Map<string, TaskResult>>;
+  // Chat system methods
+  getChatManager(): ChatInstance | undefined;
+  setChatManager(chatManager: ChatInstance): void;
 }
 
 // Agent factory function type

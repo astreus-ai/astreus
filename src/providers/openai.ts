@@ -71,7 +71,7 @@ export class OpenAIProvider implements ProviderModel {
       throw error;
     }
   }
-
+  
   async streamComplete(
     messages: ProviderMessage[], 
     options?: CompletionOptions,
