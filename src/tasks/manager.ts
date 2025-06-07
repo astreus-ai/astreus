@@ -257,7 +257,8 @@ export class TaskManager implements TaskManagerInstance {
       try {
         // Use database from config if provided, otherwise create a new one
         const db = this.database || await createDatabase();
-        const tasksTable = db.getTable("tasks");
+        const tableNames = db.getTableNames();
+        const tasksTable = db.getTable(tableNames.tasks);
 
         // Get all tasks or filter by session/agent ID if provided
         const filter: any = {};

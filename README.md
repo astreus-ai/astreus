@@ -11,6 +11,7 @@ An AI Agent Framework designed to help you easily build, deploy, and manage inte
 - **Unified Agent API**: Create and manage AI agents with a consistent interface 
 - **Multi-Provider Support**: Works with OpenAI and Ollama models out of the box
 - **Memory Management**: Built-in conversation history with vector search capabilities
+- **Chat Management**: Advanced chat system with metadata, search, and organization
 - **Task Orchestration**: Break complex requests into manageable sub-tasks
 - **Plugin System**: Extend agent capabilities with custom tools
 - **Persistence Layer**: Automatic storage using SQLite or PostgreSQL
@@ -169,6 +170,71 @@ const agent = await createAgent({
 // The agent will now be able to reference document content when answering questions
 const response = await agent.chat("What does the document say about climate change?");
 ```
+
+### Chat Management System
+
+Astreus includes a powerful chat management system that works seamlessly with the existing memory system:
+
+```typescript
+import { createChat } from '@astreus-ai/astreus';
+
+// Create a chat management instance
+const chat = await createChat({
+  database: db,
+  memory: memory,
+  tableName: 'chats',
+  maxChats: 100,
+  autoGenerateTitles: true
+});
+
+// Create a new chat
+const newChat = await chat.createChat({
+  agentId: 'my-agent',
+  userId: 'user123',
+  title: 'Export Regulations Discussion'
+});
+
+// Add messages to the chat
+await chat.addMessage({
+  chatId: newChat.id,
+  agentId: 'my-agent',
+  userId: 'user123',
+  role: 'user',
+  content: 'What are the export regulations for electronics?'
+});
+
+// Get chat messages (integrates with memory system)
+const messages = await chat.getMessages(newChat.id);
+
+// List user's chats
+const userChats = await chat.listChats({
+  userId: 'user123',
+  status: 'active'
+});
+
+// Search through chats
+const searchResults = await chat.searchChats({
+  query: 'electronics',
+  userId: 'user123'
+});
+
+// Get chat statistics
+const stats = await chat.getChatStats({
+  userId: 'user123'
+});
+
+// Archive or delete chats
+await chat.archiveChat(newChat.id);
+await chat.deleteChat(newChat.id);
+```
+
+The chat system provides:
+- **Metadata Management**: Store chat titles, status, and custom metadata
+- **Auto-generated Titles**: Automatically create titles from first user message
+- **Search Capabilities**: Search through chat titles and content
+- **Status Management**: Active, archived, and deleted chat states
+- **Statistics**: Get insights about chat usage
+- **Memory Integration**: Chat IDs are compatible with session IDs in memory
 
 ### Using the Task System
 

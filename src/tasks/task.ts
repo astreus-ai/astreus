@@ -154,7 +154,8 @@ export class Task implements TaskInstance {
         try {
           // Use database from instance if provided, otherwise create a new one
           const db = this.database || await createDatabase();
-          const tasksTable = db.getTable("tasks");
+          const tableNames = db.getTableNames();
+          const tasksTable = db.getTable(tableNames.tasks);
 
           // Check if task exists
           const existingTask = await tasksTable.findOne({ id: this.id });

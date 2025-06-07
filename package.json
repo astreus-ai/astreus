@@ -1,6 +1,6 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "AI Agent Framework",
   "author": "Astreus Team",
   "license": "MIT",
@@ -19,7 +19,9 @@
     "agent",
     "framework",
     "llm",
-    "typescript"
+    "typescript",
+    "chat",
+    "memory"
   ],
   "dependencies": {
     "dotenv": "^16.5.0",
