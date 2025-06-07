@@ -75,13 +75,14 @@ export class ChatManager implements ChatInstance {
     await this.config.database.knex(this.tableName).insert({
       id: chatId,
       title: params.title,
-      userId: params.userId,
-      agentId: params.agentId,
+      "userId": params.userId,
+      "agentId": params.agentId,
       status: 'active',
-      createdAt: now,
-      updatedAt: now,
-      lastMessageAt: null,
-      messageCount: 0,
+      "createdAt": now,
+      "updatedAt": now,
+      "lastMessageAt": null,
+      "messageCount": 0,
+      "lastMessage": null,
       metadata: params.metadata ? JSON.stringify(params.metadata) : null
     });
 
@@ -459,13 +460,13 @@ Based on these tool results, generate a helpful response to the user. Be natural
     return {
       id: result.id,
       title: result.title,
-      userId: result.userId,
-      agentId: result.agentId,
+      userId: result["userId"],
+      agentId: result["agentId"],
       status: result.status,
-      createdAt: new Date(result.createdAt),
-      updatedAt: new Date(result.updatedAt),
-      lastMessageAt: result.lastMessageAt ? new Date(result.lastMessageAt) : undefined,
-      messageCount: result.messageCount,
+      createdAt: new Date(result["createdAt"]),
+      updatedAt: new Date(result["updatedAt"]),
+      lastMessageAt: result["lastMessageAt"] ? new Date(result["lastMessageAt"]) : undefined,
+      messageCount: result["messageCount"],
       metadata: result.metadata ? JSON.parse(result.metadata) : undefined
     };
   }
@@ -474,7 +475,7 @@ Based on these tool results, generate a helpful response to the user. Be natural
     validateRequiredParam(chatId, "chatId", "updateChat");
 
     const updateData: any = {
-      updatedAt: new Date()
+      "updatedAt": new Date()
     };
 
     if (updates.title !== undefined) updateData.title = updates.title;
@@ -521,11 +522,11 @@ Based on these tool results, generate a helpful response to the user. Be natural
       .orderBy('"updatedAt"', 'desc');
 
     if (params.userId) {
-      query = query.where({ userId: params.userId });
+      query = query.where({ "userId": params.userId });
     }
 
     if (params.agentId) {
-      query = query.where({ agentId: params.agentId });
+      query = query.where({ "agentId": params.agentId });
     }
 
     if (params.status) {
@@ -542,14 +543,14 @@ Based on these tool results, generate a helpful response to the user. Be natural
     return results.map(row => ({
       id: row.id,
       title: row.title,
-      userId: row.userId,
-      agentId: row.agentId,
+      userId: row["userId"],
+      agentId: row["agentId"],
       status: row.status,
-      lastMessage: row.lastMessage,
-      lastMessageAt: row.lastMessageAt ? new Date(row.lastMessageAt) : undefined,
-      messageCount: row.messageCount,
-      createdAt: new Date(row.createdAt),
-      updatedAt: new Date(row.updatedAt)
+      lastMessage: row["lastMessage"],
+      lastMessageAt: row["lastMessageAt"] ? new Date(row["lastMessageAt"]) : undefined,
+      messageCount: row["messageCount"],
+      createdAt: new Date(row["createdAt"]),
+      updatedAt: new Date(row["updatedAt"])
     }));
   }
 
@@ -565,14 +566,14 @@ Based on these tool results, generate a helpful response to the user. Be natural
       .select('*')
       .where('title', 'like', `%${params.query}%`)
       .orWhere('lastMessage', 'like', `%${params.query}%`)
-      .orderBy('updatedAt', 'desc');
+      .orderBy('"updatedAt"', 'desc');
 
     if (params.userId) {
-      query = query.andWhere({ userId: params.userId });
+      query = query.andWhere({ "userId": params.userId });
     }
 
     if (params.agentId) {
-      query = query.andWhere({ agentId: params.agentId });
+      query = query.andWhere({ "agentId": params.agentId });
     }
 
     const limit = params.limit || this.maxChats;
@@ -583,14 +584,14 @@ Based on these tool results, generate a helpful response to the user. Be natural
     return results.map(row => ({
       id: row.id,
       title: row.title,
-      userId: row.userId,
-      agentId: row.agentId,
+      userId: row["userId"],
+      agentId: row["agentId"],
       status: row.status,
-      lastMessage: row.lastMessage,
-      lastMessageAt: row.lastMessageAt ? new Date(row.lastMessageAt) : undefined,
-      messageCount: row.messageCount,
-      createdAt: new Date(row.createdAt),
-      updatedAt: new Date(row.updatedAt)
+      lastMessage: row["lastMessage"],
+      lastMessageAt: row["lastMessageAt"] ? new Date(row["lastMessageAt"]) : undefined,
+      messageCount: row["messageCount"],
+      createdAt: new Date(row["createdAt"]),
+      updatedAt: new Date(row["updatedAt"])
     }));
   }
 
@@ -622,10 +623,10 @@ Based on these tool results, generate a helpful response to the user. Be natural
     await this.config.database.knex(this.tableName)
       .where({ id: params.chatId })
       .update({
-        lastMessageAt: now,
-        updatedAt: now,
-        lastMessage: params.content.substring(0, 200), // Store first 200 chars
-        messageCount: this.config.database.knex.raw('messageCount + 1')
+        "lastMessageAt": now,
+        "updatedAt": now,
+        "lastMessage": params.content.substring(0, 200), // Store first 200 chars
+        "messageCount": this.config.database.knex.raw('"messageCount" + 1')
       });
 
     // Auto-generate title if this is the first user message and no title exists
@@ -668,10 +669,10 @@ Based on these tool results, generate a helpful response to the user. Be natural
     await this.config.database.knex(this.tableName)
       .where({ id: chatId })
       .update({
-        messageCount: 0,
-        lastMessage: null,
-        lastMessageAt: null,
-        updatedAt: new Date()
+        "messageCount": 0,
+        "lastMessage": null,
+        "lastMessageAt": null,
+        "updatedAt": new Date()
       });
   }
 
@@ -687,11 +688,11 @@ Based on these tool results, generate a helpful response to the user. Be natural
     let query = this.config.database.knex(this.tableName);
 
     if (params.userId) {
-      query = query.where({ userId: params.userId });
+      query = query.where({ "userId": params.userId });
     }
 
     if (params.agentId) {
-      query = query.where({ agentId: params.agentId });
+      query = query.where({ "agentId": params.agentId });
     }
 
     const stats = await query
@@ -699,7 +700,7 @@ Based on these tool results, generate a helpful response to the user. Be natural
         this.config.database.knex.raw('COUNT(*) as totalChats'),
         this.config.database.knex.raw('SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as activeChats', ['active']),
         this.config.database.knex.raw('SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as archivedChats', ['archived']),
-        this.config.database.knex.raw('SUM(messageCount) as totalMessages')
+        this.config.database.knex.raw('SUM("messageCount") as totalMessages')
       )
       .first();
 
@@ -782,26 +783,26 @@ export async function createChat(config: ChatConfig): Promise<ChatInstance> {
 
 // Helper function to ensure chats table exists
 async function ensureChatsTable(database: any, tableName: string) {
-  const hasTable = await database.knex.schema.hasTable(tableName);
+  const exists = await database.knex.schema.hasTable(tableName);
   
-  if (!hasTable) {
+  if (!exists) {
     await database.knex.schema.createTable(tableName, (table: any) => {
       table.string('id').primary();
       table.string('title').nullable();
-      table.string('userId').nullable();
-      table.string('agentId').notNullable();
-      table.enu('status', ['active', 'archived', 'deleted']).defaultTo('active');
-      table.timestamp('createdAt').defaultTo(database.knex.fn.now());
-      table.timestamp('updatedAt').defaultTo(database.knex.fn.now());
-      table.timestamp('lastMessageAt').nullable();
-      table.integer('messageCount').defaultTo(0);
-      table.text('lastMessage').nullable();
-      table.text('metadata').nullable(); // JSON string
+      table.string('"userId"').nullable();
+      table.string('"agentId"').notNullable();
+      table.string('status').defaultTo('active');
+      table.timestamp('"createdAt"').defaultTo(database.knex.fn.now());
+      table.timestamp('"updatedAt"').defaultTo(database.knex.fn.now());
+      table.timestamp('"lastMessageAt"').nullable();
+      table.integer('"messageCount"').defaultTo(0);
+      table.string('"lastMessage"').nullable();
+      table.text('metadata').nullable();
       
-      // Indexes for better performance
-      table.index(['userId', 'status', 'updatedAt'], 'chats_userid_status_updated_idx');
-      table.index(['agentId', 'status', 'updatedAt'], 'chats_agentid_status_updated_idx');
-      table.index(['status', 'updatedAt'], 'chats_status_updated_idx');
+      // Add indexes for better performance
+      table.index(['"userId"', 'status', '"updatedAt"'], 'chats_userid_status_updated_idx');
+      table.index(['"agentId"', 'status', '"updatedAt"'], 'chats_agentid_status_updated_idx');
+      table.index(['status', '"updatedAt"'], 'chats_status_updated_idx');
     });
     
     logger.info(`Created chats table: ${tableName}`);
