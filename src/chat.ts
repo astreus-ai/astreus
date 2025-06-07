@@ -790,7 +790,7 @@ async function ensureChatsTable(database: any, tableName: string) {
       table.string('title').nullable();
       table.string('userId').nullable();
       table.string('agentId').notNullable();
-      table.enum('status', ['active', 'archived', 'deleted']).defaultTo('active');
+      table.enu('status', ['active', 'archived', 'deleted']).defaultTo('active');
       table.timestamp('createdAt').defaultTo(database.knex.fn.now());
       table.timestamp('updatedAt').defaultTo(database.knex.fn.now());
       table.timestamp('lastMessageAt').nullable();
@@ -798,13 +798,15 @@ async function ensureChatsTable(database: any, tableName: string) {
       table.text('lastMessage').nullable();
       table.text('metadata').nullable(); // JSON string
       
-      // Indexes
-      table.index(['userId', 'status', 'updatedAt']);
-      table.index(['agentId', 'status', 'updatedAt']);
-      table.index(['status', 'updatedAt']);
+      // Indexes for better performance
+      table.index(['userId', 'status', 'updatedAt'], 'chats_userid_status_updated_idx');
+      table.index(['agentId', 'status', 'updatedAt'], 'chats_agentid_status_updated_idx');
+      table.index(['status', 'updatedAt'], 'chats_status_updated_idx');
     });
     
     logger.info(`Created chats table: ${tableName}`);
+  } else {
+    logger.debug(`Chats table ${tableName} already exists`);
   }
 }
 
