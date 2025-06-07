@@ -155,23 +155,23 @@ class Database implements DatabaseInstance {
           if (!hasMemoriesTable) {
             logger.warn(`Memories table '${memoriesTableName}' does not exist. Skipping task contexts migration.`);
           } else {
-            // Batch insert to memories table
-            const memoryRecords = contextRecords.map((record: any) => ({
-              id: uuidv4(),
-              agentId: "system",
-              sessionId: record.sessionId,
-              userId: "",
-              role: "task_context",
-              content: record.data,
-              timestamp: record.updatedAt || new Date(),
-              metadata: JSON.stringify({
-                contextType: "task_execution_context",
-                migratedFrom: "task_contexts",
-              }),
-            }));
+          // Batch insert to memories table
+          const memoryRecords = contextRecords.map((record: any) => ({
+            id: uuidv4(),
+            agentId: "system",
+            sessionId: record.sessionId,
+            userId: "",
+            role: "task_context",
+            content: record.data,
+            timestamp: record.updatedAt || new Date(),
+            metadata: JSON.stringify({
+              contextType: "task_execution_context",
+              migratedFrom: "task_contexts",
+            }),
+          }));
 
             await this.knex(memoriesTableName).insert(memoryRecords);
-            logger.database("InitializeSchema", "Task contexts migration completed successfully");
+          logger.database("InitializeSchema", "Task contexts migration completed successfully");
           }
         }
       } catch (migrationError) {

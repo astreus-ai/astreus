@@ -61,6 +61,24 @@ export interface ChatInstance {
     metadata?: Record<string, unknown>;
   }): Promise<ChatMetadata>;
   
+  createChatWithMessage(params: {
+    chatId?: string;
+    userId?: string;
+    agentId: string;
+    title?: string;
+    metadata?: Record<string, unknown>;
+    // Chat functionality parameters
+    message: string;
+    model: any; // ProviderModel
+    systemPrompt?: string;
+    tools?: any[]; // Plugin[]
+    taskManager?: any; // TaskManagerInstance
+    embedding?: number[];
+    useTaskSystem?: boolean;
+    temperature?: number;
+    maxTokens?: number;
+  }): Promise<string>;
+  
   getChat(chatId: string): Promise<ChatMetadata | null>;
   updateChat(chatId: string, updates: Partial<ChatMetadata>): Promise<void>;
   deleteChat(chatId: string): Promise<void>;
@@ -106,6 +124,24 @@ export interface ChatInstance {
     archivedChats: number;
     totalMessages: number;
   }>;
+
+  // Agent integration - advanced chat with AI model
+  chat(params: {
+    message: string;
+    chatId: string;
+    agentId: string;
+    userId?: string;
+    model: any; // ProviderModel
+    systemPrompt?: string;
+    tools?: any[]; // Plugin[]
+    taskManager?: any; // TaskManagerInstance
+    chatTitle?: string;
+    metadata?: Record<string, unknown>;
+    embedding?: number[];
+    useTaskSystem?: boolean;
+    temperature?: number;
+    maxTokens?: number;
+  }): Promise<string>;
 }
 
 // Chat factory function type
