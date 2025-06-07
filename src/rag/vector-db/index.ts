@@ -101,7 +101,7 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
           table.text('content').notNullable();
           table.specificType('embedding', 'vector');
           table.jsonb('metadata');
-          table.timestamp('created_at').defaultTo(this.knex.fn.now());
+          table.timestamp('createdAt').defaultTo(this.knex.fn.now());
         });
         
         // Create index for vector similarity search
@@ -136,7 +136,7 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
           content: content || '', // Provide default to prevent null constraint violation
           embedding: this.knex.raw(`'[${vector.join(',')}]'::vector`),
           metadata: JSON.stringify(restMetadata),
-          created_at: new Date()
+          createdAt: new Date()
         };
       });
       
