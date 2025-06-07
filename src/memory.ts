@@ -516,8 +516,9 @@ export class MemoryManager implements MemoryInstance {
   }
 
   /**
-   * Clear memories for a specific session
-   * @param sessionId The session ID to clear memories for
+   * Clear all entries for a session
+   * @param sessionId The session ID to clear entries for
+   * @returns Promise that resolves when clearing is complete
    */
   async clear(sessionId: string): Promise<void> {
     // Validate required parameters
@@ -525,10 +526,16 @@ export class MemoryManager implements MemoryInstance {
     
     try {
       const { database, tableName } = this.config;
-      const count = await database.knex(tableName!).where({ sessionId }).delete();
-      logger.info(`Cleared ${count} memories for session ${sessionId}`);
+
+      // Delete all entries for the session
+      const result = await database
+        .knex(tableName!)
+        .where({ sessionId })
+        .delete();
+
+      logger.debug(`Cleared ${result} entries for session ${sessionId}`);
     } catch (error) {
-      logger.error(`Error clearing memories for session ${sessionId}:`, error);
+      logger.error(`Error clearing entries for session ${sessionId}:`, error);
       throw error;
     }
   }
@@ -603,6 +610,53 @@ export class MemoryManager implements MemoryInstance {
     return validRoles.includes(role as MemoryEntry['role']) 
       ? (role as MemoryEntry['role']) 
       : 'user'; // Default to user instead of system for better OpenRouter compatibility
+  }
+
+  /**
+   * List all sessions for a specific agent
+   * @param agentId The agent ID to list sessions for
+   * @param limit Maximum number of sessions to return
+   * @returns Promise resolving to array of session summaries
+   */
+  async listSessions(agentId: string, limit?: number): Promise<{
+    sessionId: string;
+    lastMessage?: string;
+    messageCount: number;
+    lastActivity: Date;
+    metadata?: Record<string, unknown>;
+  }[]> {
+    validateRequiredParam(agentId, "agentId", "listSessions");
+    
+    try {
+      const { database, tableName, maxEntries } = this.config;
+
+      // Get session summaries with aggregated data
+      const sessions = await database
+        .knex(tableName!)
+        .select('sessionId')
+        .select(database.knex.raw('COUNT(*) as "messageCount"'))
+        .select(database.knex.raw('MAX("timestamp") as "lastActivity"'))
+        .select(database.knex.raw('(SELECT content FROM ' + tableName + ' WHERE "sessionId" = t."sessionId" AND "agentId" = ? ORDER BY "timestamp" DESC LIMIT 1) as "lastMessage"', [agentId]))
+        .select(database.knex.raw('(SELECT metadata FROM ' + tableName + ' WHERE "sessionId" = t."sessionId" AND "agentId" = ? ORDER BY "timestamp" DESC LIMIT 1) as "metadata"', [agentId]))
+        .from(tableName + ' as t')
+        .where({ agentId })
+        .groupBy('sessionId')
+        .orderBy('lastActivity', 'desc')
+        .limit(limit || maxEntries!);
+
+      logger.debug(`Retrieved ${sessions.length} sessions for agent ${agentId}`);
+
+      return sessions.map((session: any) => ({
+        sessionId: session.sessionId,
+        lastMessage: session.lastMessage || undefined,
+        messageCount: parseInt(session.messageCount) || 0,
+        lastActivity: session.lastActivity instanceof Date ? session.lastActivity : new Date(session.lastActivity),
+        metadata: session.metadata ? (typeof session.metadata === 'string' ? JSON.parse(session.metadata) : session.metadata) : undefined
+      }));
+    } catch (error) {
+      logger.error(`Error listing sessions for agent ${agentId}:`, error);
+      throw error;
+    }
   }
 }
 

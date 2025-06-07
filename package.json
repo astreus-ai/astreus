@@ -1,7 +1,7 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.1.9",
-  "description": "AI Agent Framework",
+  "version": "0.2.1",
+  "description": "AI Agent Framework with Chat Management",
   "author": "Astreus Team",
   "license": "MIT",
   "type": "module",
