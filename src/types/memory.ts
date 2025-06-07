@@ -49,6 +49,14 @@ export interface MemoryInstance {
     limit?: number,
     threshold?: number // Minimum similarity threshold (0-1)
   ): Promise<SimilaritySearchResult[]>; // Return results with similarity scores
+  /** List all sessions for a specific agent */
+  listSessions(agentId: string, limit?: number): Promise<{
+    sessionId: string;
+    lastMessage?: string;
+    messageCount: number;
+    lastActivity: Date;
+    metadata?: Record<string, unknown>;
+  }[]>;
 }
 
 // Memory factory function type
