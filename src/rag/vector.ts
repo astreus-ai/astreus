@@ -94,43 +94,47 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const { database, tableName } = this.config;
       
-      // Check if documents table exists
-      const hasDocumentsTable = await database.knex.schema.hasTable("rag_documents");
-      
-      if (!hasDocumentsTable) {
-        await database.knex.schema.createTable(
-          "rag_documents",
-          (table) => {
-            table.string("id").primary();
-            table.text("content").notNullable();
-            table.json("metadata").notNullable();
-            table.timestamp("createdAt").defaultTo(database.knex.fn.now());
-          }
-        );
-        logger.debug("Created rag_documents table for vector RAG");
-      }
-      
-      // Check if chunk associations table exists (for external vector databases)
-      const hasChunkAssociationsTable = await database.knex.schema.hasTable("rag_chunk_associations");
-      
-      if (!hasChunkAssociationsTable) {
-        await database.knex.schema.createTable(
-          "rag_chunk_associations",
-          (table) => {
-            table.string("chunkId").primary();
-            table.string("documentId").notNullable().index();
-            table.integer("chunkIndex").notNullable();
-            table.timestamp("createdAt").defaultTo(database.knex.fn.now());
-            
-            // Add foreign key constraint
-            table.foreign("documentId").references("id").inTable("rag_documents").onDelete("CASCADE");
-          }
-        );
-        logger.debug("Created rag_chunk_associations table for external vector databases");
-      }
-      
-      // Only create chunks table if using same database for vectors
-      if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
+      // If using external vector database, only create minimal tables in main DB
+      if (this.config.vectorDatabase?.type !== VectorDatabaseType.SAME_AS_MAIN) {
+        // For external vector databases, we only need association tracking
+        // Check if chunk associations table exists
+        const hasChunkAssociationsTable = await database.knex.schema.hasTable("rag_chunk_associations");
+        
+        if (!hasChunkAssociationsTable) {
+          await database.knex.schema.createTable(
+            "rag_chunk_associations",
+            (table) => {
+              table.string("chunkId").primary();
+              table.string("documentId").notNullable().index();
+              table.integer("chunkIndex").notNullable();
+              table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+            }
+          );
+          logger.debug("Created rag_chunk_associations table for external vector database");
+        }
+        
+        // For external vector DB, we don't store documents in main DB
+        // Documents are stored directly in the vector database with their metadata
+        logger.debug("Vector RAG using external vector database - minimal main DB setup completed");
+      } else {
+        // Using same database for vectors - create all necessary tables
+        
+        // Check if documents table exists
+        const hasDocumentsTable = await database.knex.schema.hasTable("rag_documents");
+        
+        if (!hasDocumentsTable) {
+          await database.knex.schema.createTable(
+            "rag_documents",
+            (table) => {
+              table.string("id").primary();
+              table.text("content").notNullable();
+              table.json("metadata").notNullable();
+              table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+            }
+          );
+          logger.debug("Created rag_documents table for same-database vector RAG");
+        }
+        
         // Check if chunks table exists
         const hasChunksTable = await database.knex.schema.hasTable(tableName!);
         
@@ -144,10 +148,15 @@ export class VectorRAG implements VectorRAGInstance {
               table.json("metadata").notNullable();
               table.json("embedding").notNullable();
               table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+              
+              // Add foreign key constraint
+              table.foreign("documentId").references("id").inTable("rag_documents").onDelete("CASCADE");
             }
           );
-          logger.debug(`Created ${tableName} table for vector RAG`);
+          logger.debug(`Created ${tableName} table for same-database vector RAG`);
         }
+        
+        logger.debug("Vector RAG using same database - full setup completed");
       }
       
       logger.debug("Vector RAG database initialized");
@@ -176,13 +185,20 @@ export class VectorRAG implements VectorRAGInstance {
       const { database } = this.config;
       const documentId = uuidv4();
       
-      // Store the document
-      await database.knex("rag_documents").insert({
-        id: documentId,
-        content: document.content,
-        metadata: JSON.stringify(document.metadata),
-        createdAt: new Date(),
-      });
+      // Only store document in main DB if using same database for vectors
+      if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
+        // Store the document in main database
+        await database.knex("rag_documents").insert({
+          id: documentId,
+          content: document.content,
+          metadata: JSON.stringify(document.metadata),
+          createdAt: new Date(),
+        });
+        logger.debug(`Stored document ${documentId} in main database`);
+      } else {
+        // For external vector DB, document metadata is stored with each chunk
+        logger.debug(`Using external vector DB - document ${documentId} will be stored with chunks`);
+      }
       
       // Create chunks from document content
       const chunks = this.chunkDocument(documentId, document);
@@ -215,7 +231,7 @@ export class VectorRAG implements VectorRAGInstance {
         logger.debug(`Added ${chunks.length} chunks with memory-based embeddings for document ${documentId}`);
       } else {
         logger.warn("No provider or memory with embedding support provided, chunks stored without embeddings");
-        // Store chunks without embeddings
+        // Store chunks without embeddings only if using same database
         if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
           for (const chunk of chunks) {
             const chunkId = uuidv4();
@@ -228,6 +244,8 @@ export class VectorRAG implements VectorRAGInstance {
               createdAt: new Date(),
             });
           }
+        } else {
+          logger.warn("Cannot store chunks without embeddings in external vector database");
         }
       }
       
@@ -393,20 +411,62 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const { database } = this.config;
       
-      // Get document from database
-      const document = await database.knex("rag_documents")
-        .where("id", id)
-        .first();
-      
-      if (!document) {
-        return null;
+      // If using same database, get document from rag_documents table
+      if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
+        // Get document from database
+        const document = await database.knex("rag_documents")
+          .where("id", id)
+          .first();
+        
+        if (!document) {
+          return null;
+        }
+        
+        return {
+          id: document.id,
+          content: document.content,
+          metadata: JSON.parse(document.metadata),
+        };
+      } else {
+        // For external vector DB, reconstruct document from chunks
+        const chunkAssociations = await database.knex("rag_chunk_associations")
+          .where("documentId", id)
+          .orderBy("chunkIndex", "asc")
+          .select("chunkId");
+        
+        if (!chunkAssociations || chunkAssociations.length === 0) {
+          return null;
+        }
+        
+        // Get chunk data from vector database
+        let content = "";
+        let metadata = {};
+        
+        for (const association of chunkAssociations) {
+          try {
+            const chunkMetadata = await this.vectorDatabaseConnector.getVectorMetadata(association.chunkId);
+            if (chunkMetadata && chunkMetadata.content) {
+              content += chunkMetadata.content;
+              // Use metadata from first chunk as document metadata
+              if (Object.keys(metadata).length === 0 && chunkMetadata.metadata) {
+                metadata = chunkMetadata.metadata;
+              }
+            }
+          } catch (error) {
+            logger.warn(`Error getting chunk ${association.chunkId} for document ${id}:`, error);
+          }
+        }
+        
+        if (!content) {
+          return null;
+        }
+        
+        return {
+          id,
+          content,
+          metadata,
+        };
       }
-      
-      return {
-        id: document.id,
-        content: document.content,
-        metadata: JSON.parse(document.metadata),
-      };
     } catch (error) {
       logger.error("Error getting document by ID:", error);
       throw error;
@@ -424,8 +484,9 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const { database, tableName } = this.config;
       
-      // Get all chunk IDs for this document
+      // Handle deletion based on vector database type
       if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
+        // Using same database - delete chunks and document
         const chunks = await database.knex(tableName!)
           .where("documentId", id)
           .select("id");
@@ -439,41 +500,37 @@ export class VectorRAG implements VectorRAGInstance {
           
           logger.debug(`Deleted ${chunkIds.length} chunks for document ${id}`);
         }
-      } else {
-        // For external vector databases, we need to query the main database 
-        // to get chunk IDs associated with this document
-        const documentsTable = await database.knex("rag_documents")
-          .where("id", id)
-          .first();
         
-        if (documentsTable) {
-          // Get chunks from the main database where we store the associations
-          const chunkAssociations = await database.knex("rag_chunk_associations")
-            .where("documentId", id)
-            .select("chunkId");
+        // Delete document (foreign key constraint will handle cascade)
+        await database.knex("rag_documents")
+          .where("id", id)
+          .delete();
+        
+        logger.debug(`Deleted document ${id} from main database`);
+      } else {
+        // Using external vector database
+        const chunkAssociations = await database.knex("rag_chunk_associations")
+          .where("documentId", id)
+          .select("chunkId");
+        
+        if (chunkAssociations && chunkAssociations.length > 0) {
+          const chunkIds = chunkAssociations.map((c: any) => c.chunkId);
           
-          if (chunkAssociations && chunkAssociations.length > 0) {
-            const chunkIds = chunkAssociations.map((c: any) => c.chunkId);
-            
-            // Delete vectors from the vector database
-            await this.vectorDatabaseConnector.deleteVectors(chunkIds);
-            
-            // Delete associations from the main database
-            await database.knex("rag_chunk_associations")
-              .where("documentId", id)
-              .delete();
-            
-            logger.debug(`Deleted ${chunkIds.length} vectors from vector database for document ${id}`);
-          }
+          // Delete vectors from the vector database
+          await this.vectorDatabaseConnector.deleteVectors(chunkIds);
+          
+          // Delete associations from the main database
+          await database.knex("rag_chunk_associations")
+            .where("documentId", id)
+            .delete();
+          
+          logger.debug(`Deleted ${chunkIds.length} vectors from external vector database for document ${id}`);
+        } else {
+          logger.warn(`No chunks found for document ${id} in external vector database`);
         }
       }
       
-      // Delete document
-      await database.knex("rag_documents")
-        .where("id", id)
-        .delete();
-      
-      logger.debug(`Deleted document ${id}`);
+      logger.debug(`Successfully deleted document ${id}`);
     } catch (error) {
       logger.error("Error deleting document:", error);
       throw error;
