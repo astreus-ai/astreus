@@ -6,7 +6,7 @@ import {
   CompletionOptions,
   ProviderTool
 } from '../types/provider';
-import logger from "../utils/logger";
+import { logger } from "../utils/logger";
 import { OpenAI } from "openai";
 
 /**

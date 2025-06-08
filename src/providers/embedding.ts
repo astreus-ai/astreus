@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import dotenv from "dotenv";
-import logger from "../utils/logger";
+import { logger } from "../utils/logger";
 import { DEFAULT_OPENAI_EMBEDDING_MODEL } from "../constants";
 
 // Initialize environment variables
