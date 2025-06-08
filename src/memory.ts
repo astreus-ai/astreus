@@ -69,10 +69,10 @@ export class MemoryManager implements MemoryInstance {
         // Create the memory table with full schema
         logger.info(`Creating memory table: ${tableName}`);
         await database.knex.schema.createTable(tableName, (table) => {
-          table.string("id").primary();
-          table.string("agentId").notNullable().index();
-          table.string("sessionId").notNullable().index();
-          table.string("userId").nullable().index();
+                table.string("id").primary();
+      table.string("agentId").notNullable().index();
+      table.string("sessionId").notNullable().index();
+      table.string("userId").nullable().index();
           table.string("role").notNullable();
           table.text("content").notNullable();
           table.timestamp("timestamp").defaultTo(database.knex.fn.now());
@@ -206,7 +206,7 @@ export class MemoryManager implements MemoryInstance {
       // Query database - using non-null assertion since we set defaults in constructor
       const entries = await database
         .knex(tableName!)
-        .where({ "sessionId": sessionId })
+        .where({ sessionId: sessionId })
         .orderBy("timestamp", "asc")
         .limit(limit || maxEntries!);
 
@@ -236,7 +236,7 @@ export class MemoryManager implements MemoryInstance {
       // Query database - using non-null assertion since we set defaults in constructor
       const entries = await database
         .knex(tableName!)
-        .where({ "agentId": agentId })
+        .where({ agentId: agentId })
         .orderBy("timestamp", "asc")
         .limit(limit || maxEntries!);
 
@@ -266,7 +266,7 @@ export class MemoryManager implements MemoryInstance {
       // Query database with userId - using non-null assertion since we set defaults in constructor
       const entries = await database
         .knex(tableName!)
-        .where({ "userId": userId })
+        .where({ userId: userId })
         .orderBy("timestamp", "desc") // Most recent first
         .limit(limit || maxEntries!);
 
@@ -530,7 +530,7 @@ export class MemoryManager implements MemoryInstance {
       // Delete all entries for the session
       const result = await database
         .knex(tableName!)
-        .where({ "sessionId": sessionId })
+        .where({ sessionId: sessionId })
         .delete();
 
       logger.debug(`Cleared ${result} entries for session ${sessionId}`);
@@ -633,15 +633,15 @@ export class MemoryManager implements MemoryInstance {
       // Get session summaries with aggregated data
       const sessions = await database
         .knex(tableName!)
-        .select('"sessionId"')
-        .select(database.knex.raw('COUNT(*) as "messageCount"'))
-        .select(database.knex.raw('MAX("timestamp") as "lastActivity"'))
-        .select(database.knex.raw('(SELECT content FROM ' + tableName + ' WHERE "sessionId" = t."sessionId" AND "agentId" = ? ORDER BY "timestamp" DESC LIMIT 1) as "lastMessage"', [agentId]))
-        .select(database.knex.raw('(SELECT metadata FROM ' + tableName + ' WHERE "sessionId" = t."sessionId" AND "agentId" = ? ORDER BY "timestamp" DESC LIMIT 1) as "metadata"', [agentId]))
+        .select('sessionId')
+        .select(database.knex.raw('COUNT(*) as messageCount'))
+        .select(database.knex.raw('MAX(timestamp) as lastActivity'))
+        .select(database.knex.raw('(SELECT content FROM ' + tableName + ' WHERE sessionId = t.sessionId AND agentId = ? ORDER BY timestamp DESC LIMIT 1) as lastMessage', [agentId]))
+        .select(database.knex.raw('(SELECT metadata FROM ' + tableName + ' WHERE sessionId = t.sessionId AND agentId = ? ORDER BY timestamp DESC LIMIT 1) as metadata', [agentId]))
         .from(tableName + ' as t')
-        .where({ "agentId": agentId })
-        .groupBy('"sessionId"')
-        .orderBy('"lastActivity"', 'desc')
+        .where({ agentId: agentId })
+        .groupBy('sessionId')
+        .orderBy('lastActivity', 'desc')
         .limit(limit || maxEntries!);
 
       logger.debug(`Retrieved ${sessions.length} sessions for agent ${agentId}`);

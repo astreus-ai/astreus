@@ -8,7 +8,7 @@ import {
   StructuredCompletionResponse
 } from "../types/provider";
 import { DEFAULT_OLLAMA_BASE_URL } from "../constants";
-import logger from "../utils/logger";
+import { logger } from "../utils/logger";
 
 /**
  * Create Ollama configuration helper
