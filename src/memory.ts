@@ -53,52 +53,49 @@ export class MemoryManager implements MemoryInstance {
     );
     
     try {
-      // Apply defaults
+      // Apply defaults - use user-provided table name or default
+      const { database } = config;
+      
       const fullConfig = {
         ...config,
-        tableName: config.tableName || "memories",
+        tableName: config.tableName || "memories", // Use user-provided name or default
         maxEntries: config.maxEntries || DEFAULT_MEMORY_SIZE,
         enableEmbeddings: config.enableEmbeddings || false
       };
       
-      // Ensure the memory table exists with proper schema
-      const { database, tableName } = fullConfig;
-      const hasTable = await database.knex.schema.hasTable(tableName);
+      // Use user's custom table name
+      const { tableName } = fullConfig;
       
-      if (!hasTable) {
-        // Create the memory table with full schema
-        logger.info(`Creating memory table: ${tableName}`);
-        await database.knex.schema.createTable(tableName, (table) => {
-                table.string("id").primary();
-      table.string("agentId").notNullable().index();
-      table.string("sessionId").notNullable().index();
-      table.string("userId").nullable().index();
-          table.string("role").notNullable();
-          table.text("content").notNullable();
-          table.timestamp("timestamp").defaultTo(database.knex.fn.now());
-          table.json("embedding").nullable();
-          table.json("metadata");
-        });
-        logger.info(`Created memory table: ${tableName}`);
-      } else {
-        // Check if embeddings are enabled and ensure embedding column exists
-        if (fullConfig.enableEmbeddings) {
-          logger.info("Initializing memory with embedding support");
+      // Use enhanced database table management
+      await database.ensureTable(tableName, (table) => {
+        table.string("id").primary();
+        table.string("agentId").notNullable().index();
+        table.string("sessionId").notNullable().index();
+        table.string("userId").nullable().index();
+        table.string("role").notNullable();
+        table.text("content").notNullable();
+        table.timestamp("timestamp").defaultTo(database.knex.fn.now());
+        table.json("embedding").nullable();
+        table.json("metadata");
+      });
+      
+      // Check if embeddings are enabled and ensure embedding column exists
+      if (fullConfig.enableEmbeddings) {
+        logger.info(`Memory initialized with embedding support using table: ${tableName}`);
+        const hasEmbeddingColumn = await database.knex.schema.hasColumn(
+          tableName,
+          "embedding"
+        );
 
-          const hasEmbeddingColumn = await database.knex.schema.hasColumn(
-            tableName,
-            "embedding"
-          );
-
-          if (!hasEmbeddingColumn) {
-            logger.warn("Adding embedding column to memory table");
-            await database.knex.schema.table(tableName, (table) => {
-              table.json("embedding"); // Store as JSON to properly represent array structure
-            });
-          }
+        if (!hasEmbeddingColumn) {
+          logger.warn(`Adding embedding column to memory table: ${tableName}`);
+          await database.knex.schema.table(tableName, (table) => {
+            table.json("embedding"); // Store as JSON to properly represent array structure
+          });
         }
       }
 
+      logger.info(`Memory created with custom table: ${tableName}`);
       return new MemoryManager(fullConfig);
     } catch (error) {
       logger.error("Error creating memory instance:", error);

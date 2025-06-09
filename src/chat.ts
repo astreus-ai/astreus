@@ -31,14 +31,34 @@ export class ChatManager implements ChatInstance {
     validateRequiredParam(config.memory, "config.memory", "ChatManager constructor");
 
     this.config = config;
+    // Use user-provided table name or default
     this.tableName = config.tableName || "chats";
     this.maxChats = config.maxChats || 50;
     this.autoGenerateTitles = config.autoGenerateTitles !== false;
   }
 
   async initialize(): Promise<void> {
-    // Ensure chats table exists
-    await ensureChatsTable(this.config.database, this.tableName);
+    // Ensure chats table exists using user's custom table name
+    await this.config.database.ensureTable(this.tableName, (table: any) => {
+      table.string('id').primary();
+      table.string('title').nullable();
+      table.string('userId').nullable();
+      table.string('agentId').notNullable();
+      table.string('status').defaultTo('active');
+      table.timestamp('createdAt').defaultTo(this.config.database.knex.fn.now());
+      table.timestamp('updatedAt').defaultTo(this.config.database.knex.fn.now());
+      table.timestamp('lastMessageAt').nullable();
+      table.integer('messageCount').defaultTo(0);
+      table.string('lastMessage').nullable();
+      table.text('metadata').nullable();
+      
+      // Add indexes for better performance
+      table.index(['userId', 'status', 'updatedAt'], 'chats_userid_status_updated_idx');
+      table.index(['agentId', 'status', 'updatedAt'], 'chats_agentid_status_updated_idx');
+      table.index(['status', 'updatedAt'], 'chats_status_updated_idx');
+    });
+    
+    logger.info(`Chat manager initialized with custom table: ${this.tableName}`);
   }
 
   async createChat(params: {
@@ -779,36 +799,6 @@ export async function createChat(config: ChatConfig): Promise<ChatInstance> {
   const chatManager = new ChatManager(config);
   await chatManager.initialize();
   return chatManager;
-}
-
-// Helper function to ensure chats table exists
-async function ensureChatsTable(database: any, tableName: string) {
-  const exists = await database.knex.schema.hasTable(tableName);
-  
-  if (!exists) {
-    await database.knex.schema.createTable(tableName, (table: any) => {
-      table.string('id').primary();
-      table.string('title').nullable();
-      table.string('userId').nullable();
-      table.string('agentId').notNullable();
-      table.string('status').defaultTo('active');
-      table.timestamp('createdAt').defaultTo(database.knex.fn.now());
-      table.timestamp('updatedAt').defaultTo(database.knex.fn.now());
-      table.timestamp('lastMessageAt').nullable();
-      table.integer('messageCount').defaultTo(0);
-      table.string('lastMessage').nullable();
-      table.text('metadata').nullable();
-      
-      // Add indexes for better performance
-      table.index(['userId', 'status', 'updatedAt'], 'chats_userid_status_updated_idx');
-      table.index(['agentId', 'status', 'updatedAt'], 'chats_agentid_status_updated_idx');
-      table.index(['status', 'updatedAt'], 'chats_status_updated_idx');
-    });
-    
-    logger.info(`Created chats table: ${tableName}`);
-  } else {
-    logger.debug(`Chats table ${tableName} already exists`);
-  }
 }
 
 // Helper function to generate unique chat ID

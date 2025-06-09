@@ -65,43 +65,43 @@ export class DocumentRAG implements DocumentRAGInstance {
    */
   private async initializeDatabase(): Promise<void> {
     try {
-      const { database, tableName, storeEmbeddings } = this.config;
+      const { database, storeEmbeddings } = this.config;
       
-      // Check if documents table exists
-      const hasTable = await database.knex.schema.hasTable(tableName!);
+      // Use user-provided table name or default
+      const tableName = this.config.tableName || 'rag_documents';
       
-      if (!hasTable) {
-        await database.knex.schema.createTable(
-          tableName!,
-          (table) => {
-            table.string("id").primary();
-            table.text("content").notNullable();
-            table.json("metadata").notNullable();
-            // Add embedding column if enabled
-            if (storeEmbeddings) {
-              table.json("embedding");
-            }
-            table.timestamp("createdAt").defaultTo(database.knex.fn.now());
-          }
-        );
-        logger.debug(`Created ${tableName} table for document RAG`);
-      } else if (storeEmbeddings) {
-        // Check if embedding column exists when embeddings are enabled
+      // Use database's enhanced table management
+      await database.ensureTable(tableName, (table) => {
+        table.string("id").primary();
+        table.text("content").notNullable();
+        table.json("metadata").notNullable();
+        // Add embedding column if enabled
+        if (storeEmbeddings) {
+          table.json("embedding");
+        }
+        table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+      });
+      
+      // Update config to use the resolved table name
+      this.config.tableName = tableName;
+      
+      // Check if embeddings are enabled and ensure embedding column exists
+      if (storeEmbeddings) {
         const hasEmbeddingColumn = await database.knex.schema.hasColumn(
-          tableName!,
+          tableName,
           "embedding"
         );
         
         if (!hasEmbeddingColumn) {
           // Add embedding column if it doesn't exist
-          await database.knex.schema.table(tableName!, (table) => {
+          await database.knex.schema.table(tableName, (table) => {
             table.json("embedding");
           });
           logger.debug(`Added embedding column to ${tableName} table`);
         }
       }
       
-      logger.debug("Document RAG database initialized");
+      logger.info(`Document RAG initialized with custom table: ${tableName}`);
     } catch (error) {
       logger.error("Error initializing document RAG database:", error);
       throw error;

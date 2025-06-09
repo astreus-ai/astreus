@@ -55,22 +55,18 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
   constructor(config: VectorDatabaseConfig) {
     super(config);
     
-    // Setup table name
-    this.tableName = this.config.options?.tableName || "vector_chunks";
+    // Use custom table name if provided, otherwise default
+    this.tableName = config.options?.tableName || 'vector_embeddings';
     
-    // Initialize Knex with PostgreSQL connection
+    // Initialize knex with PostgreSQL configuration
     this.knex = knex({
       client: 'pg',
-      connection: this.config.connectionString || {
-        host: this.config.options?.host || 'localhost',
-        port: this.config.options?.port || 5432,
-        user: this.config.options?.user || 'postgres',
-        password: this.config.options?.password || '',
-        database: this.config.options?.database || 'postgres',
-      },
-      pool: {
-        min: 2,
-        max: 10
+      connection: config.connectionString || {
+        host: process.env.POSTGRES_HOST || 'localhost',
+        port: parseInt(process.env.POSTGRES_PORT || '5432'),
+        user: process.env.POSTGRES_USER || 'postgres',
+        password: process.env.POSTGRES_PASSWORD || '',
+        database: process.env.POSTGRES_DB || 'postgres'
       }
     });
     
@@ -263,7 +259,12 @@ class MainDatabaseVectorConnector extends BaseVectorDatabaseConnector {
   constructor(config: VectorDatabaseConfig, database: DatabaseInstance) {
     super(config);
     this.database = database;
-    this.tableName = this.config.options?.tableName || "rag_chunks";
+    
+    // Use custom table name from database configuration or provided config
+    const dbTableNames = database.getTableNames();
+    this.tableName = config.options?.tableName || 
+                    database.getCustomTableName('vector_embeddings') || 
+                    'vector_embeddings';
     logger.debug("Main database vector connector initialized");
   }
   

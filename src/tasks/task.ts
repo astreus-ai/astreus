@@ -139,98 +139,58 @@ export class Task implements TaskInstance {
    * Save task to database with proper locking to prevent concurrent saves
    */
   public async saveToDatabase(): Promise<void> {
+    if (!this.database) {
+      logger.debug(`Task ${this.id}: No database configured, skipping save`);
+      return;
+    }
+
     try {
-      // Serialize the current state to compare with last saved state
-      const currentState = JSON.stringify({
+      // Use default tasks table name - can be customized via database config if needed
+      const tasksTable = this.database.getTable('tasks');
+
+      // Prepare task data for database
+      const taskData = {
+        id: this.id,
+        name: this.config.name,
+        description: this.config.description,
+        status: this.status,
+        retries: this.retries,
+        plugins: JSON.stringify(this.config.plugins || []),
+        input: this.config.input ? JSON.stringify(this.config.input) : null,
+        dependencies: this.config.dependencies ? JSON.stringify(this.config.dependencies) : null,
+        result: this.result ? JSON.stringify(this.result) : null,
+        createdAt: this.createdAt,
+        startedAt: this.startedAt || null,
+        completedAt: this.completedAt || null,
+        agentId: this.agentId || null,
+        sessionId: this.sessionId || null,
+        contextId: this.contextId || null,
+      };
+
+      // Check if task already exists
+      const existingTask = await tasksTable.findOne({ id: this.id });
+
+      if (existingTask) {
+        // Update existing task
+        await tasksTable.update({ id: this.id }, taskData);
+        logger.debug(`Task ${this.id}: Updated in database`);
+      } else {
+        // Insert new task
+        await tasksTable.insert(taskData);
+        logger.debug(`Task ${this.id}: Saved to database`);
+      }
+
+      // Update last saved state
+      this.lastSavedState = JSON.stringify({
         status: this.status,
         retries: this.retries,
         result: this.result,
         startedAt: this.startedAt,
         completedAt: this.completedAt,
       });
-
-      // Only save if there are changes
-      if (currentState !== this.lastSavedState) {
-        try {
-          // Use database from instance if provided, otherwise create a new one
-          const db = this.database || await createDatabase();
-          const tableNames = db.getTableNames();
-          const tasksTable = db.getTable(tableNames.tasks);
-
-          // Check if task exists
-          const existingTask = await tasksTable.findOne({ id: this.id });
-          const isNew = !existingTask;
-
-          const taskData = {
-            id: this.id,
-            name: this.config.name,
-            description: this.config.description || "",
-            status: this.status,
-            retries: this.retries,
-            plugins: JSON.stringify(this.config.plugins || []),
-            input: JSON.stringify(this.config.input || null),
-            dependencies: JSON.stringify(this.config.dependencies || []),
-            createdAt: this.createdAt,
-            startedAt: this.startedAt || null,
-            completedAt: this.completedAt || null,
-            result: this.result ? JSON.stringify(this.result) : null,
-            agentId: this.agentId || null,
-            sessionId: this.sessionId || null,
-            contextId: this.contextId || null,
-          };
-
-          if (isNew) {
-            // Try to insert
-            try {
-              await tasksTable.insert(taskData);
-
-              // Only log the first time we save a task
-              if (this.lastSavedState === "") {
-                logger.task(this.id, "Task saved to database", this.config.name);
-              }
-            } catch (insertErr) {
-              // If constraint error, try updating instead
-              const err = insertErr as Error | { code: string };
-              if ('code' in err && err.code === "SQLITE_CONSTRAINT") {
-                // Try updating instead - the task might have been inserted by another process
-                try {
-                  await tasksTable.update({ id: this.id }, taskData);
-                  // No need to log this as it's a normal concurrent operation condition
-                } catch (updateErr) {
-                  logger.error(`Error updating task ${this.id} after constraint failure:`, updateErr);
-                  // Don't rethrow - we've logged it and want to continue execution
-                }
-              } else {
-                // This is a real error worth logging
-                logger.error(`Error inserting task ${this.id}:`, insertErr);
-                throw insertErr;
-              }
-            }
-          } else {
-            // Update existing task
-            try {
-              await tasksTable.update({ id: this.id }, taskData);
-            } catch (updateErr) {
-              logger.error(`Error updating task ${this.id}:`, updateErr);
-              // Don't rethrow - we've logged it and want to continue execution
-            }
-          }
-          // Update last saved state after successful save
-          this.lastSavedState = currentState;
-        } catch (err: any) {
-          // Handle SQLITE_CONSTRAINT errors specifically
-          if (err.code === "SQLITE_CONSTRAINT") {
-            logger.debug(`Task ${this.id} constraint error handled during save`);
-            // Don't rethrow - this is an expected race condition
-          } else {
-            logger.error(`Error saving task ${this.id}:`, err);
-            // Don't rethrow as this would interrupt task execution
-          }
-        }
-      }
     } catch (error) {
-      logger.error("Error saving task to database:", error);
-      // Don't rethrow as this would interrupt task execution
+      logger.error(`Task ${this.id}: Error saving to database:`, error);
+      // Don't throw error to avoid breaking task execution
     }
   }
 
