@@ -120,7 +120,7 @@ class Provider implements ProviderInstance {
         let fullModelConfig: OpenAIModelConfig;
         
         if (typeof modelConfig === 'string') {
-          const defaultConfig = DEFAULT_MODEL_CONFIGS.openai[modelConfig];
+          const defaultConfig = DEFAULT_MODEL_CONFIGS.openai[modelConfig as keyof typeof DEFAULT_MODEL_CONFIGS.openai];
           if (!defaultConfig) {
             throw new Error(`No default configuration found for OpenAI model: ${modelConfig}`);
           }
@@ -132,7 +132,7 @@ class Provider implements ProviderInstance {
           // Use provided config but fill in any missing defaults
           const openAIConfig = modelConfig as OpenAIModelConfig;
           const modelName = openAIConfig.name;
-          const defaultConfig = DEFAULT_MODEL_CONFIGS.openai[modelName] || {};
+          const defaultConfig = DEFAULT_MODEL_CONFIGS.openai[modelName as keyof typeof DEFAULT_MODEL_CONFIGS.openai] || {};
           
           // Apply defaults for required parameters
           validateRequiredParam(modelName, "name", "OpenAI model configuration");
@@ -156,7 +156,7 @@ class Provider implements ProviderInstance {
         let fullModelConfig: OllamaModelConfig;
         
         if (typeof modelConfig === 'string') {
-          const defaultConfig = DEFAULT_MODEL_CONFIGS.ollama[modelConfig];
+          const defaultConfig = DEFAULT_MODEL_CONFIGS.ollama[modelConfig as keyof typeof DEFAULT_MODEL_CONFIGS.ollama];
           if (!defaultConfig) {
             throw new Error(`No default configuration found for Ollama model: ${modelConfig}`);
           }
@@ -168,7 +168,7 @@ class Provider implements ProviderInstance {
           // Use provided config but fill in any missing defaults
           const ollamaConfig = modelConfig as OllamaModelConfig;
           const modelName = ollamaConfig.name;
-          const defaultConfig = DEFAULT_MODEL_CONFIGS.ollama[modelName] || {};
+          const defaultConfig = DEFAULT_MODEL_CONFIGS.ollama[modelName as keyof typeof DEFAULT_MODEL_CONFIGS.ollama] || {};
           
           // Apply defaults for required parameters
           validateRequiredParam(modelName, "name", "Ollama model configuration");

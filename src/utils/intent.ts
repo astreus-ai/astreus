@@ -64,7 +64,8 @@ Select the most appropriate tools for this task and respond with a JSON array co
       let toolNames: string[] = [];
       try {
         // Find the JSON array in the response
-        const match = response.match(/\[.*\]/s);
+        const responseText = typeof response === 'string' ? response : response.content;
+        const match = responseText.match(/\[.*\]/s);
         if (match) {
           toolNames = JSON.parse(match[0]);
         } else {
@@ -72,7 +73,7 @@ Select the most appropriate tools for this task and respond with a JSON array co
         }
       } catch (error) {
         logger.error(`Failed to parse LLM tool selection response: ${error}`);
-        logger.debug(`Raw LLM response: ${response}`);
+        logger.debug(`Raw LLM response: ${typeof response === 'string' ? response : JSON.stringify(response)}`);
         return []; // Return empty array on parsing error
       }
       

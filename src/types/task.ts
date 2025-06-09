@@ -50,7 +50,6 @@ export interface TaskInstance {
   execute(input?: any): Promise<TaskResult>;
   cancel(): void;
   loadPlugins(model?: ProviderModel): Promise<void>;
-  saveToDatabase(): Promise<void>;
   setMemory(memory: MemoryInstance): void;
 }
 

@@ -102,58 +102,10 @@ class Agent implements AgentInstance {
       }
     }
 
-    // Save agent to database
-    this.saveToDatabase();
+
   }
 
-  private async saveToDatabase(): Promise<void> {
-    try {
-      // Use database from config if provided, otherwise create a new one
-      const db = this.config.database || await createDatabase();
-      const tableNames = db.getTableNames();
-      const agentsTable = db.getTable(tableNames.agents);
 
-      // Check if agent already exists
-      const existingAgent = await agentsTable.findOne({ id: this.id });
-
-      if (!existingAgent) {
-        // Save new agent
-        await agentsTable.insert({
-          id: this.id,
-          name: this.config.name,
-          description: this.config.description || null,
-          systemPrompt: this.config.systemPrompt || null,
-          modelName: this.config.model?.name || "unknown",
-          createdAt: new Date(),
-          updatedAt: new Date(),
-          configuration: JSON.stringify({
-            hasTools: this.tools.size > 0,
-            supportsTaskSystem: true,
-          }),
-        });
-        logger.agent(this.config.name, `Agent saved to database with ID: ${this.id}`);
-      } else {
-        // Update existing agent
-        await agentsTable.update(
-          { id: this.id },
-          {
-            name: this.config.name,
-            description: this.config.description || null,
-            systemPrompt: this.config.systemPrompt || null,
-            modelName: this.config.model?.name || "unknown",
-            updatedAt: new Date(),
-            configuration: JSON.stringify({
-              hasTools: this.tools.size > 0,
-              supportsTaskSystem: true,
-            }),
-          }
-        );
-        logger.agent(this.config.name, `Agent updated in database with ID: ${this.id}`);
-      }
-    } catch (error) {
-      logger.error("Error saving agent to database:", error);
-    }
-  }
 
   // Helper method to safely get the model
   getModel(): ProviderModel {
@@ -408,8 +360,6 @@ class Agent implements AgentInstance {
     );
     
     this.tools.set(tool.name, tool);
-    // Update database when tools change
-    this.saveToDatabase();
   }
 
   /**
@@ -648,6 +598,67 @@ export const createAgent: AgentFactory = async (config: AgentConfig) => {
   
   // Create a new agent instance
   const agent = new Agent(config);
+
+  // Save agent to database
+  try {
+    // Use database from config if provided, otherwise create a new one
+    const db = config.database || await createDatabase();
+    const tableNames = db.getTableNames();
+    
+    // Ensure agents table exists
+    await db.ensureTable(tableNames.agents, (table) => {
+      table.string("id").primary();
+      table.string("name").notNullable();
+      table.text("description").nullable();
+      table.text("systemPrompt").nullable();
+      table.string("modelName").notNullable();
+      table.timestamp("createdAt").defaultTo(db.knex.fn.now());
+      table.timestamp("updatedAt").defaultTo(db.knex.fn.now());
+      table.json("configuration").nullable();
+    });
+
+    const agentsTable = db.getTable(tableNames.agents);
+
+    // Check if agent already exists
+    const existingAgent = await agentsTable.findOne({ id: agent.id });
+
+    if (!existingAgent) {
+      // Save new agent
+      await agentsTable.insert({
+        id: agent.id,
+        name: agent.config.name,
+        description: agent.config.description || null,
+        systemPrompt: agent.config.systemPrompt || null,
+        modelName: agent.config.model?.name || "unknown",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        configuration: JSON.stringify({
+          hasTools: agent.getAvailableTools().length > 0,
+          supportsTaskSystem: true,
+        }),
+      });
+      logger.agent(agent.config.name, `Agent saved to database with ID: ${agent.id}`);
+    } else {
+      // Update existing agent
+      await agentsTable.update(
+        { id: agent.id },
+        {
+          name: agent.config.name,
+          description: agent.config.description || null,
+          systemPrompt: agent.config.systemPrompt || null,
+          modelName: agent.config.model?.name || "unknown",
+          updatedAt: new Date(),
+          configuration: JSON.stringify({
+            hasTools: agent.getAvailableTools().length > 0,
+            supportsTaskSystem: true,
+          }),
+        }
+      );
+      logger.agent(agent.config.name, `Agent updated in database with ID: ${agent.id}`);
+    }
+  } catch (error) {
+    logger.error("Error saving agent to database:", error);
+  }
 
   return agent;
 }; 

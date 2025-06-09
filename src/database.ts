@@ -213,25 +213,17 @@ class Database implements DatabaseInstance {
   }
 
   /**
-   * Initialize database schema
-   * This will create tables if they don't exist and migrate legacy data if needed
+   * Initialize database schema - only handles legacy migrations now
+   * Each module (createMemory, createChat, etc.) is responsible for creating its own tables
    */
   async initializeSchema(): Promise<void> {
     try {
-      // Only initialize if auto-create is enabled (default: true)
-      if (this.config.autoCreateTables !== false) {
-        // Migrate and remove legacy tables
-        await this.migrateLegacyTables();
-        
-        // Initialize core system tables
-        await this.initializeAgentsTable();
-        await this.initializeUsersTable();
-        await this.initializeTasksTable();
-      }
+      // Only handle legacy migrations, no auto table creation
+      await this.migrateLegacyTables();
       
       // Mark as initialized
       this.initialized = true;
-      logger.database("InitializeSchema", "Database schema initialization complete");
+      logger.database("InitializeSchema", "Database schema initialization complete (legacy migrations only)");
     } catch (error) {
       logger.error("Error initializing database schema:", error);
       throw error;
@@ -285,57 +277,6 @@ class Database implements DatabaseInstance {
       await this.knex.schema.dropTable("task_contexts");
       logger.database("InitializeSchema", "Dropped deprecated task_contexts table");
     }
-  }
-
-  /**
-   * Initialize the agents table
-   */
-  private async initializeAgentsTable(): Promise<void> {
-    await this.ensureTable(this.tableNames.agents, (table: Knex.TableBuilder) => {
-      table.string("id").primary();
-      table.string("name").notNullable();
-      table.text("description").nullable();
-      table.text("systemPrompt").nullable();
-      table.string("modelName").notNullable();
-      table.timestamp("createdAt").defaultTo(this.knex.fn.now());
-      table.timestamp("updatedAt").defaultTo(this.knex.fn.now());
-      table.json("configuration").nullable();
-    });
-  }
-
-  /**
-   * Initialize the users table
-   */
-  private async initializeUsersTable(): Promise<void> {
-    await this.ensureTable(this.tableNames.users, (table: Knex.TableBuilder) => {
-      table.string("id").primary();
-      table.string("username").notNullable().unique();
-      table.timestamp("createdAt").defaultTo(this.knex.fn.now());
-      table.json("preferences").nullable();
-    });
-  }
-
-  /**
-   * Initialize the tasks table
-   */
-  private async initializeTasksTable(): Promise<void> {
-    await this.ensureTable(this.tableNames.tasks, (table: Knex.TableBuilder) => {
-      table.string("id").primary();
-      table.string("name").notNullable();
-      table.text("description").notNullable();
-      table.string("status").notNullable().index();
-      table.integer("retries").defaultTo(0);
-      table.json("plugins").nullable();
-      table.json("input").nullable();
-      table.json("dependencies").nullable();
-      table.json("result").nullable();
-      table.timestamp("createdAt").defaultTo(this.knex.fn.now());
-      table.timestamp("startedAt").nullable();
-      table.timestamp("completedAt").nullable();
-      table.string("agentId").nullable().index();
-      table.string("sessionId").nullable().index();
-      table.string("contextId").nullable().index();
-    });
   }
 
   /**
@@ -522,10 +463,8 @@ export const createDatabase: DatabaseFactory = async (
   // Connect to the database
   await db.connect();
 
-  // Initialize the schema if needed
-  if ('initializeSchema' in db) {
-    await db.initializeSchema();
-  }
+  // Only run legacy migrations, no auto table creation
+  await db.initializeSchema();
 
   return db;
 };

@@ -314,6 +314,8 @@ Environment variables:
 - `OLLAMA_BASE_URL` - Base URL for Ollama API (if using Ollama)
 - `LOG_LEVEL` - Logging level (default: "info")
 
+**Note**: Each component (createMemory, createChat, createAgent, etc.) automatically creates its required database tables when first used.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
