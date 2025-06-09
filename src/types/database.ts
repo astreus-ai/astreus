@@ -3,7 +3,7 @@ import { Knex } from "knex";
 // Database type
 export type DatabaseType = "sqlite" | "postgresql";
 
-// Table names configuration
+// Enhanced table names configuration with more flexibility
 export interface TableNamesConfig {
   /** Table name for agents, defaults to 'agents' */
   agents?: string;
@@ -11,9 +11,15 @@ export interface TableNamesConfig {
   users?: string;
   /** Table name for tasks, defaults to 'tasks' */
   tasks?: string;
+  /** Table name for memories, defaults to 'memories' */
+  memories?: string;
+  /** Table name for chats, defaults to 'chats' */
+  chats?: string;
+  /** Custom table names for user-defined tables */
+  custom?: Record<string, string>;
 }
 
-// Database configuration
+// Enhanced database configuration
 export interface DatabaseConfig {
   /** Required: The type of database to use */
   type: DatabaseType;
@@ -21,9 +27,13 @@ export interface DatabaseConfig {
   connection: string | Knex.StaticConnectionConfig;
   /** Optional: Custom table names for system tables */
   tableNames?: TableNamesConfig;
+  /** Optional: Whether to auto-create system tables, defaults to true */
+  autoCreateTables?: boolean;
+  /** Optional: Prefix for all table names */
+  tablePrefix?: string;
 }
 
-// Database instance
+// Enhanced database instance with better table management
 export interface DatabaseInstance {
   knex: Knex;
   config: DatabaseConfig; // Database configuration
@@ -32,6 +42,16 @@ export interface DatabaseInstance {
   executeQuery<T = any>(query: string, params?: any[]): Promise<T[]>;
   getTable(tableName: string): TableOperations;
   getTableNames(): Required<TableNamesConfig>;
+  
+  // Enhanced table management methods
+  hasTable(tableName: string): Promise<boolean>;
+  createTable(tableName: string, schema: (table: Knex.TableBuilder) => void): Promise<void>;
+  dropTable(tableName: string): Promise<void>;
+  ensureTable(tableName: string, schema: (table: Knex.TableBuilder) => void): Promise<void>;
+  
+  // Custom table registration
+  registerCustomTable(name: string, tableName: string): void;
+  getCustomTableName(name: string): string | undefined;
 }
 
 // Table operations interface

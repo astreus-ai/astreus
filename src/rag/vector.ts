@@ -92,71 +92,51 @@ export class VectorRAG implements VectorRAGInstance {
    */
   private async initializeDatabase(): Promise<void> {
     try {
-      const { database, tableName } = this.config;
+      const { database } = this.config;
       
       // If using external vector database, only create minimal tables in main DB
       if (this.config.vectorDatabase?.type !== VectorDatabaseType.SAME_AS_MAIN) {
         // For external vector databases, we only need association tracking
-        // Check if chunk associations table exists
-        const hasChunkAssociationsTable = await database.knex.schema.hasTable("rag_chunk_associations");
+        const associationsTableName = 'rag_chunk_associations';
         
-        if (!hasChunkAssociationsTable) {
-          await database.knex.schema.createTable(
-            "rag_chunk_associations",
-            (table) => {
-              table.string("chunkId").primary();
-              table.string("documentId").notNullable().index();
-              table.integer("chunkIndex").notNullable();
-              table.timestamp("createdAt").defaultTo(database.knex.fn.now());
-            }
-          );
-          logger.debug("Created rag_chunk_associations table for external vector database");
-        }
+        await database.ensureTable(associationsTableName, (table) => {
+          table.string("chunkId").primary();
+          table.string("documentId").notNullable().index();
+          table.integer("chunkIndex").notNullable();
+          table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+        });
         
-        // For external vector DB, we don't store documents in main DB
-        // Documents are stored directly in the vector database with their metadata
-        logger.debug("Vector RAG using external vector database - minimal main DB setup completed");
+        logger.info(`Vector RAG using external vector database - created ${associationsTableName} table`);
       } else {
         // Using same database for vectors - create all necessary tables
+        const documentsTableName = 'rag_documents';
+        const chunksTableName = this.config.tableName || 'rag_chunks';
         
-        // Check if documents table exists
-        const hasDocumentsTable = await database.knex.schema.hasTable("rag_documents");
+        // Create documents table
+        await database.ensureTable(documentsTableName, (table) => {
+          table.string("id").primary();
+          table.text("content").notNullable();
+          table.json("metadata").notNullable();
+          table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+        });
         
-        if (!hasDocumentsTable) {
-          await database.knex.schema.createTable(
-            "rag_documents",
-            (table) => {
-              table.string("id").primary();
-              table.text("content").notNullable();
-              table.json("metadata").notNullable();
-              table.timestamp("createdAt").defaultTo(database.knex.fn.now());
-            }
-          );
-          logger.debug("Created rag_documents table for same-database vector RAG");
-        }
+        // Create chunks table with user's custom name
+        await database.ensureTable(chunksTableName, (table) => {
+          table.string("id").primary();
+          table.string("documentId").notNullable().index();
+          table.text("content").notNullable();
+          table.json("metadata").notNullable();
+          table.json("embedding").notNullable();
+          table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+          
+          // Add foreign key constraint
+          table.foreign("documentId").references("id").inTable(documentsTableName).onDelete("CASCADE");
+        });
         
-        // Check if chunks table exists
-        const hasChunksTable = await database.knex.schema.hasTable(tableName!);
+        // Update config to use the resolved table name
+        this.config.tableName = chunksTableName;
         
-        if (!hasChunksTable) {
-          await database.knex.schema.createTable(
-            tableName!,
-            (table) => {
-              table.string("id").primary();
-              table.string("documentId").notNullable().index();
-              table.text("content").notNullable();
-              table.json("metadata").notNullable();
-              table.json("embedding").notNullable();
-              table.timestamp("createdAt").defaultTo(database.knex.fn.now());
-              
-              // Add foreign key constraint
-              table.foreign("documentId").references("id").inTable("rag_documents").onDelete("CASCADE");
-            }
-          );
-          logger.debug(`Created ${tableName} table for same-database vector RAG`);
-        }
-        
-        logger.debug("Vector RAG using same database - full setup completed");
+        logger.info(`Vector RAG initialized with custom tables: ${documentsTableName} and ${chunksTableName}`);
       }
       
       logger.debug("Vector RAG database initialized");

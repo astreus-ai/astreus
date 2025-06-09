@@ -1,15 +1,17 @@
+import { v4 as uuidv4 } from "uuid";
 import {
   TaskManagerInstance,
   TaskConfig,
   TaskInstance,
   TaskResult,
-  TaskManagerConfig
-} from "../types/task";
-import { MemoryInstance } from "../types/memory";
-import { ProviderModel } from "../types/provider";
-import { createDatabase, DatabaseInstance } from "../database";
+  TaskManagerConfig,
+  TaskStatus,
+} from "../types";
+import { MemoryInstance, DatabaseInstance, ProviderModel } from "../types";
+import { createDatabase } from "../database";
 import { logger } from "../utils";
 import { Task } from "./task";
+import { validateRequiredParam } from "../utils/validation";
 
 /**
  * Task Manager class that manages multiple tasks
@@ -248,81 +250,63 @@ export class TaskManager implements TaskManagerInstance {
    * @returns Promise that resolves when tasks are loaded
    */
   private async loadTasksFromDatabase(): Promise<void> {
-    // Set loading flag
-    if (this.loadingPromise) {
-      return this.loadingPromise;
-    }
+    try {
+      // Use database from instance if provided, otherwise create a new one
+      const db = this.database || await createDatabase();
+      const tasksTable = db.getTable('tasks');
 
-    this.loadingPromise = (async () => {
-      try {
-        // Use database from config if provided, otherwise create a new one
-        const db = this.database || await createDatabase();
-        const tableNames = db.getTableNames();
-        const tasksTable = db.getTable(tableNames.tasks);
+      // Load all tasks from database
+      const taskRecords = await tasksTable.find();
 
-        // Get all tasks or filter by session/agent ID if provided
-        const filter: any = {};
-        if (this.sessionId) {
-          filter.sessionId = this.sessionId;
-        } else if (this.agentId) {
-          filter.agentId = this.agentId;
+      for (const record of taskRecords) {
+        try {
+          // Parse JSON fields
+          const plugins = record.plugins ? JSON.parse(record.plugins) : [];
+          const input = record.input ? JSON.parse(record.input) : null;
+          const dependencies = record.dependencies ? JSON.parse(record.dependencies) : [];
+          const result = record.result ? JSON.parse(record.result) : null;
+
+          // Create task config from database record
+          const taskConfig: TaskConfig = {
+            id: record.id,
+            name: record.name,
+            description: record.description,
+            plugins,
+            input,
+            dependencies,
+            agentId: record.agentId,
+            sessionId: record.sessionId,
+          };
+
+          // Create task instance
+          const task = new Task(taskConfig, this.memory, this.providerModel, db);
+
+          // Restore task state
+          task.status = record.status as TaskStatus;
+          task.retries = record.retries || 0;
+          task.createdAt = new Date(record.createdAt);
+          task.startedAt = record.startedAt ? new Date(record.startedAt) : undefined;
+          task.completedAt = record.completedAt ? new Date(record.completedAt) : undefined;
+          task.result = result;
+          task.agentId = record.agentId;
+          task.sessionId = record.sessionId;
+          task.contextId = record.contextId;
+
+          // Add to tasks map
+          this.tasks.set(task.id, task);
+
+          logger.debug(`Loaded task ${task.id} from database with status: ${task.status}`);
+        } catch (error) {
+          logger.error(`Error loading task ${record.id} from database:`, error);
+          // Continue loading other tasks
         }
-
-        const taskRecords = await tasksTable.find(filter);
-        logger.info(`Loading ${taskRecords.length} tasks from database`);
-
-        // Convert database records to Task instances
-        for (const record of taskRecords) {
-          try {
-            // Reconstruct the task config
-            const taskConfig: TaskConfig = {
-              id: record.id,
-              name: record.name,
-              description: record.description,
-              plugins: JSON.parse(record.plugins || "[]"),
-              input: JSON.parse(record.input || "null"),
-              dependencies: JSON.parse(record.dependencies || "[]"),
-              maxRetries: 0, // Default value, could be stored in DB
-              agentId: record.agentId,
-              sessionId: record.sessionId,
-            };
-
-            // Create task instance
-            const task = new Task(taskConfig, this.memory);
-
-            // Restore task state
-            task.status = record.status as any;
-            task.retries = record.retries;
-            if (record.startedAt) task.startedAt = new Date(record.startedAt);
-            if (record.completedAt)
-              task.completedAt = new Date(record.completedAt);
-            if (record.result) {
-              try {
-                task.result = JSON.parse(record.result);
-              } catch (e) {
-                logger.error(`Error parsing result for task ${record.id}:`, e);
-              }
-            }
-
-            // Add task to manager without saving (it's already in DB)
-            this.tasks.set(task.id, task);
-            logger.debug(`Loaded task "${task.config.name}" (${task.id}) from database`);
-          } catch (error) {
-            logger.error(`Error loading task ${record.id}:`, error);
-          }
-        }
-
-        this.tasksLoaded = true;
-        logger.info(`Successfully loaded ${this.tasks.size} tasks from database`);
-      } catch (error) {
-        logger.error("Error loading tasks from database:", error);
-        this.tasksLoaded = true; // Set to true so we don't keep trying
-      } finally {
-        this.loadingPromise = null;
       }
-    })();
 
-    return this.loadingPromise;
+      logger.info(`Loaded ${this.tasks.size} tasks from database`);
+    } catch (error) {
+      logger.error("Error loading tasks from database:", error);
+      // Don't throw error - allow task manager to continue without database tasks
+    }
   }
 
   /**
