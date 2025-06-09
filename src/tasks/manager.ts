@@ -123,15 +123,7 @@ export class TaskManager implements TaskManagerInstance {
       // Check for a parent in dependencies and add it if needed
       this.addTaskWithParent(taskInstance);
 
-      // Ensure the task is saved to the database - but don't immediately await
-      // This helps prevent duplicate requests and race conditions
-      if (!taskInstance.savePromise) {
-        taskInstance.savePromise = taskInstance.saveToDatabase()
-          .catch(err => {
-            // Log error but don't fail the add operation
-            logger.error(`Error saving task ${taskInstance.id} to database:`, err);
-          });
-      }
+      // Task is already saved to database via createTask static method
       
       logger.debug(`Task "${taskInstance.config.name}" (${taskInstance.id}) added to manager`);
       

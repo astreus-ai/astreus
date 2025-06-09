@@ -14,6 +14,14 @@ export async function createUser(username: string): Promise<string> {
     const db = await createDatabase();
     const tableNames = db.getTableNames();
 
+    // Ensure users table exists
+    await db.ensureTable(tableNames.users, (table) => {
+      table.string("id").primary();
+      table.string("username").notNullable().unique();
+      table.timestamp("createdAt").defaultTo(db.knex.fn.now());
+      table.json("preferences").nullable();
+    });
+
     // Save user to database
     await db.getTable(tableNames.users).insert({
       id,

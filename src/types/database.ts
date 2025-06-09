@@ -27,8 +27,6 @@ export interface DatabaseConfig {
   connection: string | Knex.StaticConnectionConfig;
   /** Optional: Custom table names for system tables */
   tableNames?: TableNamesConfig;
-  /** Optional: Whether to auto-create system tables, defaults to true */
-  autoCreateTables?: boolean;
   /** Optional: Prefix for all table names */
   tablePrefix?: string;
 }

@@ -32,8 +32,6 @@ export class Task implements TaskInstance {
   public database?: DatabaseInstance;
 
   public isCancelled: boolean = false;
-  public lastSavedState: string = "";
-  public savePromise: Promise<void> | null = null;
   
   // Add a tracking variable to prevent duplicate logging
   private toolSelectionLogged: boolean = false;
@@ -63,8 +61,7 @@ export class Task implements TaskInstance {
       logger.error(`Error loading plugins for task ${this.id}:`, error);
     });
 
-    // Save task to database (but don't wait for it in constructor)
-    this.savePromise = this.saveToDatabase();
+
   }
 
   /**
@@ -135,73 +132,13 @@ export class Task implements TaskInstance {
     logger.warn(`No plugins selected for task "${this.config.name}"`);
   }
 
-  /**
-   * Save task to database with proper locking to prevent concurrent saves
-   */
-  public async saveToDatabase(): Promise<void> {
-    if (!this.database) {
-      logger.debug(`Task ${this.id}: No database configured, skipping save`);
-      return;
-    }
 
-    try {
-      // Use default tasks table name - can be customized via database config if needed
-      const tasksTable = this.database.getTable('tasks');
-
-      // Prepare task data for database
-      const taskData = {
-        id: this.id,
-        name: this.config.name,
-        description: this.config.description,
-        status: this.status,
-        retries: this.retries,
-        plugins: JSON.stringify(this.config.plugins || []),
-        input: this.config.input ? JSON.stringify(this.config.input) : null,
-        dependencies: this.config.dependencies ? JSON.stringify(this.config.dependencies) : null,
-        result: this.result ? JSON.stringify(this.result) : null,
-        createdAt: this.createdAt,
-        startedAt: this.startedAt || null,
-        completedAt: this.completedAt || null,
-        agentId: this.agentId || null,
-        sessionId: this.sessionId || null,
-        contextId: this.contextId || null,
-      };
-
-      // Check if task already exists
-      const existingTask = await tasksTable.findOne({ id: this.id });
-
-      if (existingTask) {
-        // Update existing task
-        await tasksTable.update({ id: this.id }, taskData);
-        logger.debug(`Task ${this.id}: Updated in database`);
-      } else {
-        // Insert new task
-        await tasksTable.insert(taskData);
-        logger.debug(`Task ${this.id}: Saved to database`);
-      }
-
-      // Update last saved state
-      this.lastSavedState = JSON.stringify({
-        status: this.status,
-        retries: this.retries,
-        result: this.result,
-        startedAt: this.startedAt,
-        completedAt: this.completedAt,
-      });
-    } catch (error) {
-      logger.error(`Task ${this.id}: Error saving to database:`, error);
-      // Don't throw error to avoid breaking task execution
-    }
-  }
 
   /**
    * Execute the task using configured plugins
    */
   async execute(input?: any): Promise<TaskResult> {
-    // Wait for any pending save operation to complete
-    if (this.savePromise) {
-      await this.savePromise;
-    }
+    // Database operations are handled in createTask static method
 
     // Add debug logging - Task execution start
     logger.debug(`Task ${this.id} (${this.config.name}) execution started with input:`, 
@@ -227,8 +164,6 @@ export class Task implements TaskInstance {
       // Update status only after plugins are loaded
       this.status = "running";
       this.startedAt = new Date();
-      this.savePromise = this.saveToDatabase();
-      await this.savePromise;
 
       // Get task context from previous tasks in the same session
       let taskContext = {};
@@ -801,9 +736,7 @@ Do not mention the technical details of the tool calls - just provide a natural,
           "task_event"
         );
 
-        // Save current state before retrying
-        this.savePromise = this.saveToDatabase();
-        await this.savePromise;
+        // Database state is managed by createTask static method
 
         return this.execute(taskInput);
       } else {
@@ -812,9 +745,7 @@ Do not mention the technical details of the tool calls - just provide a natural,
       }
     }
 
-    // Save final state to database
-    this.savePromise = this.saveToDatabase();
-    await this.savePromise;
+
 
     return this.result as TaskResult;
   }
@@ -918,7 +849,7 @@ Do not mention the technical details of the tool calls - just provide a natural,
         success: false,
         error: new Error("Task was cancelled"),
       };
-      this.savePromise = this.saveToDatabase();
+
     }
   }
 
@@ -1003,9 +934,68 @@ Do not mention the technical details of the tool calls - just provide a natural,
     // Create a new task instance
     const task = new Task(config, memory, model, database);
 
-    // Wait for the initial save to complete
-    if (task.savePromise) {
-      await task.savePromise;
+    // Save task to database if database is available
+    if (task.database) {
+      try {
+        // Ensure tasks table exists
+        await task.database.ensureTable('tasks', (table) => {
+          table.string("id").primary();
+          table.string("name").notNullable();
+          table.text("description").notNullable();
+          table.string("status").notNullable().index();
+          table.integer("retries").defaultTo(0);
+          table.json("plugins").nullable();
+          table.json("input").nullable();
+          table.json("dependencies").nullable();
+          table.json("result").nullable();
+          table.timestamp("createdAt").defaultTo(task.database!.knex.fn.now());
+          table.timestamp("startedAt").nullable();
+          table.timestamp("completedAt").nullable();
+          table.string("agentId").nullable().index();
+          table.string("sessionId").nullable().index();
+          table.string("contextId").nullable().index();
+        });
+
+        // Use default tasks table name - can be customized via database config if needed
+        const tasksTable = task.database.getTable('tasks');
+
+        // Prepare task data for database
+        const taskData = {
+          id: task.id,
+          name: task.config.name,
+          description: task.config.description,
+          status: task.status,
+          retries: task.retries,
+          plugins: JSON.stringify(task.config.plugins || []),
+          input: task.config.input ? JSON.stringify(task.config.input) : null,
+          dependencies: task.config.dependencies ? JSON.stringify(task.config.dependencies) : null,
+          result: task.result ? JSON.stringify(task.result) : null,
+          createdAt: task.createdAt,
+          startedAt: task.startedAt || null,
+          completedAt: task.completedAt || null,
+          agentId: task.agentId || null,
+          sessionId: task.sessionId || null,
+          contextId: task.contextId || null,
+        };
+
+        // Check if task already exists
+        const existingTask = await tasksTable.findOne({ id: task.id });
+
+        if (existingTask) {
+          // Update existing task
+          await tasksTable.update({ id: task.id }, taskData);
+          logger.debug(`Task ${task.id}: Updated in database`);
+        } else {
+          // Insert new task
+          await tasksTable.insert(taskData);
+          logger.debug(`Task ${task.id}: Saved to database`);
+        }
+
+        // Task state is now stored in database
+      } catch (error) {
+        logger.error(`Task ${task.id}: Error saving to database:`, error);
+        // Don't throw error to avoid breaking task creation
+      }
     }
 
     return task;
