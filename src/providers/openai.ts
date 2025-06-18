@@ -48,11 +48,47 @@ export class OpenAIProvider implements ProviderModel {
   
   async complete(messages: ProviderMessage[], options?: CompletionOptions): Promise<string | any> {
     try {
+      console.log(`🔧 DEBUG OPENAI: Starting complete() with options:`, {
+        hasOptions: !!options,
+        hasTools: !!options?.tools,
+        toolCount: options?.tools?.length || 0,
+        toolCalling: options?.toolCalling,
+        stream: options?.stream,
+        hasOnChunk: !!options?.onChunk
+      });
+      
+      // Check if streaming is requested
+      if (options?.stream && options?.onChunk) {
+        // If tools are available, do tool calling first then artificial streaming
+        if (options?.tools && options.tools.length > 0 && options?.toolCalling) {
+          console.log(`🔧 DEBUG OPENAI: Tools detected, doing tool calling first then artificial streaming`);
+          
+          // First do regular completion with tools
+          const regularResponse = await this.regularComplete(messages, options);
+          
+          // Then do artificial streaming of the result
+          if (typeof regularResponse === 'string' && regularResponse.length > 0) {
+            return await this.artificialStream(regularResponse, options.onChunk);
+          }
+          
+          return regularResponse;
+        } else {
+          console.log(`🔧 DEBUG OPENAI: Using real streaming mode`);
+          return await this.streamComplete(messages, options, options.onChunk);
+        }
+      }
+      
       // Prepare messages
       const formattedMessages = this.prepareMessages(messages, options?.systemMessage);
       
       // Build request options
       const requestOptions = this.buildRequestOptions(formattedMessages, options);
+      
+      console.log(`🔧 DEBUG OPENAI: Request options:`, {
+        hasTools: !!requestOptions.tools,
+        toolCount: requestOptions.tools?.length || 0,
+        tool_choice: requestOptions.tool_choice
+      });
       
       // Log request info
       logger.debug(`OpenAI request: model=${this.name}`, { 
@@ -63,6 +99,14 @@ export class OpenAIProvider implements ProviderModel {
       
       // Make API request
       const response = await this.client.chat.completions.create(requestOptions);
+      
+      console.log(`🔧 DEBUG OPENAI: Raw response structure:`, {
+        hasChoices: !!response.choices,
+        choicesCount: response.choices?.length,
+        hasMessage: !!response.choices?.[0]?.message,
+        hasToolCalls: !!response.choices?.[0]?.message?.tool_calls,
+        toolCallsCount: response.choices?.[0]?.message?.tool_calls?.length || 0
+      });
       
       // Handle response - now can return either string or object with tool calls
       return this.processResponse(response);
@@ -78,6 +122,8 @@ export class OpenAIProvider implements ProviderModel {
     onChunk?: (chunk: string) => void
   ): Promise<string> {
     try {
+      console.log(`🔧 DEBUG OPENAI: Starting streamComplete()`);
+      
       // Prepare messages
       const formattedMessages = this.prepareMessages(messages, options?.systemMessage);
       
@@ -92,10 +138,14 @@ export class OpenAIProvider implements ProviderModel {
         toolCount: requestOptions.tools?.length || 0 
       });
       
+      console.log(`🔧 DEBUG OPENAI: Making streaming API request`);
+      
       // Make streaming API request
       const stream = await this.client.chat.completions.create(requestOptions) as any;
       
       let fullResponse = '';
+      
+      console.log(`🔧 DEBUG OPENAI: Processing streaming response`);
       
       // Process streaming response
       for await (const chunk of stream) {
@@ -103,13 +153,17 @@ export class OpenAIProvider implements ProviderModel {
         if (content) {
           fullResponse += content;
           if (onChunk) {
-            onChunk(fullResponse);
+            console.log(`🔧 DEBUG OPENAI: Sending chunk:`, content.substring(0, 50));
+            onChunk(content); // Send only the new chunk, not the full response
           }
         }
       }
       
+      console.log(`🔧 DEBUG OPENAI: Streaming completed. Full response length:`, fullResponse.length);
+      
       return fullResponse;
     } catch (error) {
+      console.error(`🔧 DEBUG OPENAI: Streaming error:`, error);
       this.handleError(error);
       throw error;
     }
@@ -236,6 +290,15 @@ export class OpenAIProvider implements ProviderModel {
   }
   
   private processResponse(response: any): string | any {
+    console.log(`🔧 DEBUG OPENAI: processResponse called with response:`, {
+      hasChoices: !!response.choices,
+      choicesCount: response.choices?.length,
+      hasMessage: !!response.choices?.[0]?.message,
+      messageContent: response.choices?.[0]?.message?.content,
+      hasToolCalls: !!response.choices?.[0]?.message?.tool_calls,
+      toolCallsCount: response.choices?.[0]?.message?.tool_calls?.length || 0
+    });
+    
     // Check if the response has the expected structure
     if (!response.choices?.[0]?.message) {
       // Log the actual response structure for debugging
@@ -265,11 +328,14 @@ export class OpenAIProvider implements ProviderModel {
     
     // Handle tool calls if present - Return both message content and structured tool calls
     if (toolCalls?.length > 0) {
+      console.log(`🔧 DEBUG OPENAI: Found ${toolCalls.length} tool calls!`);
+      console.log(`🔧 DEBUG OPENAI: Tool calls:`, JSON.stringify(toolCalls, null, 2));
+      
       // Log detailed raw tool calls for debugging
       logger.debug('OpenAI raw tool calls:', JSON.stringify(toolCalls, null, 2));
       
       // Return structured data instead of formatted text
-      return {
+      const result = {
         content: message.content || '',
         tool_calls: toolCalls.map((call: any) => {
           try {
@@ -303,9 +369,13 @@ export class OpenAIProvider implements ProviderModel {
           }
         })
       };
+      
+      console.log(`🔧 DEBUG OPENAI: Returning structured response:`, result);
+      return result;
     }
     
     // Return plain text response
+    console.log(`🔧 DEBUG OPENAI: No tool calls, returning plain text:`, message.content);
     return message.content || '';
   }
   
@@ -326,5 +396,65 @@ export class OpenAIProvider implements ProviderModel {
     if (error.stack) {
       logger.debug(`Error stack: ${error.stack}`);
     }
+  }
+  
+  // Regular completion without streaming (for tool calling)
+  private async regularComplete(messages: ProviderMessage[], options?: CompletionOptions): Promise<string | any> {
+    try {
+      console.log(`🔧 DEBUG OPENAI: Starting regularComplete() for tool calling`);
+      
+      // Prepare messages
+      const formattedMessages = this.prepareMessages(messages, options?.systemMessage);
+      
+      // Build request options
+      const requestOptions = this.buildRequestOptions(formattedMessages, options);
+      
+      console.log(`🔧 DEBUG OPENAI: Regular request options:`, {
+        hasTools: !!requestOptions.tools,
+        toolCount: requestOptions.tools?.length || 0,
+        tool_choice: requestOptions.tool_choice
+      });
+      
+      // Make API request
+      const response = await this.client.chat.completions.create(requestOptions);
+      
+      console.log(`🔧 DEBUG OPENAI: Regular response structure:`, {
+        hasChoices: !!response.choices,
+        choicesCount: response.choices?.length,
+        hasMessage: !!response.choices?.[0]?.message,
+        hasToolCalls: !!response.choices?.[0]?.message?.tool_calls,
+        toolCallsCount: response.choices?.[0]?.message?.tool_calls?.length || 0
+      });
+      
+      // Handle response
+      return this.processResponse(response);
+    } catch (error) {
+      console.error(`🔧 DEBUG OPENAI: Regular completion error:`, error);
+      this.handleError(error);
+      throw error;
+    }
+  }
+  
+  // Artificial streaming for tool calling results
+  private async artificialStream(text: string, onChunk: (chunk: string) => void): Promise<string> {
+    console.log(`🔧 DEBUG OPENAI: Starting artificial streaming for ${text.length} characters`);
+    
+    // Split text into words for more natural streaming
+    const words = text.split(' ');
+    let currentText = '';
+    
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      currentText += (i === 0 ? '' : ' ') + word;
+      
+      // Send chunk
+      onChunk(word + (i < words.length - 1 ? ' ' : ''));
+      
+      // Add delay between words for natural feel (faster than typing)
+      await new Promise(resolve => setTimeout(resolve, 50)); // 50ms between words
+    }
+    
+    console.log(`🔧 DEBUG OPENAI: Artificial streaming completed`);
+    return text;
   }
 } 

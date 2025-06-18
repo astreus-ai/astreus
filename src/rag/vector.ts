@@ -18,6 +18,7 @@ import {
   DEFAULT_VECTOR_SIMILARITY_THRESHOLD,
   DEFAULT_MAX_RESULTS
 } from "../constants";
+import { Plugin } from "../types";
 
 /**
  * Vector-based RAG implementation
@@ -26,6 +27,9 @@ import {
 export class VectorRAG implements VectorRAGInstance {
   public config: VectorRAGConfig;
   private vectorDatabaseConnector: VectorDatabaseConnector;
+  private documentsTableName: string;
+  private chunksTableName: string;
+  private associationsTableName: string;
 
   constructor(config: VectorRAGConfig) {
     // Validate required parameters
@@ -39,18 +43,24 @@ export class VectorRAG implements VectorRAGInstance {
     // Apply defaults for optional config parameters
     this.config = {
       ...config,
-      tableName: config.tableName || "rag_chunks",
+      tableName: config.tableName || "rag",
       maxResults: config.maxResults || DEFAULT_MAX_RESULTS,
       chunkSize: config.chunkSize || DEFAULT_CHUNK_SIZE,
       chunkOverlap: config.chunkOverlap || DEFAULT_CHUNK_OVERLAP,
       vectorDatabase: config.vectorDatabase || { type: VectorDatabaseType.SAME_AS_MAIN },
     };
     
-    // Ensure vectorDatabase config has the correct tableName
-    if (this.config.vectorDatabase && this.config.vectorDatabase.type === VectorDatabaseType.SAME_AS_MAIN) {
+    // Set up table names based on the config tableName
+    const baseTableName = this.config.tableName;
+    this.documentsTableName = `${baseTableName}_documents`;
+    this.chunksTableName = `${baseTableName}_chunks`;
+    this.associationsTableName = `${baseTableName}_chunk_associations`;
+    
+    // Ensure vectorDatabase config has the correct tableName for all database types
+    if (this.config.vectorDatabase) {
       this.config.vectorDatabase.options = {
         ...this.config.vectorDatabase.options,
-        tableName: this.config.tableName
+        tableName: this.chunksTableName
       };
     }
     
@@ -94,26 +104,15 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const { database } = this.config;
       
-      // If using external vector database, only create minimal tables in main DB
+      // If using external vector database, do NOT create any tables in main DB
       if (this.config.vectorDatabase?.type !== VectorDatabaseType.SAME_AS_MAIN) {
-        // For external vector databases, we only need association tracking
-        const associationsTableName = 'rag_chunk_associations';
-        
-        await database.ensureTable(associationsTableName, (table) => {
-          table.string("chunkId").primary();
-          table.string("documentId").notNullable().index();
-          table.integer("chunkIndex").notNullable();
-          table.timestamp("createdAt").defaultTo(database.knex.fn.now());
-        });
-        
-        logger.info(`Vector RAG using external vector database - created ${associationsTableName} table`);
+        // External vector database handles everything - no main DB tables needed
+        logger.info(`Vector RAG using external vector database - no main DB tables created`);
       } else {
         // Using same database for vectors - create all necessary tables
-        const documentsTableName = 'rag_documents';
-        const chunksTableName = this.config.tableName || 'rag_chunks';
         
         // Create documents table
-        await database.ensureTable(documentsTableName, (table) => {
+        await database.ensureTable(this.documentsTableName, (table) => {
           table.string("id").primary();
           table.text("content").notNullable();
           table.json("metadata").notNullable();
@@ -121,7 +120,7 @@ export class VectorRAG implements VectorRAGInstance {
         });
         
         // Create chunks table with user's custom name
-        await database.ensureTable(chunksTableName, (table) => {
+        await database.ensureTable(this.chunksTableName, (table) => {
           table.string("id").primary();
           table.string("documentId").notNullable().index();
           table.text("content").notNullable();
@@ -130,13 +129,10 @@ export class VectorRAG implements VectorRAGInstance {
           table.timestamp("createdAt").defaultTo(database.knex.fn.now());
           
           // Add foreign key constraint
-          table.foreign("documentId").references("id").inTable(documentsTableName).onDelete("CASCADE");
+          table.foreign("documentId").references("id").inTable(this.documentsTableName).onDelete("CASCADE");
         });
         
-        // Update config to use the resolved table name
-        this.config.tableName = chunksTableName;
-        
-        logger.info(`Vector RAG initialized with custom tables: ${documentsTableName} and ${chunksTableName}`);
+        logger.info(`Vector RAG initialized with custom tables: ${this.documentsTableName} and ${this.chunksTableName}`);
       }
       
       logger.debug("Vector RAG database initialized");
@@ -165,19 +161,32 @@ export class VectorRAG implements VectorRAGInstance {
       const { database } = this.config;
       const documentId = uuidv4();
       
-      // Only store document in main DB if using same database for vectors
+      // Only store document metadata in main DB if using same database for vectors
       if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
-        // Store the document in main database
-        await database.knex("rag_documents").insert({
+        await database.knex(this.documentsTableName).insert({
           id: documentId,
+          name: document.metadata?.name || document.metadata?.documentId || `Document ${documentId}`,
           content: document.content,
           metadata: JSON.stringify(document.metadata),
           createdAt: new Date(),
         });
-        logger.debug(`Stored document ${documentId} in main database`);
+        logger.debug(`Stored document ${documentId} metadata in main database`);
       } else {
-        // For external vector DB, document metadata is stored with each chunk
-        logger.debug(`Using external vector DB - document ${documentId} will be stored with chunks`);
+        // External vector database - store document metadata in vector database
+        const documentName = document.metadata?.name || document.metadata?.documentId || `Document ${documentId}`;
+        
+        // Check if vector database connector has addDocument method
+        if (this.vectorDatabaseConnector && 'addDocument' in this.vectorDatabaseConnector) {
+          await (this.vectorDatabaseConnector as any).addDocument({
+            id: documentId,
+            name: documentName,
+            content: document.content,
+            metadata: document.metadata
+          });
+          logger.debug(`Stored document ${documentId} metadata in external vector database`);
+        } else {
+          logger.warn(`Vector database connector does not support document storage - document ${documentId} metadata will only be stored with chunks`);
+        }
       }
       
       // Create chunks from document content
@@ -215,7 +224,7 @@ export class VectorRAG implements VectorRAGInstance {
         if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
           for (const chunk of chunks) {
             const chunkId = uuidv4();
-            await database.knex(this.config.tableName!).insert({
+            await database.knex(this.chunksTableName).insert({
               id: chunkId,
               documentId: chunk.documentId,
               content: chunk.content,
@@ -359,10 +368,11 @@ export class VectorRAG implements VectorRAGInstance {
         }
       ]);
       
-      // If using external vector database, keep track of the association
-      if (this.config.vectorDatabase?.type !== VectorDatabaseType.SAME_AS_MAIN) {
+      // Only store associations if using same database for vectors
+      // External vector DB already has all data in metadata, no need for separate associations
+      if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
         // Store association between document and chunk
-        await database.knex("rag_chunk_associations").insert({
+        await database.knex(this.associationsTableName).insert({
           chunkId,
           documentId: chunk.documentId,
           chunkIndex,
@@ -370,6 +380,8 @@ export class VectorRAG implements VectorRAGInstance {
         });
         
         logger.debug(`Added chunk association for chunk ${chunkId} to document ${chunk.documentId}`);
+      } else {
+        logger.debug(`External vector DB - chunk ${chunkId} stored with all data in vector metadata`);
       }
       
       return chunkId;
@@ -391,10 +403,10 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const { database } = this.config;
       
-      // If using same database, get document from rag_documents table
+      // If using same database, get document from documents table
       if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
         // Get document from database
-        const document = await database.knex("rag_documents")
+        const document = await database.knex(this.documentsTableName)
           .where("id", id)
           .first();
         
@@ -405,11 +417,11 @@ export class VectorRAG implements VectorRAGInstance {
         return {
           id: document.id,
           content: document.content,
-          metadata: JSON.parse(document.metadata),
+          metadata: typeof document.metadata === 'string' ? JSON.parse(document.metadata) : document.metadata,
         };
       } else {
         // For external vector DB, reconstruct document from chunks
-        const chunkAssociations = await database.knex("rag_chunk_associations")
+        const chunkAssociations = await database.knex(this.associationsTableName)
           .where("documentId", id)
           .orderBy("chunkIndex", "asc")
           .select("chunkId");
@@ -467,14 +479,14 @@ export class VectorRAG implements VectorRAGInstance {
       // Handle deletion based on vector database type
       if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
         // Using same database - delete chunks and document
-        const chunks = await database.knex(tableName!)
+        const chunks = await database.knex(this.chunksTableName)
           .where("documentId", id)
           .select("id");
         
         // Delete chunks
         if (chunks.length > 0) {
           const chunkIds = chunks.map((c: any) => c.id);
-          await database.knex(tableName!)
+          await database.knex(this.chunksTableName)
             .whereIn("id", chunkIds)
             .delete();
           
@@ -482,14 +494,14 @@ export class VectorRAG implements VectorRAGInstance {
         }
         
         // Delete document (foreign key constraint will handle cascade)
-        await database.knex("rag_documents")
+        await database.knex(this.documentsTableName)
           .where("id", id)
           .delete();
         
         logger.debug(`Deleted document ${id} from main database`);
       } else {
         // Using external vector database
-        const chunkAssociations = await database.knex("rag_chunk_associations")
+        const chunkAssociations = await database.knex(this.associationsTableName)
           .where("documentId", id)
           .select("chunkId");
         
@@ -500,7 +512,7 @@ export class VectorRAG implements VectorRAGInstance {
           await this.vectorDatabaseConnector.deleteVectors(chunkIds);
           
           // Delete associations from the main database
-          await database.knex("rag_chunk_associations")
+          await database.knex(this.associationsTableName)
             .where("documentId", id)
             .delete();
           
@@ -521,7 +533,7 @@ export class VectorRAG implements VectorRAGInstance {
    * Search for similar documents using text query
    * @param query The search query
    * @param limit Maximum number of results to return
-   * @returns Promise resolving to array of search results
+   * @returns Promise resolving to array of search results with chunk and document metadata
    */
   async search(query: string, limit?: number): Promise<RAGResult[]> {
     // Validate required parameters
@@ -530,18 +542,27 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const maxResults = limit || this.config.maxResults || 10;
       
+      console.log(`🔧 DEBUG RAG: Starting search for query: "${query}" with limit: ${maxResults}`);
+      console.log(`🔧 DEBUG RAG: Config provider exists:`, !!this.config.provider);
+      console.log(`🔧 DEBUG RAG: Provider generateEmbedding exists:`, !!(this.config.provider && this.config.provider.generateEmbedding));
+      
       // Use semantic search if provider or memory with embedding support is available
       if (this.config.provider && this.config.provider.generateEmbedding) {
         try {
+          console.log(`🔧 DEBUG RAG: Generating embedding for search query using provider: "${query}"`);
           logger.debug(`Generating embedding for search query using provider: "${query}"`);
           // Generate embedding for query using provider directly
           const queryEmbedding = await this.config.provider.generateEmbedding(query);
           
+          console.log(`🔧 DEBUG RAG: Generated embedding result:`, queryEmbedding ? `${queryEmbedding.length} dimensions` : 'null/empty');
+          
           if (queryEmbedding && queryEmbedding.length > 0) {
+            console.log(`🔧 DEBUG RAG: Using semantic search with ${queryEmbedding.length} dimensions`);
             logger.debug(`Generated embedding with ${queryEmbedding.length} dimensions`);
             // Use embedding for semantic search
             return this.searchByVector(queryEmbedding, maxResults);
           } else {
+            console.log(`🔧 DEBUG RAG: Provider returned empty embedding, falling back to keyword search`);
             logger.warn("Provider returned empty embedding, falling back to keyword search");
             return this.searchByKeyword(query, maxResults);
           }
@@ -599,7 +620,7 @@ export class VectorRAG implements VectorRAGInstance {
    * @param embedding The query embedding vector
    * @param limit Maximum number of results to return
    * @param threshold Minimum similarity threshold (0-1)
-   * @returns Promise resolving to an array of search results
+   * @returns Promise resolving to an array of search results with enhanced metadata
    */
   async searchByVector(
     embedding: number[],
@@ -609,25 +630,28 @@ export class VectorRAG implements VectorRAGInstance {
     try {
       const maxResults = limit || this.config.maxResults || 10;
       
+      console.log(`🔧 DEBUG RAG: Searching by vector with ${embedding.length} dimensions, limit: ${maxResults}, threshold: ${threshold}`);
       logger.debug(`Searching by vector with ${embedding.length} dimensions, limit: ${maxResults}`);
       
       // Use the vector database connector to search for similar vectors
+      console.log(`🔧 DEBUG RAG: About to call vectorDatabaseConnector.searchVectors...`);
       const similarVectors = await this.vectorDatabaseConnector.searchVectors(
         embedding, 
         maxResults, 
         threshold
       );
       
+      console.log(`🔧 DEBUG RAG: Vector search returned ${similarVectors.length} similar vectors`);
       logger.debug(`Found ${similarVectors.length} similar vectors`);
       
       // If using the same database, we need to fetch the detailed data
       if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
-        const { database, tableName } = this.config;
+        const { database } = this.config;
         
-        logger.debug(`Fetching chunk details from table: ${tableName}`);
+        logger.debug(`Fetching chunk details from table: ${this.chunksTableName}`);
         
         // Get detailed information for each chunk
-        const chunkDetails = await database.knex(tableName!)
+        const chunkDetails = await database.knex(this.chunksTableName)
           .whereIn(
             "id",
             similarVectors.map((result) => result.id)
@@ -636,14 +660,48 @@ export class VectorRAG implements VectorRAGInstance {
         
         logger.debug(`Retrieved ${chunkDetails.length} chunk details`);
         
-        // Map to the expected result format
+        // Get parent document information for each chunk
+        const documentIds = [...new Set(chunkDetails.map((chunk: any) => chunk.documentId))];
+        const documents = await database.knex(this.documentsTableName)
+          .whereIn("id", documentIds)
+          .select("*");
+        
+        const documentsMap = documents.reduce((map: any, doc: any) => {
+          map[doc.id] = doc;
+          return map;
+        }, {});
+        
+        // Map to the expected result format with enhanced metadata
         return chunkDetails.map((chunk: any) => {
           const similarityResult = similarVectors.find((v) => v.id === chunk.id);
+          const parentDocument = documentsMap[chunk.documentId];
+          
           try {
-            const metadata = typeof chunk.metadata === 'string' ? JSON.parse(chunk.metadata) : chunk.metadata;
+            const chunkMetadata = chunk.metadata;
+            const documentMetadata = parentDocument 
+              ? (typeof parentDocument.metadata === 'string' ? JSON.parse(parentDocument.metadata) : parentDocument.metadata)
+              : {};
+            
             return {
               content: chunk.content,
-              metadata: metadata,
+              metadata: {
+                // Include original chunk metadata
+                ...chunkMetadata,
+                // Add chunk-specific information
+                chunkId: chunk.id,
+                documentId: chunk.documentId,
+                chunkType: 'text_chunk',
+                searchMethod: 'vector',
+                similarity: similarityResult?.similarity || 0,
+                chunkLength: chunk.content.length,
+                chunkCreatedAt: chunk.createdAt,
+                // Include parent document metadata for context
+                document: {
+                  ...documentMetadata,
+                  documentLength: parentDocument ? parentDocument.content.length : null,
+                  documentCreatedAt: parentDocument ? parentDocument.createdAt : null
+                }
+              },
               similarity: similarityResult?.similarity || 0,
               sourceId: chunk.id,
             };
@@ -651,7 +709,14 @@ export class VectorRAG implements VectorRAGInstance {
             logger.warn(`Error parsing metadata for chunk ${chunk.id}, using empty object:`, parseError);
             return {
               content: chunk.content,
-              metadata: {},
+              metadata: {
+                chunkId: chunk.id,
+                documentId: chunk.documentId,
+                chunkType: 'text_chunk',
+                searchMethod: 'vector',
+                similarity: similarityResult?.similarity || 0,
+                error: 'metadata_parse_error'
+              },
               similarity: similarityResult?.similarity || 0,
               sourceId: chunk.id,
             };
@@ -668,18 +733,37 @@ export class VectorRAG implements VectorRAGInstance {
         }
         
         // Get document IDs and content from chunk associations table
-        // This assumes we've stored the content and metadata in the vector database
         const results: RAGResult[] = [];
         
         for (const vector of similarVectors) {
           try {
             // For external vector DB, content and metadata are stored in the vector's metadata
-            // This is handled through the vector database connector
             const vectorMetadata = await this.vectorDatabaseConnector.getVectorMetadata(vector.id);
             
             if (!vectorMetadata) {
               logger.warn(`Metadata for vector ${vector.id} not found, skipping result`);
               continue;
+            }
+            
+            // Get parent document metadata if available
+            let parentDocumentMetadata = {};
+            if (vectorMetadata.documentId) {
+              try {
+                const associations = await database.knex(this.associationsTableName)
+                  .where("chunkId", vector.id)
+                  .first();
+                
+                if (associations) {
+                  // In external vector DB setup, we would need to fetch document metadata
+                  // from the original source or store it with each chunk
+                  parentDocumentMetadata = {
+                    documentId: vectorMetadata.documentId,
+                    note: 'Parent document metadata not fully available in external vector DB setup'
+                  };
+                }
+              } catch (docError) {
+                logger.warn(`Error fetching parent document metadata for chunk ${vector.id}:`, docError);
+              }
             }
             
             // The metadata from the vector database should include:
@@ -688,7 +772,19 @@ export class VectorRAG implements VectorRAGInstance {
             // - documentId: The ID of the parent document
             results.push({
               content: vectorMetadata.content,
-              metadata: vectorMetadata.metadata,
+              metadata: {
+                // Include original chunk metadata
+                ...vectorMetadata.metadata,
+                // Add chunk-specific information
+                chunkId: vector.id,
+                documentId: vectorMetadata.documentId,
+                chunkType: 'text_chunk',
+                searchMethod: 'vector_external',
+                similarity: vector.similarity,
+                chunkLength: vectorMetadata.content.length,
+                // Include available parent document metadata
+                document: parentDocumentMetadata
+              },
               similarity: vector.similarity,
               sourceId: vector.id,
             });
@@ -711,34 +807,73 @@ export class VectorRAG implements VectorRAGInstance {
    * Search for documents using keyword matching
    * @param query The search query
    * @param limit Maximum number of results to return
-   * @returns Promise resolving to an array of search results
+   * @returns Promise resolving to an array of search results with enhanced metadata
    */
   private async searchByKeyword(
     query: string,
     limit?: number
   ): Promise<RAGResult[]> {
-    const { database, tableName } = this.config;
+    const { database } = this.config;
     const maxResults = limit || this.config.maxResults || 10;
     
     // Simple LIKE query for keyword search
-    const results = await database.knex(tableName!)
+    const chunkResults = await database.knex(this.chunksTableName)
       .whereRaw("LOWER(content) LIKE ?", [`%${query.toLowerCase()}%`])
       .limit(maxResults)
       .select("*");
     
-    return results.map((result: any) => {
+    // Get parent document information for context
+    const documentIds = [...new Set(chunkResults.map((chunk: any) => chunk.documentId))];
+    const documents = await database.knex(this.documentsTableName)
+      .whereIn("id", documentIds)
+      .select("*");
+    
+    const documentsMap = documents.reduce((map: any, doc: any) => {
+      map[doc.id] = doc;
+      return map;
+    }, {});
+    
+    return chunkResults.map((result: any) => {
+      const parentDocument = documentsMap[result.documentId];
+      
       try {
-        const metadata = typeof result.metadata === 'string' ? JSON.parse(result.metadata) : result.metadata;
+        const chunkMetadata = result.metadata;
+        const documentMetadata = parentDocument 
+          ? (typeof parentDocument.metadata === 'string' ? JSON.parse(parentDocument.metadata) : parentDocument.metadata)
+          : {};
+        
         return {
           content: result.content,
-          metadata: metadata,
+          metadata: {
+            // Include original chunk metadata
+            ...chunkMetadata,
+            // Add chunk-specific information
+            chunkId: result.id,
+            documentId: result.documentId,
+            chunkType: 'text_chunk',
+            searchMethod: 'keyword',
+            chunkLength: result.content.length,
+            chunkCreatedAt: result.createdAt,
+            // Include parent document metadata for context
+            document: {
+              ...documentMetadata,
+              documentLength: parentDocument ? parentDocument.content.length : null,
+              documentCreatedAt: parentDocument ? parentDocument.createdAt : null
+            }
+          },
           sourceId: result.id,
         };
       } catch (parseError) {
         logger.warn(`Error parsing metadata for chunk ${result.id}, using empty object:`, parseError);
         return {
           content: result.content,
-          metadata: {},
+          metadata: {
+            chunkId: result.id,
+            documentId: result.documentId,
+            chunkType: 'text_chunk',
+            searchMethod: 'keyword',
+            error: 'metadata_parse_error'
+          },
           sourceId: result.id,
         };
       }
@@ -774,6 +909,59 @@ export class VectorRAG implements VectorRAGInstance {
     }
     
     return dotProduct / (normA * normB);
+  }
+
+  /**
+   * Create RAG search tool for vector-based search
+   * @returns Array with vector search tool
+   */
+  createRAGTools(): Plugin[] {
+    return [{
+      name: "rag_search",
+      description: "Search through documents using vector similarity to find relevant information",
+      parameters: [
+        {
+          name: "query",
+          type: "string",
+          description: "The search query to find relevant documents or content",
+          required: true
+        },
+        {
+          name: "limit",
+          type: "number", 
+          description: "Maximum number of results to return (default: 5)",
+          required: false,
+          default: 5
+        }
+      ],
+      execute: async (params: Record<string, any>) => {
+        try {
+          const query = params.query as string;
+          const limit = params.limit as number || 5;
+          
+          if (!query) {
+            throw new Error("Query parameter is required");
+          }
+          
+          // Use vector-based search
+          const results = await this.search(query, limit);
+          
+          return {
+            success: true,
+            results: results,
+            query: query,
+            resultCount: results.length,
+            searchType: "vector"
+          };
+        } catch (error) {
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : "Unknown error occurred during vector search",
+            query: params.query
+          };
+        }
+      }
+    }];
   }
 }
 

@@ -1,5 +1,5 @@
 import { Plugin, ProviderModel, ProviderInstance } from ".";
-import { TaskConfig, TaskInstance, TaskResult } from "./task";
+import { TaskConfig, TaskInstance, TaskResult, TaskManagerInstance } from "./task";
 import { MemoryInstance } from "./memory";
 import { DatabaseInstance } from "./database";
 import { RAGInstance } from "./rag";
@@ -11,17 +11,17 @@ export interface PluginWithTools {
   getTools: () => Plugin[];
 }
 
-// Agent configuration
+// Agent configuration interface
 export interface AgentConfig {
   /** Optional: Agent ID (auto-generated if not provided) */
   id?: string;
-  /** Required: Name of the agent */
-  name: string;
+  /** Optional: Name of the agent (defaults to 'astreus-agent') */
+  name?: string;
   /** Optional: Description of the agent's purpose */
   description?: string;
-  /** Required: Language model provider OR provider instance */
+  /** Optional: Language model to use - if not provided, uses provider's default */
   model?: ProviderModel;
-  /** Alternative to model: Provider instance that contains models */
+  /** Optional: Provider instance that contains models - either model or provider must be specified */
   provider?: ProviderInstance;
   /** Required: Memory instance for storing conversation history */
   memory: MemoryInstance;
@@ -33,16 +33,22 @@ export interface AgentConfig {
   tools?: Plugin[];
   /** Optional: Array of plugins the agent can use (plugins can provide multiple tools) */
   plugins?: (Plugin | PluginWithTools)[];
-  /** Optional: RAG instance for document retrieval and search */
+  /** Optional: RAG instance for document retrieval and search (automatically creates RAG tools) */
   rag?: RAGInstance;
   /** Optional: Chat instance for chat management and metadata */
   chat?: ChatInstance;
+  /** Optional: Task manager instance for task-based operations */
+  taskManager?: TaskManagerInstance;
 }
 
-// Agent instance
+// Agent instance interface
 export interface AgentInstance {
+  /** Unique identifier for the agent */
   id: string;
+  /** Agent configuration */
   config: AgentConfig;
+  
+  // Tool management methods
   getAvailableTools(): string[];
   addTool(tool: Plugin): void;
 
@@ -96,17 +102,6 @@ export interface AgentInstance {
     metadata?: Record<string, unknown>;
   }): Promise<string>;
 
-  streamChatWithId(params: {
-    message: string;
-    chatId: string;
-    userId?: string;
-    systemPrompt?: string;
-    temperature?: number;
-    maxTokens?: number;
-    metadata?: Record<string, unknown>;
-    onChunk?: (chunk: string) => void;
-  }): Promise<string>;
-
   // Original session-based methods (for backward compatibility)
   chat(params: {
     message: string;
@@ -115,15 +110,7 @@ export interface AgentInstance {
     temperature?: number;
     maxTokens?: number;
     metadata?: Record<string, unknown>;
-  }): Promise<string>;
-
-  streamChat(params: {
-    message: string;
-    sessionId?: string;
-    systemPrompt?: string;
-    temperature?: number;
-    maxTokens?: number;
-    metadata?: Record<string, unknown>;
+    stream?: boolean;
     onChunk?: (chunk: string) => void;
   }): Promise<string>;
 
@@ -146,9 +133,13 @@ export interface AgentInstance {
     metadata?: Record<string, unknown>;
   }[]>;
 
-  // Model access methods
+  // Instance access methods
   getModel(): ProviderModel;
   getProvider(): ProviderInstance | undefined;
+  getMemory(): MemoryInstance;
+  getDatabase(): DatabaseInstance | undefined;
+  getTaskManager(): TaskManagerInstance | undefined;
+  getRAG(): RAGInstance | undefined;
 }
 
 // Agent factory function type

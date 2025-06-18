@@ -8,6 +8,7 @@ import {
 import { MemoryEntry, ProviderMessage, StructuredCompletionResponse, TaskConfig, TaskResult, ProviderModel } from "./types";
 import { logger } from "./utils/logger";
 import { validateRequiredParam } from "./utils/validation";
+import { convertToolParametersToSchema } from "./utils";
 import { Embedding } from "./providers";
 import { 
   DEFAULT_TEMPERATURE, 
@@ -104,6 +105,8 @@ export class ChatManager implements ChatInstance {
     useTaskSystem?: boolean;
     temperature?: number;
     maxTokens?: number;
+    stream?: boolean;
+    onChunk?: (chunk: string) => void;
   }): Promise<string> {
     validateRequiredParam(params.agentId, "params.agentId", "createChatWithMessage");
     validateRequiredParam(params.message, "params.message", "createChatWithMessage");
@@ -138,7 +141,9 @@ export class ChatManager implements ChatInstance {
       embedding: params.embedding,
       useTaskSystem: params.useTaskSystem !== false,
       temperature: params.temperature || DEFAULT_TEMPERATURE,
-      maxTokens: params.maxTokens || DEFAULT_MAX_TOKENS
+      maxTokens: params.maxTokens || DEFAULT_MAX_TOKENS,
+      stream: params.stream,
+      onChunk: params.onChunk
     });
   }
 
@@ -156,6 +161,8 @@ export class ChatManager implements ChatInstance {
     useTaskSystem: boolean;
     temperature: number;
     maxTokens: number;
+    stream?: boolean;
+    onChunk?: (chunk: string) => void;
   }): Promise<string> {
     const {
       chatId,
@@ -170,7 +177,9 @@ export class ChatManager implements ChatInstance {
       embedding,
       useTaskSystem,
       temperature,
-      maxTokens
+      maxTokens,
+      stream = false,
+      onChunk
     } = params;
 
     // Get conversation history from chat system
@@ -216,12 +225,20 @@ export class ChatManager implements ChatInstance {
       content: message,
     });
 
-    // Get available tools
-    const availableTools = tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    }));
+    // Get available tools - Convert parameters to proper format for provider
+    console.log(`🔧 DEBUG ASTREUS: Starting tool processing, received ${tools.length} tools`);
+    console.log(`🔧 DEBUG ASTREUS: useTaskSystem=${useTaskSystem}, taskManager exists=${!!taskManager}`);
+    
+    const availableTools = tools.map((tool) => {
+      console.log(`🔧 DEBUG ASTREUS: Processing tool ${tool.name} with parameters:`, tool.parameters);
+      
+      const result = convertToolParametersToSchema(tool);
+      
+      console.log(`🔧 DEBUG ASTREUS: Final tool format for ${tool.name}:`, JSON.stringify(result, null, 2));
+      return result;
+    });
+    
+    console.log(`🔧 DEBUG ASTREUS: Total tools available: ${availableTools.length}`);
 
     // If tools are available, add them to the system message
     if (availableTools.length > 0 && systemPrompt) {
@@ -320,29 +337,43 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
       }
     } else {
       // Regular chat completion
+      console.log(`🔧 DEBUG ASTREUS: Using regular chat completion`);
+      console.log(`🔧 DEBUG ASTREUS: Calling model.complete with tools:`, availableTools.length > 0 ? availableTools : undefined);
+      console.log(`🔧 DEBUG ASTREUS: toolCalling enabled:`, availableTools.length > 0);
+      
       response = await model.complete(messages, {
         tools: availableTools.length > 0 ? availableTools : undefined,
         toolCalling: availableTools.length > 0,
         temperature,
-        maxTokens
+        maxTokens,
+        stream,
+        onChunk
       });
+      
+      console.log(`🔧 DEBUG ASTREUS: Model response type:`, typeof response);
+      console.log(`🔧 DEBUG ASTREUS: Response has tool_calls:`, typeof response === 'object' && response.tool_calls ? response.tool_calls.length : 'NO');
     }
 
     // Handle tool execution if the response contains tool calls
     if (typeof response === 'object' && response.tool_calls && Array.isArray(response.tool_calls)) {
-      logger.debug(`Chat ${chatId} received ${response.tool_calls.length} tool calls to execute`);
+      console.log(`🔧 DEBUG CHAT: Chat ${chatId} received ${response.tool_calls.length} tool calls to execute`);
+      console.log(`🔧 DEBUG CHAT: Available tools:`, tools.map(t => ({ name: t.name, hasExecute: !!t.execute })));
       
       const toolResults = [];
       for (const toolCall of response.tool_calls) {
         try {
           if (toolCall.type === 'function' && toolCall.name) {
-            logger.debug(`Executing tool: ${toolCall.name} with arguments:`, toolCall.arguments);
+            console.log(`🔧 DEBUG CHAT: Executing tool: ${toolCall.name} with arguments:`, toolCall.arguments);
             
             // Find the tool to execute
             const tool = tools.find(t => t.name === toolCall.name);
+            console.log(`🔧 DEBUG CHAT: Found tool:`, tool ? { name: tool.name, hasExecute: !!tool.execute } : 'NOT FOUND');
+            
             if (tool && tool.execute) {
+              console.log(`🔧 DEBUG CHAT: About to execute tool ${toolCall.name}...`);
               // Execute the tool
               const result = await tool.execute(toolCall.arguments || {});
+              console.log(`🔧 DEBUG CHAT: Tool ${toolCall.name} execution result:`, result);
               
               toolResults.push({
                 name: toolCall.name,
@@ -351,8 +382,10 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
                 success: true
               });
               
+              console.log(`🔧 DEBUG CHAT: Tool ${toolCall.name} executed successfully`);
               logger.debug(`Tool ${toolCall.name} executed successfully`);
             } else {
+              console.log(`🔧 DEBUG CHAT: Tool ${toolCall.name} not found or not executable`);
               logger.warn(`Tool ${toolCall.name} not found or not executable`);
               toolResults.push({
                 name: toolCall.name,
@@ -363,6 +396,7 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
             }
           }
         } catch (error) {
+          console.log(`🔧 DEBUG CHAT: Error executing tool ${toolCall.name}:`, error);
           logger.error(`Error executing tool ${toolCall.name}:`, error);
           toolResults.push({
             name: toolCall.name,
@@ -465,7 +499,7 @@ Based on these tool results, generate a helpful response to the user. Be natural
       updatedAt: new Date(result.updatedAt),
       lastMessageAt: result.lastMessageAt ? new Date(result.lastMessageAt) : undefined,
       messageCount: result.messageCount,
-      metadata: result.metadata ? JSON.parse(result.metadata) : undefined
+      metadata: result.metadata ? (typeof result.metadata === 'string' ? JSON.parse(result.metadata) : result.metadata) : undefined
     };
   }
 
@@ -623,9 +657,9 @@ Based on these tool results, generate a helpful response to the user. Be natural
       .update({
         lastMessageAt: now,
         updatedAt: now,
-        lastMessage: params.content.substring(0, 200), // Store first 200 chars
-        messageCount: this.config.database.knex.raw('messageCount + 1')
-      });
+        lastMessage: params.content.substring(0, 200) // Store first 200 chars
+      })
+      .increment('messageCount', 1);
 
     // Auto-generate title if this is the first user message and no title exists
     if (this.autoGenerateTitles && params.role === 'user') {
@@ -725,6 +759,8 @@ Based on these tool results, generate a helpful response to the user. Be natural
     useTaskSystem?: boolean;
     temperature?: number;
     maxTokens?: number;
+    stream?: boolean;
+    onChunk?: (chunk: string) => void;
   }): Promise<string> {
     validateRequiredParam(params.message, "params.message", "chat");
     validateRequiredParam(params.chatId, "params.chatId", "chat");
@@ -763,7 +799,9 @@ Based on these tool results, generate a helpful response to the user. Be natural
       embedding,
       useTaskSystem,
       temperature,
-      maxTokens
+      maxTokens,
+      stream: params.stream,
+      onChunk: params.onChunk
     });
   }
 }

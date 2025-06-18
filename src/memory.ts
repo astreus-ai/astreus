@@ -370,7 +370,7 @@ export class MemoryManager implements MemoryInstance {
             processedEntry.embedding = undefined;
           } else {
             try {
-              processedEntry.embedding = JSON.parse(dbEntry.embedding);
+              processedEntry.embedding = typeof dbEntry.embedding === 'string' ? JSON.parse(dbEntry.embedding) : dbEntry.embedding;
             } catch (error) {
               logger.error(
                 `Error parsing embedding for entry ${String(dbEntry.id)}:`,

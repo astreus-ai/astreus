@@ -1,9 +1,9 @@
-// Re-export all types
+// Re-export all types from type definition files
 export * from "./agent";
+export * from "./chat";
 export * from "./database";
 export * from "./memory";
 export * from "./plugin";
 export * from "./provider";
-export * from "./task";
 export * from "./rag";
-export * from "./chat";
+export * from "./task";

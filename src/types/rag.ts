@@ -106,7 +106,6 @@ export interface DocumentRAGInstance extends RAGInstance {
   addDocument(document: Omit<Document, "id">): Promise<string>;
   getDocumentById(id: string): Promise<Document | null>;
   deleteDocument(id: string): Promise<void>;
-  searchByMetadata(filter: Record<string, any>, limit?: number): Promise<RAGResult[]>;
 }
 
 // Factory functions

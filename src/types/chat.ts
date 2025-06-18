@@ -77,6 +77,8 @@ export interface ChatInstance {
     useTaskSystem?: boolean;
     temperature?: number;
     maxTokens?: number;
+    stream?: boolean;
+    onChunk?: (chunk: string) => void;
   }): Promise<string>;
   
   getChat(chatId: string): Promise<ChatMetadata | null>;
@@ -141,6 +143,8 @@ export interface ChatInstance {
     useTaskSystem?: boolean;
     temperature?: number;
     maxTokens?: number;
+    stream?: boolean;
+    onChunk?: (chunk: string) => void;
   }): Promise<string>;
 }
 

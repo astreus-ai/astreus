@@ -1,21 +1,47 @@
 import { v4 as uuidv4 } from "uuid";
-import { AgentConfig, AgentInstance, AgentFactory, Plugin, ProviderModel, ProviderInstance, MemoryInstance, ChatInstance, ChatMetadata, ChatSummary } from "./types";
-import { createDatabase } from "./database";
-import { PluginManager } from "./plugin";
-import { validateRequiredParams, validateRequiredParam } from "./utils/validation";
-import { logger } from "./utils/logger";
-import { createRAGTools } from "./utils/rag-tools";
+import {
+  AgentConfig,
+  AgentInstance,
+  AgentFactory,
+  ProviderModel,
+  ProviderInstance,
+  ProviderMessage,
+  MemoryInstance,
+  TaskInstance,
+  TaskManagerInstance,
+  DatabaseInstance,
+  Plugin,
+  RAGInstance,
+  ChatInstance,
+  ChatMetadata,
+  ChatSummary,
+  StructuredCompletionResponse,
+  TaskConfig,
+  TaskResult,
+  PluginWithTools,
+} from "./types";
+import { createTaskManager } from "./tasks";
+import { logger } from "./utils";
+import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
+import { convertToolParametersToSchema } from "./utils";
 import { 
+  DEFAULT_TEMPERATURE, 
+  DEFAULT_MAX_TOKENS,
   DEFAULT_AGENT_NAME
 } from "./constants";
+import { createDatabase } from "./database";
+import { PluginManager } from "./plugin";
 
 // Agent implementation
 class Agent implements AgentInstance {
   public id: string;
   public config: AgentConfig;
-  private memory: MemoryInstance; // Replace any with MemoryInstance
+  private memory: MemoryInstance;
   private tools: Map<string, Plugin>;
   private chatManager?: ChatInstance;
+  private database?: DatabaseInstance;
+  private taskManager?: TaskManagerInstance;
+  private rag?: RAGInstance;
 
   constructor(config: AgentConfig) {
     // Validate required parameters
@@ -58,6 +84,9 @@ class Agent implements AgentInstance {
     this.memory = config.memory;
     this.tools = new Map();
     this.chatManager = config.chat;
+    this.database = config.database;
+    this.taskManager = config.taskManager;
+    this.rag = config.rag;
 
     // Initialize tools if provided
     if (this.config.tools) {
@@ -68,11 +97,19 @@ class Agent implements AgentInstance {
 
     // Create RAG tools if RAG instance is provided
     if (this.config.rag) {
-      const ragTools = createRAGTools(this.config.rag);
-      ragTools.forEach((tool) => {
-        this.tools.set(tool.name, tool);
-      });
-      logger.debug(`Added ${ragTools.length} RAG tools to agent ${this.config.name}`);
+      logger.debug(`Agent ${this.config.name}: Checking RAG instance for tools...`);
+      
+      // Check if RAG instance has createRAGTools method
+      if ('createRAGTools' in this.config.rag && typeof this.config.rag.createRAGTools === 'function') {
+        const ragTools = this.config.rag.createRAGTools();
+        ragTools.forEach((tool: Plugin) => {
+          this.tools.set(tool.name, tool);
+        });
+        logger.debug(`Agent ${this.config.name}: Added ${ragTools.length} RAG tools`);
+      } else {
+        logger.warn(`Agent ${this.config.name}: RAG instance does not have createRAGTools method`);
+        logger.debug(`Agent ${this.config.name}: RAG instance keys:`, Object.keys(this.config.rag));
+      }
     }
 
     // Initialize plugins and register their tools if provided
@@ -102,12 +139,13 @@ class Agent implements AgentInstance {
       }
     }
 
-
+    // Log final tool count
+    logger.debug(`Agent ${this.config.name}: Initialized with ${this.tools.size} tools:`, Array.from(this.tools.keys()));
   }
 
 
 
-  // Helper method to safely get the model
+  // Instance access methods
   getModel(): ProviderModel {
     if (!this.config.model) {
       throw new Error("No model specified for agent");
@@ -115,9 +153,24 @@ class Agent implements AgentInstance {
     return this.config.model;
   }
 
-  // Get the provider instance
   getProvider(): ProviderInstance | undefined {
     return this.config.provider;
+  }
+
+  getMemory(): MemoryInstance {
+    return this.memory;
+  }
+
+  getDatabase(): DatabaseInstance | undefined {
+    return this.database;
+  }
+
+  getTaskManager(): TaskManagerInstance | undefined {
+    return this.taskManager;
+  }
+
+  getRAG(): RAGInstance | undefined {
+    return this.rag;
   }
 
   // Memory access methods
@@ -175,7 +228,7 @@ class Agent implements AgentInstance {
     }
   }
 
-  // Chat method without streaming
+  // Chat method - delegates to ChatManager
   async chat(params: {
     message: string;
     sessionId?: string;
@@ -183,6 +236,8 @@ class Agent implements AgentInstance {
     temperature?: number;
     maxTokens?: number;
     metadata?: Record<string, unknown>;
+    stream?: boolean;
+    onChunk?: (chunk: string) => void;
   }): Promise<string> {
     validateRequiredParam(params.message, "params.message", "chat");
 
@@ -192,154 +247,29 @@ class Agent implements AgentInstance {
       systemPrompt = this.config.systemPrompt,
       temperature = 0.7,
       maxTokens = 2000,
-      metadata = {}
-    } = params;
-
-    // Get conversation history
-    const history = sessionId ? await this.getHistory(sessionId) : [];
-
-    // Prepare messages for the model
-    const messages = [
-      ...(systemPrompt ? [{ role: 'system' as const, content: systemPrompt }] : []),
-      ...history.map((msg: any) => ({
-        role: (msg.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-        content: msg.content
-      })),
-      { role: 'user' as const, content: message }
-    ];
-
-    // Get response from model
-    const model = this.getModel();
-    const response = await model.complete(messages, {
-      temperature,
-      maxTokens
-    });
-
-    const responseContent = typeof response === 'string' ? response : response.content;
-
-    // Save to memory
-    await this.addToMemory({
-      sessionId,
-      role: 'user',
-      content: message,
-      metadata
-    });
-
-    await this.addToMemory({
-      sessionId,
-      role: 'assistant',
-      content: responseContent,
-      metadata
-    });
-
-    return responseContent;
-  }
-
-  // Streaming chat method
-  async streamChat(params: {
-    message: string;
-    sessionId?: string;
-    systemPrompt?: string;
-    temperature?: number;
-    maxTokens?: number;
-    metadata?: Record<string, unknown>;
-    onChunk?: (chunk: string) => void;
-  }): Promise<string> {
-    validateRequiredParam(params.message, "params.message", "streamChat");
-
-    const {
-      message,
-      sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      systemPrompt = this.config.systemPrompt,
-      temperature = 0.7,
-      maxTokens = 2000,
       metadata = {},
+      stream = false,
       onChunk
     } = params;
 
-    // Get conversation history
-    const history = sessionId ? await this.getHistory(sessionId) : [];
-
-    // Prepare messages for the model
-    const messages = [
-      ...(systemPrompt ? [{ role: 'system' as const, content: systemPrompt }] : []),
-      ...history.map((msg: any) => ({
-        role: (msg.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-        content: msg.content
-      })),
-      { role: 'user' as const, content: message }
-    ];
-
-    let fullResponse = '';
-    const model = this.getModel();
-    const provider = this.getProvider();
-
-    // Try to get OpenAI client for real streaming
-    const openaiClient = (provider as any)?.client || (model as any)?.client;
-
-    if (openaiClient && openaiClient.chat && openaiClient.chat.completions) {
-      logger.debug(`Agent ${this.config.name}: Using real OpenAI streaming`);
-      
-      // Use OpenAI streaming directly for incremental chunks
-      const stream = await openaiClient.chat.completions.create({
-        model: model.name || 'gpt-4o-mini',
-        messages: messages,
-        stream: true,
-        temperature,
-        max_tokens: maxTokens
-      });
-
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || '';
-        if (content) {
-          fullResponse += content;
-          if (onChunk) {
-            onChunk(content); // Send only the new chunk
-          }
-        }
-      }
-    } else if (model.complete) {
-      logger.debug(`Agent ${this.config.name}: Using simulated streaming`);
-      
-      // Fallback to complete method with simulated streaming
-      const response = await model.complete(messages, {
-        temperature,
-        maxTokens
-      });
-
-      const responseContent = typeof response === 'string' ? response : response.content;
-      fullResponse = responseContent;
-
-      if (onChunk) {
-        // Simulate streaming by sending word by word
-        const words = responseContent.split(' ');
-        for (let i = 0; i < words.length; i++) {
-          const word = words[i] + (i < words.length - 1 ? ' ' : '');
-          onChunk(word);
-          // Small delay for realistic streaming effect
-          await new Promise(resolve => setTimeout(resolve, 50));
-        }
-      }
-    } else {
-      throw new Error('No suitable model method available for streaming');
+    if (!this.chatManager) {
+      throw new Error("ChatManager is required for agent chat functionality. Please configure a ChatManager in the agent config.");
     }
 
-    // Save to memory
-    await this.addToMemory({
-      sessionId,
-      role: 'user',
-      content: message,
-      metadata
+    // Use ChatManager for all chat functionality with streaming support
+    return await this.chatManager.chat({
+      message,
+      chatId: sessionId,
+      agentId: this.id,
+      model: this.getModel(),
+      systemPrompt,
+      tools: Array.from(this.tools.values()),
+      metadata,
+      temperature,
+      maxTokens,
+      stream,
+      onChunk
     });
-
-    await this.addToMemory({
-      sessionId,
-      role: 'assistant',
-      content: fullResponse,
-      metadata
-    });
-
-    return fullResponse;
   }
 
   /**
@@ -529,56 +459,7 @@ class Agent implements AgentInstance {
     });
   }
 
-  async streamChatWithId(params: {
-    message: string;
-    chatId: string;
-    userId?: string;
-    systemPrompt?: string;
-    temperature?: number;
-    maxTokens?: number;
-    metadata?: Record<string, unknown>;
-    onChunk?: (chunk: string) => void;
-  }): Promise<string> {
-    validateRequiredParam(params.message, "params.message", "streamChatWithId");
-    validateRequiredParam(params.chatId, "params.chatId", "streamChatWithId");
-    
-    if (!this.chatManager) {
-      throw new Error("Chat manager not configured for this agent");
-    }
 
-    // Check if chat exists, if not create it
-    const existingChat = await this.chatManager.getChat(params.chatId);
-    if (!existingChat) {
-      await this.chatManager.createChat({
-        chatId: params.chatId,
-        userId: params.userId,
-        agentId: this.id,
-        metadata: params.metadata
-      });
-    }
-
-    // For now, use the regular chat method and simulate streaming
-    // This can be enhanced later with true streaming support in ChatManager
-    const response = await this.chatManager.chat({
-      message: params.message,
-      chatId: params.chatId,
-      agentId: this.id,
-      userId: params.userId,
-      model: this.getModel(),
-      systemPrompt: params.systemPrompt || this.config.systemPrompt,
-      tools: Array.from(this.tools.values()),
-      metadata: params.metadata,
-      temperature: params.temperature,
-      maxTokens: params.maxTokens
-    });
-
-    // Simulate streaming by calling onChunk with the full response
-    if (params.onChunk) {
-      params.onChunk(response);
-    }
-
-    return response;
-  }
 }
 
 // Agent factory function
@@ -637,7 +518,7 @@ export const createAgent: AgentFactory = async (config: AgentConfig) => {
           supportsTaskSystem: true,
         }),
       });
-      logger.agent(agent.config.name, `Agent saved to database with ID: ${agent.id}`);
+      logger.agent(agent.config.name || DEFAULT_AGENT_NAME, `Agent saved to database with ID: ${agent.id}`);
     } else {
       // Update existing agent
       await agentsTable.update(
@@ -654,7 +535,7 @@ export const createAgent: AgentFactory = async (config: AgentConfig) => {
           }),
         }
       );
-      logger.agent(agent.config.name, `Agent updated in database with ID: ${agent.id}`);
+      logger.agent(agent.config.name || DEFAULT_AGENT_NAME, `Agent updated in database with ID: ${agent.id}`);
     }
   } catch (error) {
     logger.error("Error saving agent to database:", error);
