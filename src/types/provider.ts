@@ -1,7 +1,7 @@
-// Provider type
+// Provider type definitions
 export type ProviderType = "openai" | "ollama";
 
-// Base model configuration
+// Base model configuration interface
 export interface ModelConfig {
   /** Required: Name of the model */
   name: string;
@@ -13,25 +13,26 @@ export interface ModelConfig {
   maxTokens?: number;
 }
 
-// Provider-specific model configurations
+// OpenAI-specific model configuration
 export interface OpenAIModelConfig extends ModelConfig {
   /** Optional: API key for authentication, defaults to OPENAI_API_KEY env var */
   apiKey?: string;
-  /** Optional: Base URL for API, defaults to OPENAI_BASE_URL env var */
+  /** Optional: Base URL for API, defaults to OPENAI_BASE_URL env var or standard OpenAI URL */
   baseUrl?: string;
   /** Optional: Organization ID for API requests */
   organization?: string;
 }
 
+// Ollama-specific model configuration
 export interface OllamaModelConfig extends ModelConfig {
   /** Optional: Base URL for Ollama API, defaults to OLLAMA_BASE_URL env var or http://localhost:11434 */
   baseUrl?: string;
 }
 
-// Combined model configuration
+// Union type for all model configurations
 export type ProviderModelConfig = OpenAIModelConfig | OllamaModelConfig;
 
-// Provider configuration
+// Provider configuration interface
 export interface ProviderConfig {
   /** Required: Type of the provider (openai or ollama) */
   type: ProviderType;
@@ -43,9 +44,15 @@ export interface ProviderConfig {
   defaultModel?: string;
   /** Optional: Model to use for generating embeddings, defaults to "text-embedding-3-small" for OpenAI */
   embeddingModel?: string;
+  /** Optional: API key for authentication (provider-specific) */
+  apiKey?: string;
+  /** Optional: Base URL for API (provider-specific) */
+  baseUrl?: string;
+  /** Optional: Organization ID (OpenAI-specific) */
+  organization?: string;
 }
 
-// Message type for provider
+// Provider message interface for chat completions
 export interface ProviderMessage {
   /** Required: Role of the message sender */
   role: "system" | "user" | "assistant";
@@ -53,14 +60,14 @@ export interface ProviderMessage {
   content: string;
 }
 
-// Provider tools
+// Provider tool interface for function calling
 export interface ProviderTool {
   name: string;
   description?: string;
   parameters?: any; // Supports both array of parameters and structured JSONSchema
 }
 
-// Tool parameter for easier use
+// Tool parameter schema interface
 export interface ProviderToolParameterSchema {
   name: string;
   type: "string" | "number" | "boolean" | "object" | "array" | "null" | "integer";
@@ -70,16 +77,18 @@ export interface ProviderToolParameterSchema {
   format?: string;
 }
 
-// Completion options for more advanced model calls
+// Completion options interface
 export interface CompletionOptions {
   tools?: ProviderTool[];
   toolCalling?: boolean;
   systemMessage?: string;
   temperature?: number;
   maxTokens?: number;
+  stream?: boolean;
+  onChunk?: (chunk: string) => void;
 }
 
-// Provider tool call response structure
+// Provider tool call interface for structured responses
 export interface ProviderToolCall {
   type: string;
   id: string;
@@ -87,13 +96,13 @@ export interface ProviderToolCall {
   arguments: Record<string, any>;
 }
 
-// Structured response with tool calls
+// Structured completion response interface
 export interface StructuredCompletionResponse {
   content: string;
   tool_calls: ProviderToolCall[];
 }
 
-// Provider model instance
+// Provider model interface
 export interface ProviderModel {
   provider: ProviderType;
   name: string;
@@ -106,17 +115,70 @@ export interface ProviderModel {
    * @returns The completion text or structured response with tool calls
    */
   complete(messages: ProviderMessage[], options?: CompletionOptions): Promise<string | StructuredCompletionResponse>;
-  generateEmbedding?(text: string): Promise<number[]>; // Optional method to generate embeddings
+  
+  /**
+   * Stream completion with real-time response chunks (optional)
+   * @param messages Array of messages to send to the model
+   * @param options Additional options like tools to use
+   * @param onChunk Callback function to handle each chunk
+   * @returns The complete response text
+   */
+  streamComplete?(
+    messages: ProviderMessage[], 
+    options?: CompletionOptions,
+    onChunk?: (chunk: string) => void
+  ): Promise<string>;
+  
+  /**
+   * Generate embeddings for text (optional)
+   * @param text Text to generate embeddings for
+   * @returns Vector embedding array
+   */
+  generateEmbedding?(text: string): Promise<number[]>;
 }
 
-// Provider instance
+// Provider instance interface
 export interface ProviderInstance {
   type: ProviderType;
+  
+  /**
+   * Get a specific model by name
+   * @param name Name of the model to retrieve
+   * @returns Provider model instance
+   */
   getModel(name: string): ProviderModel;
+  
+  /**
+   * List all available model names
+   * @returns Array of model names
+   */
   listModels(): string[];
-  getDefaultModel?(): string | null; // Get default model name
-  getEmbeddingModel?(): ProviderModel | string | null; // Updated to allow returning string or ProviderModel or null
-  generateEmbedding?(text: string): Promise<number[] | null>; // Optional method to generate embeddings
+  
+  /**
+   * Get the default model name (optional)
+   * @returns Default model name or null if none set
+   */
+  getDefaultModel?(): string | null;
+  
+  /**
+   * Get the embedding model (optional)
+   * @returns Embedding model instance, name, or null
+   */
+  getEmbeddingModel?(): ProviderModel | string | null;
+  
+  /**
+   * Generate embeddings using the provider's embedding model (optional)
+   * @param text Text to generate embeddings for
+   * @returns Vector embedding array or null if not supported
+   */
+  generateEmbedding?(text: string): Promise<number[] | null>;
+  
+  /**
+   * Test the embedding model functionality (optional)
+   * @param modelName Optional model name to test
+   * @returns Whether the embedding model is available and working
+   */
+  testEmbeddingModel?(modelName?: string): Promise<boolean>;
 }
 
 // Provider factory function type

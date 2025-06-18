@@ -14,6 +14,9 @@ export interface VectorDatabaseConnector {
   /** Adds vectors to the database */
   addVectors(vectors: Array<{ id: string, vector: number[], metadata: Record<string, any> }>): Promise<void>;
   
+  /** Adds a document to the database */
+  addDocument?(document: { id: string, name: string, content: string, metadata: Record<string, any> }): Promise<void>;
+  
   /** Similarity search for vectors */
   searchVectors(vector: number[], limit?: number, threshold?: number): Promise<Array<{ id: string, similarity: number }>>;
   
@@ -70,11 +73,11 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       }
     });
     
-    logger.debug("PostgreSQL vector database connector initialized");
+    logger.debug(`PostgreSQL vector database connector initialized with table name: ${this.tableName}`);
   }
   
   /**
-   * Ensure pgvector extension is installed and table is created
+   * Ensure pgvector extension is installed and tables are created
    */
   private async ensureConnection(): Promise<void> {
     if (this.connected) return;
@@ -86,28 +89,49 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       // Create pgvector extension if it doesn't exist
       await this.knex.raw('CREATE EXTENSION IF NOT EXISTS vector');
       
-      // Check if table exists
-      const tableExists = await this.knex.schema.hasTable(this.tableName);
+      // Extract base table name for creating documents table
+      const baseTableName = this.tableName.replace('_chunks', '');
+      const documentsTableName = `${baseTableName}_documents`;
       
-      if (!tableExists) {
-        // Create vector table with proper schema
+      logger.debug(`PostgreSQL connector: chunks table = ${this.tableName}, base = ${baseTableName}, documents = ${documentsTableName}`);
+      
+      // Create documents table if it doesn't exist
+      const documentsTableExists = await this.knex.schema.hasTable(documentsTableName);
+      if (!documentsTableExists) {
+        await this.knex.schema.createTable(documentsTableName, (table) => {
+          table.string('id').primary();
+          table.string('name').notNullable();
+          table.text('content');
+          table.jsonb('metadata');
+          table.timestamp('createdAt').defaultTo(this.knex.fn.now());
+        });
+        
+        logger.debug(`Created ${documentsTableName} table in vector database`);
+      }
+      
+      // Create chunks table if it doesn't exist
+      const chunksTableExists = await this.knex.schema.hasTable(this.tableName);
+      if (!chunksTableExists) {
         await this.knex.schema.createTable(this.tableName, (table) => {
           table.string('id').primary();
           table.string('documentId').notNullable();
           table.text('content').notNullable();
-          table.specificType('embedding', 'vector');
+          table.specificType('embedding', 'vector(1536)'); // Specify 1536 dimensions for OpenAI embeddings
           table.jsonb('metadata');
           table.timestamp('createdAt').defaultTo(this.knex.fn.now());
+          
+          // Add foreign key constraint to documents table
+          table.foreign('documentId').references('id').inTable(documentsTableName).onDelete('CASCADE');
         });
         
         // Create index for vector similarity search
         await this.knex.raw(`CREATE INDEX ${this.tableName}_embedding_idx ON ${this.tableName} USING ivfflat (embedding vector_l2_ops)`);
         
-        logger.debug(`Created ${this.tableName} table with pgvector index`);
+        logger.debug(`Created ${this.tableName} table with pgvector index and foreign key to ${documentsTableName}`);
       }
       
       this.connected = true;
-      logger.debug(`Connected to PostgreSQL vector database`);
+      logger.debug(`Connected to PostgreSQL vector database with documents and chunks tables`);
     } catch (error) {
       logger.error('Error connecting to PostgreSQL vector database:', error);
       throw new Error(`Failed to initialize PostgreSQL vector database: ${error}`);
@@ -151,18 +175,60 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
   }
   
   /**
+   * Add a document to the vector database documents table
+   */
+  async addDocument(document: { id: string, name: string, content: string, metadata: Record<string, any> }): Promise<void> {
+    try {
+      await this.ensureConnection();
+      
+      const baseTableName = this.tableName.replace('_chunks', '');
+      const documentsTableName = `${baseTableName}_documents`;
+      
+      // Check if document already exists
+      const existingDoc = await this.knex(documentsTableName)
+        .where('id', document.id)
+        .first();
+      
+      if (!existingDoc) {
+        await this.knex(documentsTableName).insert({
+          id: document.id,
+          name: document.name,
+          content: document.content,
+          metadata: JSON.stringify(document.metadata),
+          createdAt: new Date()
+        });
+        
+        logger.debug(`Added document ${document.id} to PostgreSQL vector database`);
+      } else {
+        logger.debug(`Document ${document.id} already exists in PostgreSQL vector database`);
+      }
+    } catch (error) {
+      logger.error('Error adding document to PostgreSQL vector database:', error);
+      throw error;
+    }
+  }
+  
+  /**
    * Search for similar vectors using pgvector's similarity search
    */
   async searchVectors(vector: number[], limit: number = 10, threshold: number = 0.7): Promise<Array<{ id: string, similarity: number }>> {
     try {
+      console.log(`🔧 DEBUG POSTGRES: Starting vector search with ${vector.length} dimensions, limit: ${limit}, threshold: ${threshold}`);
       await this.ensureConnection();
       
       // Convert similarity threshold to a distance threshold (cosine similarity to L2 distance)
       // Approximate conversion: 1 - similarity = (distance^2) / 2
       // Solving for distance: distance = sqrt(2 * (1 - similarity))
       const distanceThreshold = Math.sqrt(2 * (1 - threshold));
+      console.log(`🔧 DEBUG POSTGRES: Using distance threshold: ${distanceThreshold}`);
+      
+      // First, let's check how many total vectors we have
+      const countResult = await this.knex.raw(`SELECT COUNT(*) as total FROM ${this.tableName}`);
+      const totalVectors = countResult.rows[0]?.total || 0;
+      console.log(`🔧 DEBUG POSTGRES: Total vectors in table ${this.tableName}: ${totalVectors}`);
       
       // Query using L2 distance (Euclidean distance)
+      console.log(`🔧 DEBUG POSTGRES: Executing vector similarity query...`);
       const results = await this.knex.raw(`
         SELECT 
           id, 
@@ -179,13 +245,22 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       ]);
       
       const rows = results.rows;
+      console.log(`🔧 DEBUG POSTGRES: Query returned ${rows.length} rows`);
       logger.debug(`Found ${rows.length} similar vectors in PostgreSQL`);
+      
+      if (rows.length > 0) {
+        console.log(`🔧 DEBUG POSTGRES: Sample result:`, {
+          id: rows[0].id,
+          similarity: rows[0].similarity
+        });
+      }
       
       return rows.map((row: any) => ({
         id: row.id,
         similarity: parseFloat(row.similarity)
       }));
     } catch (error) {
+      console.log(`🔧 DEBUG POSTGRES: Error in searchVectors:`, error);
       logger.error('Error searching vectors in PostgreSQL:', error);
       throw error;
     }
@@ -200,14 +275,33 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       
       const result = await this.knex(this.tableName)
         .where('id', id)
-        .select('metadata')
+        .select('metadata', 'content', 'documentId')
         .first();
       
       if (!result) {
         return null;
       }
       
-      return JSON.parse(result.metadata);
+      // Parse metadata if it's a string
+      let parsedMetadata = {};
+      try {
+        if (typeof result.metadata === 'string') {
+          parsedMetadata = JSON.parse(result.metadata);
+        } else if (typeof result.metadata === 'object' && result.metadata !== null) {
+          parsedMetadata = result.metadata;
+        }
+      } catch (parseError) {
+        logger.warn(`Failed to parse metadata for vector ${id}:`, parseError);
+        parsedMetadata = {};
+      }
+      
+      // Return full data including content and documentId
+      return {
+        ...parsedMetadata,
+        content: result.content,
+        documentId: result.documentId,
+        metadata: parsedMetadata
+      };
     } catch (error) {
       logger.error(`Error getting metadata for vector ${id}:`, error);
       throw error;
@@ -325,7 +419,7 @@ class MainDatabaseVectorConnector extends BaseVectorDatabaseConnector {
                 logger.warn(`Empty embedding string for vector ${row.id}, skipping`);
                 return null;
               }
-              storedVector = JSON.parse(row.embedding);
+              storedVector = typeof row.embedding === 'string' ? JSON.parse(row.embedding) : row.embedding;
             }
             // If embedding is an object, try to extract array
             else if (typeof row.embedding === 'object') {
@@ -370,14 +464,33 @@ class MainDatabaseVectorConnector extends BaseVectorDatabaseConnector {
     try {
       const result = await this.database.knex(this.tableName)
         .where('id', id)
-        .select('metadata')
+        .select('metadata', 'content', 'documentId')
         .first();
       
       if (!result) {
         return null;
       }
       
-      return JSON.parse(result.metadata);
+      // Parse metadata if it's a string
+      let parsedMetadata = {};
+      try {
+        if (typeof result.metadata === 'string') {
+          parsedMetadata = JSON.parse(result.metadata);
+        } else if (typeof result.metadata === 'object' && result.metadata !== null) {
+          parsedMetadata = result.metadata;
+        }
+      } catch (parseError) {
+        logger.warn(`Failed to parse metadata for vector ${id}:`, parseError);
+        parsedMetadata = {};
+      }
+      
+      // Return full data including content and documentId
+      return {
+        ...parsedMetadata,
+        content: result.content,
+        documentId: result.documentId,
+        metadata: parsedMetadata
+      };
     } catch (error) {
       logger.error(`Error getting metadata for vector ${id}:`, error);
       throw error;

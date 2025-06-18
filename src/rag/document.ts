@@ -1,13 +1,19 @@
 import { v4 as uuidv4 } from "uuid";
 import {
-  DocumentRAGConfig,
-  DocumentRAGInstance,
   Document,
   RAGResult,
+  DocumentRAGConfig,
+  DocumentRAGInstance,
   DocumentRAGFactory,
+  DatabaseInstance,
 } from "../types";
+import { Plugin } from "../types";
 import { logger } from "../utils";
 import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
+import { Embedding } from "../providers";
+import {
+  DEFAULT_MAX_RESULTS
+} from "../constants";
 
 /**
  * Document-based RAG implementation
@@ -15,6 +21,7 @@ import { validateRequiredParam, validateRequiredParams } from "../utils/validati
  */
 export class DocumentRAG implements DocumentRAGInstance {
   public config: DocumentRAGConfig;
+  private documentsTableName: string;
 
   constructor(config: DocumentRAGConfig) {
     // Validate required parameters
@@ -28,10 +35,13 @@ export class DocumentRAG implements DocumentRAGInstance {
     // Apply defaults for optional config parameters
     this.config = {
       ...config,
-      tableName: config.tableName || "rag_documents",
-      maxResults: config.maxResults || 10,
+      tableName: config.tableName || "rag",
+      maxResults: config.maxResults || DEFAULT_MAX_RESULTS,
       storeEmbeddings: config.storeEmbeddings || false,
     };
+    
+    // Set up table name based on the config tableName
+    this.documentsTableName = `${this.config.tableName}_documents`;
     
     logger.debug("Document RAG system initialized");
   }
@@ -67,11 +77,8 @@ export class DocumentRAG implements DocumentRAGInstance {
     try {
       const { database, storeEmbeddings } = this.config;
       
-      // Use user-provided table name or default
-      const tableName = this.config.tableName || 'rag_documents';
-      
       // Use database's enhanced table management
-      await database.ensureTable(tableName, (table) => {
+      await database.ensureTable(this.documentsTableName, (table) => {
         table.string("id").primary();
         table.text("content").notNullable();
         table.json("metadata").notNullable();
@@ -82,26 +89,23 @@ export class DocumentRAG implements DocumentRAGInstance {
         table.timestamp("createdAt").defaultTo(database.knex.fn.now());
       });
       
-      // Update config to use the resolved table name
-      this.config.tableName = tableName;
-      
       // Check if embeddings are enabled and ensure embedding column exists
       if (storeEmbeddings) {
         const hasEmbeddingColumn = await database.knex.schema.hasColumn(
-          tableName,
+          this.documentsTableName,
           "embedding"
         );
         
         if (!hasEmbeddingColumn) {
           // Add embedding column if it doesn't exist
-          await database.knex.schema.table(tableName, (table) => {
+          await database.knex.schema.table(this.documentsTableName, (table) => {
             table.json("embedding");
           });
-          logger.debug(`Added embedding column to ${tableName} table`);
+          logger.debug(`Added embedding column to ${this.documentsTableName} table`);
         }
       }
       
-      logger.info(`Document RAG initialized with custom table: ${tableName}`);
+      logger.info(`Document RAG initialized with custom table: ${this.documentsTableName}`);
     } catch (error) {
       logger.error("Error initializing document RAG database:", error);
       throw error;
@@ -123,7 +127,7 @@ export class DocumentRAG implements DocumentRAGInstance {
     );
     
     try {
-      const { database, tableName, storeEmbeddings, memory } = this.config;
+      const { database, storeEmbeddings } = this.config;
       const id = uuidv4();
       
       const docToInsert: any = {
@@ -157,7 +161,7 @@ export class DocumentRAG implements DocumentRAGInstance {
       }
       
       // Store document in database
-      await database.knex(tableName!).insert(docToInsert);
+      await database.knex(this.documentsTableName).insert(docToInsert);
       
       logger.debug(`Added document ${id} to RAG system`);
       return id;
@@ -177,10 +181,10 @@ export class DocumentRAG implements DocumentRAGInstance {
     validateRequiredParam(id, "id", "getDocumentById");
     
     try {
-      const { database, tableName } = this.config;
+      const { database } = this.config;
       
       // Query document
-      const document = await database.knex(tableName!)
+      const document = await database.knex(this.documentsTableName)
         .where({ id })
         .first();
       
@@ -192,13 +196,13 @@ export class DocumentRAG implements DocumentRAGInstance {
       const result: Document = {
         id: document.id,
         content: document.content,
-        metadata: JSON.parse(document.metadata),
+        metadata: typeof document.metadata === 'string' ? JSON.parse(document.metadata) : document.metadata,
       };
       
       // Add embedding if available
       if (document.embedding) {
         try {
-          result.embedding = JSON.parse(document.embedding);
+          result.embedding = typeof document.embedding === 'string' ? JSON.parse(document.embedding) : document.embedding;
         } catch (error) {
           logger.warn(`Error parsing embedding for document ${id}:`, error);
         }
@@ -221,10 +225,10 @@ export class DocumentRAG implements DocumentRAGInstance {
     validateRequiredParam(id, "id", "deleteDocument");
     
     try {
-      const { database, tableName } = this.config;
+      const { database } = this.config;
       
       // Delete document
-      await database.knex(tableName!)
+      await database.knex(this.documentsTableName)
         .where({ id })
         .delete();
       
@@ -239,7 +243,7 @@ export class DocumentRAG implements DocumentRAGInstance {
    * Search for documents using text query
    * @param query The search query
    * @param limit Maximum number of results to return
-   * @returns Promise resolving to array of search results
+   * @returns Promise resolving to array of search results with document metadata
    */
   async search(query: string, limit?: number): Promise<RAGResult[]> {
     // Validate required parameters
@@ -271,86 +275,42 @@ export class DocumentRAG implements DocumentRAGInstance {
   }
 
   /**
-   * Search for documents based on metadata filters
-   * @param filter Metadata filter criteria
-   * @param limit Maximum number of results to return
-   * @returns Promise resolving to array of search results
-   */
-  async searchByMetadata(
-    filter: Record<string, any>,
-    limit?: number
-  ): Promise<RAGResult[]> {
-    // Validate required parameters
-    validateRequiredParam(filter, "filter", "searchByMetadata");
-    
-    try {
-      const { database, tableName, maxResults } = this.config;
-      
-      // Get all documents
-      const documents = await database.knex(tableName!)
-        .select("*")
-        .limit(limit || maxResults!);
-      
-      // Filter documents based on metadata criteria
-      const results: RAGResult[] = [];
-      
-      for (const doc of documents) {
-        try {
-          const metadata = JSON.parse(doc.metadata);
-          let matches = true;
-          
-          // Check if document metadata matches all filter criteria
-          for (const [key, value] of Object.entries(filter)) {
-            if (metadata[key] !== value) {
-              matches = false;
-              break;
-            }
-          }
-          
-          if (matches) {
-            results.push({
-              content: doc.content,
-              metadata,
-              sourceId: doc.id,
-            });
-          }
-        } catch (error) {
-          logger.warn(`Error processing document ${doc.id}, skipping:`, error);
-          continue;
-        }
-      }
-      
-      return results;
-    } catch (error) {
-      logger.error("Error searching by metadata:", error);
-      throw error;
-    }
-  }
-
-  /**
    * Search for documents using keyword matching
    * @param query The search query
    * @param limit Maximum number of results to return
-   * @returns Promise resolving to array of search results
+   * @returns Promise resolving to array of search results with full document metadata
    */
   private async searchByKeyword(
     query: string,
     limit?: number
   ): Promise<RAGResult[]> {
     try {
-      const { database, tableName, maxResults } = this.config;
+      const { database, maxResults } = this.config;
       
       // Simple keyword search using database LIKE queries
-      const documents = await database.knex(tableName!)
+      const documents = await database.knex(this.documentsTableName)
         .whereRaw("LOWER(content) LIKE ?", [`%${query.toLowerCase()}%`])
         .limit(limit || maxResults!);
       
-      // Process results
-      return documents.map(doc => ({
-        content: doc.content,
-        metadata: JSON.parse(doc.metadata),
-        sourceId: doc.id,
-      }));
+      // Process results with enhanced metadata
+      return documents.map(doc => {
+        const parsedMetadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
+        
+        return {
+          content: doc.content,
+          metadata: {
+            // Include original document metadata
+            ...parsedMetadata,
+            // Add document-level information for LLM context
+            documentId: doc.id,
+            documentType: 'full_document',
+            searchMethod: 'keyword',
+            contentLength: doc.content.length,
+            createdAt: doc.createdAt
+          },
+          sourceId: doc.id,
+        };
+      });
     } catch (error) {
       logger.error(`Error searching by keyword "${query}":`, error);
       throw error;
@@ -361,17 +321,17 @@ export class DocumentRAG implements DocumentRAGInstance {
    * Search for documents using embedding similarity
    * @param embedding The query embedding vector
    * @param limit Maximum number of results to return
-   * @returns Promise resolving to array of search results with similarity scores
+   * @returns Promise resolving to array of search results with similarity scores and full metadata
    */
   private async searchWithEmbedding(
     embedding: number[],
     limit?: number
   ): Promise<RAGResult[]> {
     try {
-      const { database, tableName, maxResults } = this.config;
+      const { database, maxResults } = this.config;
       
       // Get all documents with embeddings
-      const documents = await database.knex(tableName!)
+      const documents = await database.knex(this.documentsTableName)
         .select("*")
         .whereNotNull("embedding");
       
@@ -381,7 +341,7 @@ export class DocumentRAG implements DocumentRAGInstance {
       for (const doc of documents) {
         try {
           // Parse embedding from JSON
-          const docEmbedding = JSON.parse(doc.embedding);
+          const docEmbedding = typeof doc.embedding === 'string' ? JSON.parse(doc.embedding) : doc.embedding;
           
           // Skip documents with invalid embeddings
           if (!Array.isArray(docEmbedding) || docEmbedding.length === 0) {
@@ -391,10 +351,23 @@ export class DocumentRAG implements DocumentRAGInstance {
           // Calculate cosine similarity
           const similarity = this.calculateCosineSimilarity(embedding, docEmbedding);
           
-          // Add to results
+          const parsedMetadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
+          
+          // Add to results with enhanced metadata
           results.push({
             content: doc.content,
-            metadata: JSON.parse(doc.metadata),
+            metadata: {
+              // Include original document metadata
+              ...parsedMetadata,
+              // Add document-level information for LLM context
+              documentId: doc.id,
+              documentType: 'full_document',
+              searchMethod: 'embedding',
+              similarity: similarity,
+              contentLength: doc.content.length,
+              createdAt: doc.createdAt,
+              embeddingDimensions: docEmbedding.length
+            },
             similarity,
             sourceId: doc.id,
           });
@@ -444,6 +417,59 @@ export class DocumentRAG implements DocumentRAGInstance {
     
     // Calculate similarity
     return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+  }
+
+  /**
+   * Create RAG search tool for document-based search
+   * @returns Array with document search tool
+   */
+  createRAGTools(): Plugin[] {
+    return [{
+      name: "rag_search",
+      description: "Search through documents using keyword and content similarity to find relevant information",
+      parameters: [
+        {
+          name: "query",
+          type: "string",
+          description: "The search query to find relevant documents or content",
+          required: true
+        },
+        {
+          name: "limit",
+          type: "number", 
+          description: "Maximum number of results to return (default: 5)",
+          required: false,
+          default: 5
+        }
+      ],
+      execute: async (params: Record<string, any>) => {
+        try {
+          const query = params.query as string;
+          const limit = params.limit as number || 5;
+          
+          if (!query) {
+            throw new Error("Query parameter is required");
+          }
+          
+          // Use document-based search
+          const results = await this.search(query, limit);
+          
+          return {
+            success: true,
+            results: results,
+            query: query,
+            resultCount: results.length,
+            searchType: "document"
+          };
+        } catch (error) {
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : "Unknown error occurred during document search",
+            query: params.query
+          };
+        }
+      }
+    }];
   }
 }
 
