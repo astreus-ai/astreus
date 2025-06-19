@@ -26,6 +26,9 @@ export interface VectorDatabaseConnector {
   /** Get metadata for a vector by ID */
   getVectorMetadata(id: string): Promise<Record<string, any> | null>;
   
+  /** Get the underlying database instance for direct access */
+  getDatabase?(): any;
+  
   /** Close the connection */
   close(): Promise<void>;
 }
@@ -216,25 +219,25 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       console.log(`🔧 DEBUG POSTGRES: Starting vector search with ${vector.length} dimensions, limit: ${limit}, threshold: ${threshold}`);
       await this.ensureConnection();
       
-      // Convert similarity threshold to a distance threshold (cosine similarity to L2 distance)
-      // Approximate conversion: 1 - similarity = (distance^2) / 2
-      // Solving for distance: distance = sqrt(2 * (1 - similarity))
-      const distanceThreshold = Math.sqrt(2 * (1 - threshold));
-      console.log(`🔧 DEBUG POSTGRES: Using distance threshold: ${distanceThreshold}`);
+      // For cosine similarity using pgvector: 1 - (embedding <=> ?) 
+      // where <=> is cosine distance operator
+      // We want similarity >= threshold, so cosine distance <= (1 - threshold)
+      const distanceThreshold = 1 - threshold;
+      console.log(`🔧 DEBUG POSTGRES: Similarity threshold: ${threshold}, Cosine distance threshold: ${distanceThreshold}`);
       
       // First, let's check how many total vectors we have
       const countResult = await this.knex.raw(`SELECT COUNT(*) as total FROM ${this.tableName}`);
       const totalVectors = countResult.rows[0]?.total || 0;
       console.log(`🔧 DEBUG POSTGRES: Total vectors in table ${this.tableName}: ${totalVectors}`);
       
-      // Query using L2 distance (Euclidean distance)
-      console.log(`🔧 DEBUG POSTGRES: Executing vector similarity query...`);
+      // Query using cosine distance operator for better semantic similarity
+      console.log(`🔧 DEBUG POSTGRES: Executing cosine similarity query...`);
       const results = await this.knex.raw(`
         SELECT 
           id, 
-          1 - (embedding <-> ?) / 2 as similarity
+          1 - (embedding <=> ?) as similarity
         FROM ${this.tableName}
-        WHERE embedding <-> ? < ?
+        WHERE (embedding <=> ?) <= ?
         ORDER BY similarity DESC
         LIMIT ?
       `, [
@@ -324,6 +327,13 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       logger.error('Error deleting vectors from PostgreSQL:', error);
       throw error;
     }
+  }
+  
+  /**
+   * Get the underlying database instance for direct access
+   */
+  getDatabase(): knex.Knex {
+    return this.knex;
   }
   
   /**
@@ -530,6 +540,13 @@ class MainDatabaseVectorConnector extends BaseVectorDatabaseConnector {
       logger.error("Error deleting vectors from main database:", error);
       throw error;
     }
+  }
+  
+  /**
+   * Get the underlying database instance for direct access
+   */
+  getDatabase(): DatabaseInstance {
+    return this.database;
   }
   
   async close(): Promise<void> {

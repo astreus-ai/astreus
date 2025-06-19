@@ -371,8 +371,38 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
             
             if (tool && tool.execute) {
               console.log(`🔧 DEBUG CHAT: About to execute tool ${toolCall.name}...`);
+              
+              // Inject userLanguage from metadata if available and tool supports it
+              let toolArguments = toolCall.arguments || {};
+              
+              console.log(`🔧 DEBUG CHAT: Metadata check:`, {
+                hasMetadata: !!metadata,
+                metadataKeys: metadata ? Object.keys(metadata) : [],
+                userLanguage: metadata?.userLanguage,
+                language: metadata?.language,
+                toolName: toolCall.name
+              });
+              
+              if (metadata?.userLanguage && toolCall.name === 'rag_search') {
+                console.log(`🔧 DEBUG CHAT: Injecting userLanguage: ${metadata.userLanguage} into ${toolCall.name} tool`);
+                toolArguments = {
+                  ...toolArguments,
+                  userLanguage: metadata.userLanguage
+                };
+                console.log(`🔧 DEBUG CHAT: Enhanced tool arguments:`, toolArguments);
+              } else if (metadata?.language && toolCall.name === 'rag_search') {
+                console.log(`🔧 DEBUG CHAT: Using fallback language: ${metadata.language} for ${toolCall.name} tool`);
+                toolArguments = {
+                  ...toolArguments,
+                  userLanguage: metadata.language
+                };
+                console.log(`🔧 DEBUG CHAT: Enhanced tool arguments (fallback):`, toolArguments);
+              } else {
+                console.log(`🔧 DEBUG CHAT: No userLanguage injection for ${toolCall.name}. Metadata available: ${!!metadata}`);
+              }
+              
               // Execute the tool
-              const result = await tool.execute(toolCall.arguments || {});
+              const result = await tool.execute(toolArguments);
               console.log(`🔧 DEBUG CHAT: Tool ${toolCall.name} execution result:`, result);
               
               toolResults.push({
@@ -422,11 +452,24 @@ Result: ${tr.success ? JSON.stringify(tr.result) : 'ERROR: ' + tr.error}`).join(
 Based on these tool results, generate a helpful response to the user. Be natural and conversational - don't mention the technical details of the tool calls.`
           };
           
+          // Log streaming options before final response generation
+          console.log(`🔧 DEBUG CHAT: Final response streaming options: stream=${stream}, hasOnChunk=${!!onChunk}`);
+          
           // Call the model again with the tool results to generate the final response
+          // Preserve streaming options for the final response
           const finalResponse = await model.complete([
             ...messages,
             toolResultsMessage
-          ]);
+          ], {
+            temperature,
+            maxTokens,
+            stream: stream, // Always preserve streaming setting
+            onChunk: onChunk, // Always preserve chunk callback
+            tools: undefined, // Don't use tools for the final response generation
+            toolCalling: false
+          });
+          
+          console.log(`🔧 DEBUG CHAT: Final response generated with streaming=${stream}, hasOnChunk=${!!onChunk}`);
           
           // Update response to the final result
           response = typeof finalResponse === 'string' ? finalResponse : finalResponse.content;

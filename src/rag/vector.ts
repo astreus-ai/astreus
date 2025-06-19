@@ -29,7 +29,6 @@ export class VectorRAG implements VectorRAGInstance {
   private vectorDatabaseConnector: VectorDatabaseConnector;
   private documentsTableName: string;
   private chunksTableName: string;
-  private associationsTableName: string;
 
   constructor(config: VectorRAGConfig) {
     // Validate required parameters
@@ -54,7 +53,6 @@ export class VectorRAG implements VectorRAGInstance {
     const baseTableName = this.config.tableName;
     this.documentsTableName = `${baseTableName}_documents`;
     this.chunksTableName = `${baseTableName}_chunks`;
-    this.associationsTableName = `${baseTableName}_chunk_associations`;
     
     // Ensure vectorDatabase config has the correct tableName for all database types
     if (this.config.vectorDatabase) {
@@ -368,21 +366,8 @@ export class VectorRAG implements VectorRAGInstance {
         }
       ]);
       
-      // Only store associations if using same database for vectors
       // External vector DB already has all data in metadata, no need for separate associations
-      if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
-        // Store association between document and chunk
-        await database.knex(this.associationsTableName).insert({
-          chunkId,
-          documentId: chunk.documentId,
-          chunkIndex,
-          createdAt: new Date()
-        });
-        
-        logger.debug(`Added chunk association for chunk ${chunkId} to document ${chunk.documentId}`);
-      } else {
-        logger.debug(`External vector DB - chunk ${chunkId} stored with all data in vector metadata`);
-      }
+      logger.debug(`Chunk ${chunkId} stored with all data in vector metadata`);
       
       return chunkId;
     } catch (error) {
@@ -420,44 +405,11 @@ export class VectorRAG implements VectorRAGInstance {
           metadata: typeof document.metadata === 'string' ? JSON.parse(document.metadata) : document.metadata,
         };
       } else {
-        // For external vector DB, reconstruct document from chunks
-        const chunkAssociations = await database.knex(this.associationsTableName)
-          .where("documentId", id)
-          .orderBy("chunkIndex", "asc")
-          .select("chunkId");
-        
-        if (!chunkAssociations || chunkAssociations.length === 0) {
-          return null;
-        }
-        
-        // Get chunk data from vector database
-        let content = "";
-        let metadata = {};
-        
-        for (const association of chunkAssociations) {
-          try {
-            const chunkMetadata = await this.vectorDatabaseConnector.getVectorMetadata(association.chunkId);
-            if (chunkMetadata && chunkMetadata.content) {
-              content += chunkMetadata.content;
-              // Use metadata from first chunk as document metadata
-              if (Object.keys(metadata).length === 0 && chunkMetadata.metadata) {
-                metadata = chunkMetadata.metadata;
-              }
-            }
-          } catch (error) {
-            logger.warn(`Error getting chunk ${association.chunkId} for document ${id}:`, error);
-          }
-        }
-        
-        if (!content) {
-          return null;
-        }
-        
-        return {
-          id,
-          content,
-          metadata,
-        };
+        // For external vector DB, documents are stored in the vector database
+        // We can't reconstruct full documents from chunks without associations table
+        // This feature is not supported with external vector database
+        logger.warn(`getDocumentById not supported with external vector database - document ${id}`);
+        return null;
       }
     } catch (error) {
       logger.error("Error getting document by ID:", error);
@@ -500,26 +452,10 @@ export class VectorRAG implements VectorRAGInstance {
         
         logger.debug(`Deleted document ${id} from main database`);
       } else {
-        // Using external vector database
-        const chunkAssociations = await database.knex(this.associationsTableName)
-          .where("documentId", id)
-          .select("chunkId");
-        
-        if (chunkAssociations && chunkAssociations.length > 0) {
-          const chunkIds = chunkAssociations.map((c: any) => c.chunkId);
-          
-          // Delete vectors from the vector database
-          await this.vectorDatabaseConnector.deleteVectors(chunkIds);
-          
-          // Delete associations from the main database
-          await database.knex(this.associationsTableName)
-            .where("documentId", id)
-            .delete();
-          
-          logger.debug(`Deleted ${chunkIds.length} vectors from external vector database for document ${id}`);
-        } else {
-          logger.warn(`No chunks found for document ${id} in external vector database`);
-        }
+        // Using external vector database - deletion not supported without associations table
+        logger.warn(`deleteDocument not fully supported with external vector database - document ${id}`);
+        // We can't easily find all chunks for a document without associations table
+        // This would require searching through all vectors to find ones with matching documentId
       }
       
       logger.debug(`Successfully deleted document ${id}`);
@@ -530,89 +466,182 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
-   * Search for similar documents using text query
+   * Search for documents using the query
    * @param query The search query
    * @param limit Maximum number of results to return
-   * @returns Promise resolving to array of search results with chunk and document metadata
+   * @param userLanguage Optional user language for translation
+   * @returns Promise resolving to an array of search results
    */
-  async search(query: string, limit?: number): Promise<RAGResult[]> {
+  async search(
+    query: string, 
+    limit?: number, 
+    userLanguage?: string,
+    expandContext: boolean = true,
+    expansionRange: number = 1
+  ): Promise<RAGResult[]> {
     // Validate required parameters
     validateRequiredParam(query, "query", "search");
     
     try {
       const maxResults = limit || this.config.maxResults || 10;
+      console.log(`🔧 DEBUG RAG: Search query: "${query}", limit: ${maxResults}, userLanguage: ${userLanguage || 'not specified'}, expandContext: ${expandContext}, expansionRange: ${expansionRange}`);
       
-      console.log(`🔧 DEBUG RAG: Starting search for query: "${query}" with limit: ${maxResults}`);
-      console.log(`🔧 DEBUG RAG: Config provider exists:`, !!this.config.provider);
-      console.log(`🔧 DEBUG RAG: Provider generateEmbedding exists:`, !!(this.config.provider && this.config.provider.generateEmbedding));
-      
-      // Use semantic search if provider or memory with embedding support is available
-      if (this.config.provider && this.config.provider.generateEmbedding) {
+      // Detect document language and translate query if needed
+      let searchQuery = query;
+      if (userLanguage) {
         try {
-          console.log(`🔧 DEBUG RAG: Generating embedding for search query using provider: "${query}"`);
-          logger.debug(`Generating embedding for search query using provider: "${query}"`);
-          // Generate embedding for query using provider directly
-          const queryEmbedding = await this.config.provider.generateEmbedding(query);
+          const documentLanguage = await this.detectDocumentLanguage();
+          console.log(`🔧 DEBUG RAG: Document language: ${documentLanguage}, User language: ${userLanguage}`);
           
-          console.log(`🔧 DEBUG RAG: Generated embedding result:`, queryEmbedding ? `${queryEmbedding.length} dimensions` : 'null/empty');
-          
-          if (queryEmbedding && queryEmbedding.length > 0) {
-            console.log(`🔧 DEBUG RAG: Using semantic search with ${queryEmbedding.length} dimensions`);
-            logger.debug(`Generated embedding with ${queryEmbedding.length} dimensions`);
-            // Use embedding for semantic search
-            return this.searchByVector(queryEmbedding, maxResults);
-          } else {
-            console.log(`🔧 DEBUG RAG: Provider returned empty embedding, falling back to keyword search`);
-            logger.warn("Provider returned empty embedding, falling back to keyword search");
-            return this.searchByKeyword(query, maxResults);
-          }
-        } catch (embeddingError) {
-          logger.warn("Failed to generate embedding using provider, trying memory fallback:", embeddingError);
-          
-          // Fallback to memory if provider fails
-          if (this.config.memory && this.config.memory.searchByEmbedding) {
+          // If user language is different from document language, translate the query
+          if (documentLanguage && userLanguage.toLowerCase() !== documentLanguage.toLowerCase()) {
+            console.log(`🔧 DEBUG RAG: Translating from ${userLanguage} to ${documentLanguage}...`);
+            
             try {
-              logger.debug(`Generating embedding for search query using memory fallback: "${query}"`);
-              const { Embedding } = await import("../providers");
-              const queryEmbedding = await Embedding.generateEmbedding(query);
-              
-              logger.debug(`Generated embedding with ${queryEmbedding.length} dimensions`);
-              return this.searchByVector(queryEmbedding, maxResults);
-            } catch (memoryError) {
-              logger.warn("Failed to generate embedding using memory fallback, using keyword search:", memoryError);
-              return this.searchByKeyword(query, maxResults);
+              searchQuery = await this.translateQuery(query, userLanguage, documentLanguage);
+              console.log(`🔧 DEBUG RAG: Translated query: "${query}" -> "${searchQuery}"`);
+            } catch (translationError) {
+              console.log(`🔧 DEBUG RAG: Translation failed, using original query`);
+              searchQuery = query;
             }
           } else {
-            // Fall back to keyword search
-            logger.debug("No memory fallback available, using keyword search");
-            return this.searchByKeyword(query, maxResults);
+            console.log(`🔧 DEBUG RAG: No translation needed, languages match`);
+          }
+        } catch (detectionError) {
+          console.log(`🔧 DEBUG RAG: Language detection failed, using original query`);
+          searchQuery = query;
+        }
+      }
+      
+      // Use semantic search if provider with embedding support is available
+      if (this.config.provider && this.config.provider.generateEmbedding) {
+        try {
+          console.log(`🔧 DEBUG RAG: Generating embedding for: "${searchQuery}"`);
+          const queryEmbedding = await this.config.provider.generateEmbedding(searchQuery);
+          
+          if (queryEmbedding && queryEmbedding.length > 0) {
+            console.log(`🔧 DEBUG RAG: Using vector search with ${queryEmbedding.length} dimensions`);
+            
+            // Use default similarity threshold for quality results
+            const searchThreshold = DEFAULT_VECTOR_SIMILARITY_THRESHOLD;
+            const results = await this.searchByVector(queryEmbedding, maxResults, searchThreshold, expandContext, expansionRange);
+            console.log(`🔧 DEBUG RAG: Vector search returned ${results.length} results`);
+            
+            return results;
+          } else {
+            console.log(`🔧 DEBUG RAG: Empty embedding, falling back to keyword search`);
+            return this.searchByKeyword(searchQuery, maxResults);
+          }
+        } catch (embeddingError) {
+          console.log(`🔧 DEBUG RAG: Embedding generation failed, trying fallback`);
+          
+          // Try memory fallback if available
+          if (this.config.memory && this.config.memory.searchByEmbedding) {
+            try {
+              const { Embedding } = await import("../providers");
+              const queryEmbedding = await Embedding.generateEmbedding(searchQuery);
+              
+              const searchThreshold = DEFAULT_VECTOR_SIMILARITY_THRESHOLD;
+              return this.searchByVector(queryEmbedding, maxResults, searchThreshold, expandContext, expansionRange);
+            } catch (memoryError) {
+              console.log(`🔧 DEBUG RAG: Memory fallback failed, using keyword search`);
+              return this.searchByKeyword(searchQuery, maxResults);
+            }
+          } else {
+            console.log(`🔧 DEBUG RAG: No fallback available, using keyword search`);
+            return this.searchByKeyword(searchQuery, maxResults);
           }
         }
       } else if (this.config.memory && this.config.memory.searchByEmbedding) {
         try {
-          logger.debug(`Generating embedding for search query using memory: "${query}"`);
-          // Generate embedding for query using Embedding utility directly
+          console.log(`🔧 DEBUG RAG: Using memory for embedding generation`);
           const { Embedding } = await import("../providers");
-          const queryEmbedding = await Embedding.generateEmbedding(query);
+          const queryEmbedding = await Embedding.generateEmbedding(searchQuery);
           
-          logger.debug(`Generated embedding with ${queryEmbedding.length} dimensions`);
-          
-          // Use embedding for semantic search
-          return this.searchByVector(queryEmbedding, maxResults);
+          const searchThreshold = DEFAULT_VECTOR_SIMILARITY_THRESHOLD;
+          return this.searchByVector(queryEmbedding, maxResults, searchThreshold, expandContext, expansionRange);
         } catch (embeddingError) {
-          logger.warn("Failed to generate embedding using memory, falling back to keyword search:", embeddingError);
-          // Fall back to keyword search
-          return this.searchByKeyword(query, maxResults);
+          console.log(`🔧 DEBUG RAG: Memory embedding failed, using keyword search`);
+          return this.searchByKeyword(searchQuery, maxResults);
         }
       } else {
-        // Fall back to keyword search
-        logger.debug("No provider or memory with embedding support, using keyword search");
-        return this.searchByKeyword(query, maxResults);
+        console.log(`🔧 DEBUG RAG: No embedding support, using keyword search`);
+        return this.searchByKeyword(searchQuery, maxResults);
       }
     } catch (error) {
-      logger.error("Error searching in vector RAG:", error);
+      console.log(`🔧 DEBUG RAG: Search error:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Expand chunks by retrieving adjacent chunks (before and after) for better context
+   * This is especially useful for regulation documents where context matters
+   * @param chunks The original chunks found by search
+   * @param expansionRange Number of chunks to include before and after each result (default: 1)
+   * @returns Promise resolving to expanded chunks with adjacent context
+   */
+  private async expandChunksWithContext(
+    chunks: any[],
+    expansionRange: number = 1
+  ): Promise<any[]> {
+    if (chunks.length === 0 || expansionRange === 0) {
+      return chunks;
+    }
+
+    console.log(`🔧 DEBUG RAG: Expanding ${chunks.length} chunks with ${expansionRange} adjacent chunks each direction`);
+
+    // For external vector database
+    if (this.config.vectorDatabase?.type !== VectorDatabaseType.SAME_AS_MAIN) {
+      // For external vector DB, we would need additional metadata to find adjacent chunks
+      // For now, return original chunks as external DBs might not have chunk ordering
+      console.log(`🔧 DEBUG RAG: External vector DB - chunk expansion not implemented`);
+      return chunks;
+    }
+
+    const { database } = this.config;
+    const expandedChunks = new Map();
+    
+    // First, add all original chunks
+    chunks.forEach(chunk => {
+      expandedChunks.set(chunk.id, { ...chunk, isOriginal: true });
+    });
+
+    // For each original chunk, find adjacent chunks
+    for (const chunk of chunks) {
+      try {
+        // Get adjacent chunks based on chunk_index within the same document
+        const adjacentChunks = await database.knex(this.chunksTableName)
+          .where('documentId', chunk.documentId)
+          .where('metadata->chunk_index', '>=', (chunk.metadata?.chunk_index || 0) - expansionRange)
+          .where('metadata->chunk_index', '<=', (chunk.metadata?.chunk_index || 0) + expansionRange)
+          .whereNot('id', chunk.id) // Exclude the original chunk
+          .select('*');
+
+        console.log(`🔧 DEBUG RAG: Found ${adjacentChunks.length} adjacent chunks for chunk ${chunk.id} (index: ${chunk.metadata?.chunk_index})`);
+
+        // Add adjacent chunks to the map
+        for (const adjChunk of adjacentChunks) {
+          if (!expandedChunks.has(adjChunk.id)) {
+            expandedChunks.set(adjChunk.id, {
+              ...adjChunk,
+              isOriginal: false,
+              isAdjacent: true,
+              parentOriginalChunk: chunk.id,
+              // Lower similarity for adjacent chunks
+              similarity: (chunk.similarity || 0) * 0.7
+            });
+          }
+        }
+      } catch (error) {
+        console.log(`🔧 DEBUG RAG: Error finding adjacent chunks for ${chunk.id}:`, error);
+      }
+    }
+
+    const result = Array.from(expandedChunks.values());
+    console.log(`🔧 DEBUG RAG: Expansion result: ${chunks.length} original -> ${result.length} total chunks`);
+    
+    return result;
   }
 
   /**
@@ -620,12 +649,16 @@ export class VectorRAG implements VectorRAGInstance {
    * @param embedding The query embedding vector
    * @param limit Maximum number of results to return
    * @param threshold Minimum similarity threshold (0-1)
+   * @param expandContext Whether to include adjacent chunks for better context (default: true)
+   * @param expansionRange Number of chunks to include before and after each result (default: 1)
    * @returns Promise resolving to an array of search results with enhanced metadata
    */
   async searchByVector(
     embedding: number[],
     limit?: number,
-    threshold: number = DEFAULT_VECTOR_SIMILARITY_THRESHOLD
+    threshold: number = DEFAULT_VECTOR_SIMILARITY_THRESHOLD,
+    expandContext: boolean = true,
+    expansionRange: number = 1
   ): Promise<RAGResult[]> {
     try {
       const maxResults = limit || this.config.maxResults || 10;
@@ -651,7 +684,7 @@ export class VectorRAG implements VectorRAGInstance {
         logger.debug(`Fetching chunk details from table: ${this.chunksTableName}`);
         
         // Get detailed information for each chunk
-        const chunkDetails = await database.knex(this.chunksTableName)
+        let chunkDetails = await database.knex(this.chunksTableName)
           .whereIn(
             "id",
             similarVectors.map((result) => result.id)
@@ -659,6 +692,21 @@ export class VectorRAG implements VectorRAGInstance {
           .select("*");
         
         logger.debug(`Retrieved ${chunkDetails.length} chunk details`);
+
+        // Add similarity scores to chunk details
+        chunkDetails = chunkDetails.map((chunk: any) => {
+          const similarityResult = similarVectors.find((v) => v.id === chunk.id);
+          return {
+            ...chunk,
+            similarity: similarityResult?.similarity || 0
+          };
+        });
+
+        // Expand chunks with adjacent context if enabled
+        if (expandContext && expansionRange > 0) {
+          console.log(`🔧 DEBUG RAG: Expanding chunks with context (range: ${expansionRange})`);
+          chunkDetails = await this.expandChunksWithContext(chunkDetails, expansionRange);
+        }
         
         // Get parent document information for each chunk
         const documentIds = [...new Set(chunkDetails.map((chunk: any) => chunk.documentId))];
@@ -673,7 +721,6 @@ export class VectorRAG implements VectorRAGInstance {
         
         // Map to the expected result format with enhanced metadata
         return chunkDetails.map((chunk: any) => {
-          const similarityResult = similarVectors.find((v) => v.id === chunk.id);
           const parentDocument = documentsMap[chunk.documentId];
           
           try {
@@ -692,9 +739,13 @@ export class VectorRAG implements VectorRAGInstance {
                 documentId: chunk.documentId,
                 chunkType: 'text_chunk',
                 searchMethod: 'vector',
-                similarity: similarityResult?.similarity || 0,
+                similarity: chunk.similarity || 0,
                 chunkLength: chunk.content.length,
                 chunkCreatedAt: chunk.createdAt,
+                // Context expansion metadata
+                isOriginal: chunk.isOriginal !== false, // Default to true for backward compatibility
+                isAdjacent: chunk.isAdjacent || false,
+                parentOriginalChunk: chunk.parentOriginalChunk || null,
                 // Include parent document metadata for context
                 document: {
                   ...documentMetadata,
@@ -702,7 +753,7 @@ export class VectorRAG implements VectorRAGInstance {
                   documentCreatedAt: parentDocument ? parentDocument.createdAt : null
                 }
               },
-              similarity: similarityResult?.similarity || 0,
+              similarity: chunk.similarity || 0,
               sourceId: chunk.id,
             };
           } catch (parseError) {
@@ -714,10 +765,12 @@ export class VectorRAG implements VectorRAGInstance {
                 documentId: chunk.documentId,
                 chunkType: 'text_chunk',
                 searchMethod: 'vector',
-                similarity: similarityResult?.similarity || 0,
-                error: 'metadata_parse_error'
+                similarity: chunk.similarity || 0,
+                error: 'metadata_parse_error',
+                isOriginal: chunk.isOriginal !== false,
+                isAdjacent: chunk.isAdjacent || false
               },
-              similarity: similarityResult?.similarity || 0,
+              similarity: chunk.similarity || 0,
               sourceId: chunk.id,
             };
           }
@@ -748,43 +801,50 @@ export class VectorRAG implements VectorRAGInstance {
             // Get parent document metadata if available
             let parentDocumentMetadata = {};
             if (vectorMetadata.documentId) {
-              try {
-                const associations = await database.knex(this.associationsTableName)
-                  .where("chunkId", vector.id)
-                  .first();
-                
-                if (associations) {
-                  // In external vector DB setup, we would need to fetch document metadata
-                  // from the original source or store it with each chunk
-                  parentDocumentMetadata = {
-                    documentId: vectorMetadata.documentId,
-                    note: 'Parent document metadata not fully available in external vector DB setup'
-                  };
-                }
-              } catch (docError) {
-                logger.warn(`Error fetching parent document metadata for chunk ${vector.id}:`, docError);
-              }
+              // For external vector DB, we don't use associations table
+              // Instead, use the metadata stored with the chunk
+              parentDocumentMetadata = {
+                documentId: vectorMetadata.documentId,
+                source: 'external_vector_db',
+                // Include any document metadata that was stored with the chunk
+                ...(vectorMetadata.document || {})
+              };
             }
             
             // The metadata from the vector database should include:
             // - content: The text content of the chunk
-            // - metadata: The original metadata object of the chunk
+            // - metadata: The original metadata object of the chunk (already parsed)
             // - documentId: The ID of the parent document
+            
+            // Extract the parsed metadata (excluding content and documentId which are separate fields)
+            const { content, documentId, metadata: originalMetadata, ...extraFields } = vectorMetadata;
+            
+            console.log(`🔧 DEBUG RAG: Vector ${vector.id} metadata breakdown:`);
+            console.log(`🔧 DEBUG RAG: - originalMetadata:`, JSON.stringify(originalMetadata, null, 2));
+            // console.log(`🔧 DEBUG RAG: - extraFields:`, JSON.stringify(extraFields, null, 2));
+            
+            const finalMetadata = {
+              // Include original chunk metadata (already parsed by PostgreSQL connector)
+              ...(originalMetadata || {}),
+              // Include any extra fields from vector database
+              ...extraFields,
+              // Add chunk-specific information
+              chunkId: vector.id,
+              documentId: vectorMetadata.documentId,
+              chunkType: 'text_chunk',
+              searchMethod: 'vector_external',
+              similarity: vector.similarity,
+              chunkLength: vectorMetadata.content.length,
+              // Context expansion metadata (for external DB, we mark as original since no expansion)
+              isOriginal: true,
+              isAdjacent: false,
+              // Include available parent document metadata
+              document: parentDocumentMetadata
+            };
+            
             results.push({
               content: vectorMetadata.content,
-              metadata: {
-                // Include original chunk metadata
-                ...vectorMetadata.metadata,
-                // Add chunk-specific information
-                chunkId: vector.id,
-                documentId: vectorMetadata.documentId,
-                chunkType: 'text_chunk',
-                searchMethod: 'vector_external',
-                similarity: vector.similarity,
-                chunkLength: vectorMetadata.content.length,
-                // Include available parent document metadata
-                document: parentDocumentMetadata
-              },
+              metadata: finalMetadata,
               similarity: vector.similarity,
               sourceId: vector.id,
             });
@@ -918,7 +978,7 @@ export class VectorRAG implements VectorRAGInstance {
   createRAGTools(): Plugin[] {
     return [{
       name: "rag_search",
-      description: "Search through documents using vector similarity to find relevant information",
+      description: "Search through documents using vector similarity to find relevant information. For regulation documents, automatically includes adjacent chunks for better context.",
       parameters: [
         {
           name: "query",
@@ -929,31 +989,99 @@ export class VectorRAG implements VectorRAGInstance {
         {
           name: "limit",
           type: "number", 
-          description: "Maximum number of results to return (default: 5)",
+          description: "Maximum number of initial results to return (default: 5). Final result count may be higher due to context expansion.",
           required: false,
           default: 5
+        },
+        {
+          name: "userLanguage",
+          type: "string",
+          description: "The language of the user's query (e.g., 'tr', 'en', 'de')",
+          required: false
+        },
+        {
+          name: "expandContext",
+          type: "boolean",
+          description: "Whether to include adjacent chunks for better context (default: true, recommended for regulation documents)",
+          required: false,
+          default: true
+        },
+        {
+          name: "expansionRange",
+          type: "number",
+          description: "Number of chunks to include before and after each result (default: 1, range: 0-3)",
+          required: false,
+          default: 1
         }
       ],
       execute: async (params: Record<string, any>) => {
         try {
           const query = params.query as string;
           const limit = params.limit as number || 5;
+          const userLanguage = params.userLanguage as string;
+          const expandContext = params.expandContext !== undefined ? params.expandContext as boolean : true;
+          const expansionRange = Math.min(Math.max(params.expansionRange as number || 1, 0), 3); // Clamp between 0-3
+          
+          console.log(`🔧 DEBUG RAG: Tool execution started with parameters:`, {
+            query: query,
+            limit: limit,
+            userLanguage: userLanguage,
+            expandContext: expandContext,
+            expansionRange: expansionRange,
+            hasUserLanguage: !!userLanguage,
+            allParams: Object.keys(params)
+          });
           
           if (!query) {
             throw new Error("Query parameter is required");
           }
           
-          // Use vector-based search
-          const results = await this.search(query, limit);
+          // Use vector-based search with language-aware search and context expansion
+          console.log(`🔧 DEBUG RAG: Calling this.search with userLanguage: ${userLanguage}...`);
+          const results = await this.search(query, limit, userLanguage, expandContext, expansionRange);
+          
+          console.log(`🔧 DEBUG RAG: Search completed with ${results.length} results`);
+          
+          // Filter results by minimum similarity threshold (0.7) to ensure quality
+          const highQualityResults = results.filter(r => {
+            const similarity = r.similarity || r.metadata?.similarity || 0;
+            return similarity >= 0.7;
+          });
+          
+          console.log(`🔧 DEBUG RAG: Filtered to ${highQualityResults.length} high-quality results (similarity >= 0.7)`);
+          
+          // If no high-quality results found, return "no results found" response
+          if (highQualityResults.length === 0) {
+            console.log(`🔧 DEBUG RAG: No results meet minimum similarity threshold (0.7), returning no results`);
+            return {
+              success: true,
+              results: [],
+              query: query,
+              resultCount: 0,
+              originalResultCount: 0,
+              adjacentChunkCount: 0,
+              contextExpanded: false,
+              searchType: "vector_with_context",
+              message: "No relevant documents found with sufficient similarity. The query may be too specific or the information may not be available in the knowledge base."
+            };
+          }
+          
+          // Separate original and adjacent chunks for better reporting
+          const originalChunks = highQualityResults.filter(r => r.metadata?.isOriginal !== false);
+          const adjacentChunks = highQualityResults.filter(r => r.metadata?.isAdjacent === true);
           
           return {
             success: true,
-            results: results,
+            results: highQualityResults,
             query: query,
-            resultCount: results.length,
-            searchType: "vector"
+            resultCount: highQualityResults.length,
+            originalResultCount: originalChunks.length,
+            adjacentChunkCount: adjacentChunks.length,
+            contextExpanded: expandContext && expansionRange > 0,
+            searchType: "vector_with_context"
           };
         } catch (error) {
+          console.log(`🔧 DEBUG RAG: Tool execution error:`, error);
           return {
             success: false,
             error: error instanceof Error ? error.message : "Unknown error occurred during vector search",
@@ -962,6 +1090,148 @@ export class VectorRAG implements VectorRAGInstance {
         }
       }
     }];
+  }
+
+  /**
+   * Detect the primary language of documents using metadata
+   * @returns Promise resolving to the detected language code
+   */
+  private async detectDocumentLanguage(): Promise<string> {
+    try {
+      // Use the direct table name from config for external vector database
+      const chunksTableName = this.config.vectorDatabase?.options?.tableName || this.chunksTableName;
+      console.log(`🔧 DEBUG RAG: Using chunks table: ${chunksTableName} for language detection`);
+      
+      // Get the appropriate database instance
+      let database: any;
+      if (this.config.vectorDatabase?.type === VectorDatabaseType.POSTGRES && this.vectorDatabaseConnector.getDatabase) {
+        // For external PostgreSQL vector database, use the vector database connection
+        database = this.vectorDatabaseConnector.getDatabase();
+        console.log(`🔧 DEBUG RAG: Using external vector database connection`);
+      } else {
+        // For same database or fallback, use main database
+        database = this.config.database;
+        console.log(`🔧 DEBUG RAG: Using main database connection`);
+      }
+      
+      if (!database) {
+        console.log(`🔧 DEBUG RAG: No database connection available, defaulting to English`);
+        return 'en';
+      }
+      
+      try {
+        // Try to query the chunks table directly with the correct name
+        // Handle both Knex instance and DatabaseInstance
+        const knexInstance = database.knex || database;
+        const result = await knexInstance(chunksTableName)
+          .select('metadata')
+          .whereNotNull('metadata')
+          .limit(1);
+        
+        if (result && result.length > 0 && result[0].metadata) {
+          try {
+            const metadata = typeof result[0].metadata === 'string' 
+              ? JSON.parse(result[0].metadata) 
+              : result[0].metadata;
+            
+            if (metadata && metadata.language) {
+              const detectedLanguage = metadata.language.toLowerCase();
+              console.log(`🔧 DEBUG RAG: Found language in chunk metadata: ${detectedLanguage}`);
+              return detectedLanguage;
+            }
+          } catch (parseError) {
+            console.log(`🔧 DEBUG RAG: Error parsing metadata:`, parseError);
+          }
+        }
+        
+        // If no language found in metadata, default to English
+        console.log(`🔧 DEBUG RAG: No language found in metadata, using default: en`);
+        return 'en';
+      } catch (error) {
+        console.log(`🔧 DEBUG RAG: Error querying chunks table (${chunksTableName}):`, error);
+        
+        // Default to English if any error occurs
+        return 'en';
+      }
+    } catch (error) {
+      console.log(`🔧 DEBUG RAG: Error detecting document language:`, error);
+      return 'en';
+    }
+  }
+
+  /**
+   * Translate query from source language to target language using the AI provider
+   * @param query Original query text
+   * @param fromLang Source language code
+   * @param toLang Target language code
+   * @returns Promise resolving to translated query
+   */
+  private async translateQuery(query: string, fromLang: string, toLang: string): Promise<string> {
+    if (!this.config.provider) {
+      throw new Error('No provider available for translation');
+    }
+    
+    // If languages are the same, no need to translate
+    if (fromLang.toLowerCase() === toLang.toLowerCase()) {
+      console.log(`🔧 DEBUG RAG: No translation needed - source and target languages are the same: ${fromLang}`);
+      return query;
+    }
+    
+    // Normalize language codes
+    const normalizeLanguageCode = (code: string): string => {
+      code = code.toLowerCase().trim();
+      
+      // Map of common language names to ISO codes
+      const languageMap: Record<string, string> = {
+        'turkish': 'tr', 'türkçe': 'tr', 'türkce': 'tr', 'tr': 'tr',
+        'english': 'en', 'en': 'en', 'eng': 'en',
+        'german': 'de', 'deutsch': 'de', 'de': 'de',
+        'french': 'fr', 'français': 'fr', 'francais': 'fr', 'fr': 'fr',
+        'spanish': 'es', 'español': 'es', 'espanol': 'es', 'es': 'es'
+      };
+      
+      return languageMap[code] || code;
+    };
+    
+    const normalizedFromLang = normalizeLanguageCode(fromLang);
+    const normalizedToLang = normalizeLanguageCode(toLang);
+    
+    console.log(`🔧 DEBUG RAG: Translating from ${normalizedFromLang} to ${normalizedToLang}: "${query}"`);
+    
+    try {
+      // Simple prompt for direct translation
+      const messages = [
+        {
+          role: "system" as const,
+          content: `You are a professional translator. Translate the search query from ${normalizedFromLang} to ${normalizedToLang}. Return ONLY the translated text without any additional explanation, formatting, or quotes.`
+        },
+        {
+          role: "user" as const,
+          content: query
+        }
+      ];
+      
+      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const model = this.config.provider.getModel(defaultModel);
+      const response = await model.complete(messages, {
+        temperature: 0.1,
+        maxTokens: 150
+      });
+      
+      // Extract the translation from the response
+      const translation = typeof response === 'string' ? 
+        response.trim() : 
+        response.content?.trim() || query;
+      
+      // Remove any quotes or extra formatting that might have been added
+      const cleanTranslation = translation.replace(/^["']|["']$/g, '').trim();
+      
+      console.log(`🔧 DEBUG RAG: Translation result: "${cleanTranslation}"`);
+      return cleanTranslation;
+    } catch (error) {
+      console.log(`🔧 DEBUG RAG: Translation failed, using original query:`, error);
+      return query; // Fall back to original query rather than throwing
+    }
   }
 }
 
