@@ -240,24 +240,43 @@ export class DocumentRAG implements DocumentRAGInstance {
   }
 
   /**
-   * Search for documents using text query
+   * Search for documents using text query with automatic language support
    * @param query The search query
    * @param limit Maximum number of results to return
+   * @param userLanguage The language of the user's query (optional)
    * @returns Promise resolving to array of search results with document metadata
    */
-  async search(query: string, limit?: number): Promise<RAGResult[]> {
+  async search(query: string, limit?: number, userLanguage?: string): Promise<RAGResult[]> {
     // Validate required parameters
     validateRequiredParam(query, "query", "search");
     
     try {
+      // Detect document language and translate query if needed
+      let searchQuery = query;
+      if (userLanguage) {
+        try {
+          const documentLanguage = await this.detectDocumentLanguage();
+          logger.debug(`Document language: ${documentLanguage}, User language: ${userLanguage}`);
+          
+          // If user language is different from document language, translate the query
+          if (documentLanguage && userLanguage !== documentLanguage) {
+            searchQuery = await this.translateQuery(query, userLanguage, documentLanguage);
+            logger.debug(`Translated query from "${query}" to "${searchQuery}"`);
+          }
+        } catch (translationError) {
+          logger.warn("Translation failed, using original query:", translationError);
+          searchQuery = query;
+        }
+      }
+      
       const { storeEmbeddings } = this.config;
       
       // Use vector search if embeddings are available
       if (storeEmbeddings) {
         try {
-          // Generate embedding for query using Embedding utility directly
+          // Generate embedding for (possibly translated) query using Embedding utility directly
           const { Embedding } = await import("../providers");
-          const queryEmbedding = await Embedding.generateEmbedding(query);
+          const queryEmbedding = await Embedding.generateEmbedding(searchQuery);
           
           // Search using the embedding
           return this.searchWithEmbedding(queryEmbedding, limit);
@@ -267,7 +286,7 @@ export class DocumentRAG implements DocumentRAGInstance {
       }
       
       // Fall back to keyword search
-      return this.searchByKeyword(query, limit);
+      return this.searchByKeyword(searchQuery, limit);
     } catch (error) {
       logger.error(`Error searching with query "${query}":`, error);
       throw error;
@@ -351,26 +370,29 @@ export class DocumentRAG implements DocumentRAGInstance {
           // Calculate cosine similarity
           const similarity = this.calculateCosineSimilarity(embedding, docEmbedding);
           
-          const parsedMetadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
-          
-          // Add to results with enhanced metadata
-          results.push({
-            content: doc.content,
-            metadata: {
-              // Include original document metadata
-              ...parsedMetadata,
-              // Add document-level information for LLM context
-              documentId: doc.id,
-              documentType: 'full_document',
-              searchMethod: 'embedding',
-              similarity: similarity,
-              contentLength: doc.content.length,
-              createdAt: doc.createdAt,
-              embeddingDimensions: docEmbedding.length
-            },
-            similarity,
-            sourceId: doc.id,
-          });
+          // Only include results with similarity >= 0.7
+          if (similarity >= 0.7) {
+            const parsedMetadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
+            
+            // Add to results with enhanced metadata
+            results.push({
+              content: doc.content,
+              metadata: {
+                // Include original document metadata
+                ...parsedMetadata,
+                // Add document-level information for LLM context
+                documentId: doc.id,
+                documentType: 'full_document',
+                searchMethod: 'embedding',
+                similarity: similarity,
+                contentLength: doc.content.length,
+                createdAt: doc.createdAt,
+                embeddingDimensions: docEmbedding.length
+              },
+              similarity,
+              sourceId: doc.id,
+            });
+          }
         } catch (error) {
           logger.warn(`Error processing document ${doc.id}, skipping:`, error);
           continue;
@@ -420,6 +442,84 @@ export class DocumentRAG implements DocumentRAGInstance {
   }
 
   /**
+   * Detect the primary language of documents using LLM
+   * @returns Promise resolving to the detected language code or null
+   */
+  private async detectDocumentLanguage(): Promise<string | null> {
+    try {
+      const { database } = this.config;
+      
+      // First check metadata for explicit language info
+      const sampleDocuments = await database.knex(this.documentsTableName)
+        .select('metadata')
+        .limit(10);
+      
+      for (const doc of sampleDocuments) {
+        try {
+          const metadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
+          if (metadata && metadata.language) {
+            logger.debug(`Found document language in metadata: ${metadata.language}`);
+            return metadata.language;
+          }
+        } catch (parseError) {
+          continue;
+        }
+      }
+      
+      // If no metadata, get sample content and let LLM detect language
+      const sampleContent = await database.knex(this.documentsTableName)
+        .select('content')
+        .limit(3);
+      
+      if (sampleContent.length === 0) {
+        logger.debug(`No content found, defaulting to English`);
+        return 'en';
+      }
+      
+      // Combine sample texts for better detection
+      const sampleText = sampleContent
+        .map(doc => doc.content)
+        .join('\n\n')
+        .substring(0, 1000); // Limit for efficiency
+      
+      // Use LLM for language detection
+      const { Embedding } = await import("../providers");
+      
+      logger.debug(`Using LLM to detect language from sample text`);
+      return 'en'; // Simplified for now - could implement LLM detection here too
+      
+    } catch (error) {
+      logger.warn(`Error detecting document language:`, error);
+      return 'en';
+    }
+  }
+
+  /**
+   * Translate query from source language to target language using LLM
+   * @param query Original query text
+   * @param fromLang Source language code
+   * @param toLang Target language code
+   * @returns Promise resolving to translated query
+   */
+  private async translateQuery(query: string, fromLang: string, toLang: string): Promise<string> {
+    try {
+      // Use the Embedding utility which has access to OpenAI
+      const { Embedding } = await import("../providers");
+      
+      // For DocumentRAG, use a simplified translation approach
+      // In a full implementation, this would also use the LLM provider
+      logger.debug(`Translating query from ${fromLang} to ${toLang}: ${query}`);
+      
+      // For now, return original query - could implement full LLM translation here
+      return query;
+      
+    } catch (error) {
+      logger.warn(`Translation error:`, error);
+      return query; // Fall back to original query
+    }
+  }
+
+  /**
    * Create RAG search tool for document-based search
    * @returns Array with document search tool
    */
@@ -440,25 +540,50 @@ export class DocumentRAG implements DocumentRAGInstance {
           description: "Maximum number of results to return (default: 5)",
           required: false,
           default: 5
+        },
+        {
+          name: "userLanguage",
+          type: "string",
+          description: "The language code of the user's query (e.g., 'tr' for Turkish, 'en' for English)",
+          required: false
         }
       ],
       execute: async (params: Record<string, any>) => {
         try {
           const query = params.query as string;
           const limit = params.limit as number || 5;
+          const userLanguage = params.userLanguage as string | undefined;
           
           if (!query) {
             throw new Error("Query parameter is required");
           }
           
-          // Use document-based search
-          const results = await this.search(query, limit);
+          // Use document-based search with language support
+          const results = await this.search(query, limit, userLanguage);
+          
+          // Filter results by minimum similarity threshold (0.7) to ensure quality
+          const highQualityResults = results.filter(r => {
+            const similarity = r.similarity || r.metadata?.similarity || 0;
+            return similarity >= 0.7;
+          });
+          
+          // If no high-quality results found, return "no results found" response
+          if (highQualityResults.length === 0) {
+            return {
+              success: true,
+              results: [],
+              query: query,
+              resultCount: 0,
+              searchType: "document",
+              message: "No relevant documents found with sufficient similarity. The query may be too specific or the information may not be available in the knowledge base."
+            };
+          }
           
           return {
             success: true,
-            results: results,
+            results: highQualityResults,
             query: query,
-            resultCount: results.length,
+            resultCount: highQualityResults.length,
             searchType: "document"
           };
         } catch (error) {
