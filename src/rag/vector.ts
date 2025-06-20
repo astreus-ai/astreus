@@ -472,7 +472,28 @@ export class VectorRAG implements VectorRAGInstance {
    * @param userLanguage Optional user language for translation
    * @returns Promise resolving to an array of search results
    */
+  
+
+  /**
+   * Standard search method - wrapper around internal search
+   * @param query Search query
+   * @param limit Maximum number of results
+   * @param userLanguage User's language for translation
+   * @param expandContext Whether to include adjacent chunks
+   * @param expansionRange Number of chunks to include before/after each result
+   * @returns Search results
+   */
   async search(
+    query: string, 
+    limit?: number, 
+    userLanguage?: string,
+    expandContext: boolean = true,
+    expansionRange: number = 1
+  ): Promise<RAGResult[]> {
+    return this.searchInternal(query, limit, userLanguage, expandContext, expansionRange);
+  }
+
+  private async searchInternal(
     query: string, 
     limit?: number, 
     userLanguage?: string,
@@ -484,92 +505,115 @@ export class VectorRAG implements VectorRAGInstance {
     
     try {
       const maxResults = limit || this.config.maxResults || 10;
-      console.log(`🔧 DEBUG RAG: Search query: "${query}", limit: ${maxResults}, userLanguage: ${userLanguage || 'not specified'}, expandContext: ${expandContext}, expansionRange: ${expansionRange}`);
+      console.log(`🔧 DEBUG RAG: Enhanced search query: "${query}", limit: ${maxResults}, userLanguage: ${userLanguage || 'not specified'}, expandContext: ${expandContext}, expansionRange: ${expansionRange}`);
       
-      // Detect document language and translate query if needed
+      // Detect document language and translate query if userLanguage is provided
       let searchQuery = query;
       if (userLanguage) {
-        try {
-          const documentLanguage = await this.detectDocumentLanguage();
-          console.log(`🔧 DEBUG RAG: Document language: ${documentLanguage}, User language: ${userLanguage}`);
-          
-          // If user language is different from document language, translate the query
-          if (documentLanguage && userLanguage.toLowerCase() !== documentLanguage.toLowerCase()) {
-            console.log(`🔧 DEBUG RAG: Translating from ${userLanguage} to ${documentLanguage}...`);
-            
-            try {
-              searchQuery = await this.translateQuery(query, userLanguage, documentLanguage);
-              console.log(`🔧 DEBUG RAG: Translated query: "${query}" -> "${searchQuery}"`);
-            } catch (translationError) {
-              console.log(`🔧 DEBUG RAG: Translation failed, using original query`);
-              searchQuery = query;
-            }
-          } else {
-            console.log(`🔧 DEBUG RAG: No translation needed, languages match`);
-          }
-        } catch (detectionError) {
-          console.log(`🔧 DEBUG RAG: Language detection failed, using original query`);
-          searchQuery = query;
+        const documentLanguage = await this.detectDocumentLanguage();
+        console.log(`🔧 DEBUG RAG: Document language: ${documentLanguage}, User language: ${userLanguage}`);
+        
+        // If user language is different from document language, translate the query
+        if (documentLanguage && userLanguage.toLowerCase() !== documentLanguage.toLowerCase()) {
+          console.log(`🔧 DEBUG RAG: Translating from ${userLanguage} to ${documentLanguage}...`);
+          searchQuery = await this.translateQuery(query, userLanguage, documentLanguage);
+          console.log(`🔧 DEBUG RAG: Translated query: "${query}" -> "${searchQuery}"`);
+        } else {
+          console.log(`🔧 DEBUG RAG: No translation needed, languages match`);
         }
       }
+
+      // Generate query variations for enhanced search
+      const queryVariations = await this.generateQueryVariations(searchQuery, userLanguage || 'en');
+      console.log(`🔧 DEBUG RAG: Generated ${queryVariations.length} query variations for enhanced search`);
+
+      // Collect all results from different query variations
+      const allResults: RAGResult[] = [];
+      const resultsPerVariation = Math.ceil(maxResults / queryVariations.length);
       
-      // Use semantic search if provider with embedding support is available
-      if (this.config.provider && this.config.provider.generateEmbedding) {
+      for (let i = 0; i < queryVariations.length; i++) {
+        const variation = queryVariations[i];
+        const queryType = i === 0 ? 'SHORT' : i === 1 ? 'MEDIUM' : 'LONG';
+        
         try {
-          console.log(`🔧 DEBUG RAG: Generating embedding for: "${searchQuery}"`);
-          const queryEmbedding = await this.config.provider.generateEmbedding(searchQuery);
+          console.log(`🔧 DEBUG RAG: Searching with ${queryType} query: "${variation}"`);
           
-          if (queryEmbedding && queryEmbedding.length > 0) {
-            console.log(`🔧 DEBUG RAG: Using vector search with ${queryEmbedding.length} dimensions`);
+          // Use semantic search for each variation
+          if (this.config.provider && this.config.provider.generateEmbedding) {
+            const queryEmbedding = await this.config.provider.generateEmbedding(variation);
             
-            // Use default similarity threshold for quality results
-            const searchThreshold = DEFAULT_VECTOR_SIMILARITY_THRESHOLD;
-            const results = await this.searchByVector(queryEmbedding, maxResults, searchThreshold, expandContext, expansionRange);
-            console.log(`🔧 DEBUG RAG: Vector search returned ${results.length} results`);
-            
-            return results;
-          } else {
-            console.log(`🔧 DEBUG RAG: Empty embedding, falling back to keyword search`);
-            return this.searchByKeyword(searchQuery, maxResults);
-          }
-        } catch (embeddingError) {
-          console.log(`🔧 DEBUG RAG: Embedding generation failed, trying fallback`);
-          
-          // Try memory fallback if available
-          if (this.config.memory && this.config.memory.searchByEmbedding) {
-            try {
-              const { Embedding } = await import("../providers");
-              const queryEmbedding = await Embedding.generateEmbedding(searchQuery);
+            if (queryEmbedding && queryEmbedding.length > 0) {
+              console.log(`🔧 DEBUG RAG: Using vector search with ${queryEmbedding.length} dimensions for ${queryType} query`);
               
-              const searchThreshold = DEFAULT_VECTOR_SIMILARITY_THRESHOLD;
-              return this.searchByVector(queryEmbedding, maxResults, searchThreshold, expandContext, expansionRange);
-            } catch (memoryError) {
-              console.log(`🔧 DEBUG RAG: Memory fallback failed, using keyword search`);
-              return this.searchByKeyword(searchQuery, maxResults);
+              // Use a slightly lower threshold for query variations to get more results
+              const searchThreshold = 0.5; // Lower threshold for better coverage
+              console.log(`🔧 DEBUG RAG: Using similarity threshold: ${searchThreshold} for ${queryType} query`);
+              
+              const results = await this.searchByVector(queryEmbedding, resultsPerVariation, searchThreshold, expandContext, expansionRange);
+              console.log(`🔧 DEBUG RAG: ${queryType} query returned ${results.length} results`);
+              
+              // Add query type to metadata and add to all results
+              results.forEach(result => {
+                result.metadata = {
+                  ...result.metadata,
+                  queryType: queryType,
+                  queryVariation: variation,
+                  originalQuery: query
+                };
+              });
+              
+              allResults.push(...results);
             }
-          } else {
-            console.log(`🔧 DEBUG RAG: No fallback available, using keyword search`);
-            return this.searchByKeyword(searchQuery, maxResults);
           }
+        } catch (variationError) {
+          console.log(`🔧 DEBUG RAG: Error searching with ${queryType} query:`, variationError);
+          // Continue with other variations even if one fails
         }
-      } else if (this.config.memory && this.config.memory.searchByEmbedding) {
-        try {
-          console.log(`🔧 DEBUG RAG: Using memory for embedding generation`);
-          const { Embedding } = await import("../providers");
-          const queryEmbedding = await Embedding.generateEmbedding(searchQuery);
-          
-          const searchThreshold = DEFAULT_VECTOR_SIMILARITY_THRESHOLD;
-          return this.searchByVector(queryEmbedding, maxResults, searchThreshold, expandContext, expansionRange);
-        } catch (embeddingError) {
-          console.log(`🔧 DEBUG RAG: Memory embedding failed, using keyword search`);
-          return this.searchByKeyword(searchQuery, maxResults);
-        }
-      } else {
-        console.log(`🔧 DEBUG RAG: No embedding support, using keyword search`);
-        return this.searchByKeyword(searchQuery, maxResults);
       }
+
+      // Remove duplicates based on sourceId and sort by similarity
+      const uniqueResults = new Map<string, RAGResult>();
+      allResults.forEach(result => {
+        const key = result.sourceId;
+        if (!uniqueResults.has(key) || (result.similarity || 0) > (uniqueResults.get(key)?.similarity || 0)) {
+          uniqueResults.set(key, result);
+        }
+      });
+
+      let finalResults = Array.from(uniqueResults.values())
+        .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
+        .slice(0, maxResults);
+
+      console.log(`🔧 DEBUG RAG: Enhanced search phase 1 completed: ${allResults.length} total results -> ${finalResults.length} unique results`);
+      
+      // Second-stage context expansion for high-quality results
+      if (expandContext && expansionRange > 0 && finalResults.length > 0) {
+        console.log(`🔧 DEBUG RAG: Starting second-stage context expansion for ${finalResults.length} high-quality results`);
+        
+        try {
+          // Apply second context expansion to final filtered results
+          const expandedResults = await this.expandChunksWithContext(finalResults, expansionRange);
+          console.log(`🔧 DEBUG RAG: Second-stage expansion: ${finalResults.length} results -> ${expandedResults.length} with additional context`);
+          
+          // Sort again by similarity and limit to prevent context overflow
+          const maxContextResults = Math.min(maxResults * 3, 15); // Limit total context to prevent overflow
+          finalResults = expandedResults
+            .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
+            .slice(0, maxContextResults);
+            
+          console.log(`🔧 DEBUG RAG: Final results after second-stage expansion: ${finalResults.length} results (capped at ${maxContextResults})`);
+        } catch (expansionError) {
+          console.log(`🔧 DEBUG RAG: Second-stage context expansion failed:`, expansionError);
+          // Continue with original results if expansion fails
+        }
+      }
+
+      console.log(`🔧 DEBUG RAG: Enhanced search completed with two-stage context expansion`);
+      
+      return finalResults;
+      
     } catch (error) {
-      console.log(`🔧 DEBUG RAG: Search error:`, error);
+      console.log(`🔧 DEBUG RAG: Enhanced search error:`, error);
       throw error;
     }
   }
@@ -593,10 +637,8 @@ export class VectorRAG implements VectorRAGInstance {
 
     // For external vector database
     if (this.config.vectorDatabase?.type !== VectorDatabaseType.SAME_AS_MAIN) {
-      // For external vector DB, we would need additional metadata to find adjacent chunks
-      // For now, return original chunks as external DBs might not have chunk ordering
-      console.log(`🔧 DEBUG RAG: External vector DB - chunk expansion not implemented`);
-      return chunks;
+      console.log(`🔧 DEBUG RAG: External vector DB - implementing chunk expansion using metadata`);
+      return await this.expandExternalChunksWithContext(chunks, expansionRange);
     }
 
     const { database } = this.config;
@@ -645,6 +687,142 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
+   * Expand chunks with context for external vector database
+   * Uses metadata to find adjacent chunks by chunk_index and documentId
+   */
+  private async expandExternalChunksWithContext(
+    chunks: any[],
+    expansionRange: number = 1
+  ): Promise<any[]> {
+    if (chunks.length === 0 || expansionRange === 0) {
+      return chunks;
+    }
+
+    console.log(`🔧 DEBUG RAG: Expanding ${chunks.length} external chunks with ${expansionRange} adjacent chunks each direction`);
+
+    const expandedChunks = new Map();
+    
+    // First, add all original chunks
+    chunks.forEach(chunk => {
+      expandedChunks.set(chunk.id, { ...chunk, isOriginal: true });
+    });
+
+    // For each original chunk, find adjacent chunks
+    for (const chunk of chunks) {
+      try {
+        const chunkIndex = chunk.metadata?.chunk_index;
+        const documentId = chunk.metadata?.documentId || chunk.documentId;
+        
+        if (chunkIndex === undefined || !documentId) {
+          console.log(`🔧 DEBUG RAG: Skipping chunk ${chunk.id} - missing chunk_index or documentId`);
+          continue;
+        }
+
+        console.log(`🔧 DEBUG RAG: Finding adjacent chunks for ${chunk.id} (index: ${chunkIndex}, documentId: ${documentId})`);
+
+        // Calculate the range of chunk indices to search for
+        const minIndex = Math.max(0, chunkIndex - expansionRange);
+        const maxIndex = chunkIndex + expansionRange;
+
+        // Search for adjacent chunks in the vector database
+        // We'll search for chunks with similar metadata but different chunk_index
+        const adjacentChunks = await this.findAdjacentChunksInVectorDB(
+          documentId, 
+          minIndex, 
+          maxIndex, 
+          chunk.id
+        );
+
+        console.log(`🔧 DEBUG RAG: Found ${adjacentChunks.length} adjacent chunks for chunk ${chunk.id}`);
+
+        // Add adjacent chunks to the map
+        for (const adjChunk of adjacentChunks) {
+          if (!expandedChunks.has(adjChunk.id)) {
+            expandedChunks.set(adjChunk.id, {
+              ...adjChunk,
+              isOriginal: false,
+              isAdjacent: true,
+              parentOriginalChunk: chunk.id,
+              // Lower similarity for adjacent chunks
+              similarity: (chunk.similarity || 0) * 0.7
+            });
+          }
+        }
+      } catch (error) {
+        console.log(`🔧 DEBUG RAG: Error finding adjacent chunks for ${chunk.id}:`, error);
+      }
+    }
+
+    const result = Array.from(expandedChunks.values());
+    console.log(`🔧 DEBUG RAG: External expansion result: ${chunks.length} original -> ${result.length} total chunks`);
+    
+    return result;
+  }
+
+  /**
+   * Find adjacent chunks in external vector database by searching for chunks
+   * with the same documentId and chunk_index within the specified range
+   */
+  private async findAdjacentChunksInVectorDB(
+    documentId: string,
+    minIndex: number,
+    maxIndex: number,
+    excludeChunkId: string
+  ): Promise<any[]> {
+    try {
+      // This is a simplified approach - we'll search through all vectors
+      // In a production system, you might want to implement a more efficient metadata search
+      
+      // For now, we'll use a dummy embedding to search but filter by metadata
+      // This is not ideal but works with the current vector database interface
+      const dummyEmbedding = new Array(1536).fill(0); // Create a zero vector
+      
+      // Search with a very low threshold to get many results, then filter by metadata
+      const allChunks = await this.vectorDatabaseConnector.searchVectors(
+        dummyEmbedding,
+        1000, // Large limit to get many chunks
+        0.0   // Very low threshold to get all chunks
+      );
+
+      // Get metadata for each chunk and filter by documentId and chunk_index range
+      const adjacentChunks = [];
+      for (const chunk of allChunks) {
+        try {
+          // Get metadata for this chunk
+          const metadata = await this.vectorDatabaseConnector.getVectorMetadata(chunk.id);
+          if (!metadata) continue;
+          
+          const chunkDocumentId = metadata.documentId;
+          const chunkIndex = metadata.chunk_index;
+          
+          if (
+            chunk.id !== excludeChunkId &&
+            chunkDocumentId === documentId &&
+            chunkIndex !== undefined &&
+            chunkIndex >= minIndex &&
+            chunkIndex <= maxIndex
+          ) {
+            adjacentChunks.push({
+              ...chunk,
+              metadata,
+              content: metadata.content
+            });
+          }
+        } catch (error) {
+          console.log(`🔧 DEBUG RAG: Error getting metadata for chunk ${chunk.id}:`, error);
+        }
+      }
+
+      console.log(`🔧 DEBUG RAG: Filtered ${allChunks.length} total chunks -> ${adjacentChunks.length} adjacent chunks`);
+      
+      return adjacentChunks;
+    } catch (error) {
+      console.log(`🔧 DEBUG RAG: Error searching for adjacent chunks:`, error);
+      return [];
+    }
+  }
+
+  /**
    * Search for documents using vector similarity
    * @param embedding The query embedding vector
    * @param limit Maximum number of results to return
@@ -675,6 +853,11 @@ export class VectorRAG implements VectorRAGInstance {
       );
       
       console.log(`🔧 DEBUG RAG: Vector search returned ${similarVectors.length} similar vectors`);
+      if (similarVectors.length > 0) {
+        const similarities = similarVectors.map(v => v.similarity).sort((a, b) => b - a);
+        console.log(`🔧 DEBUG RAG: Similarity scores: [${similarities.join(', ')}]`);
+        console.log(`🔧 DEBUG RAG: Highest similarity: ${similarities[0]}, Lowest: ${similarities[similarities.length - 1]}`);
+      }
       logger.debug(`Found ${similarVectors.length} similar vectors`);
       
       // If using the same database, we need to fetch the detailed data
@@ -972,13 +1155,170 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
+   * Format metadata for LLM consumption using AI-powered organization
+   * Uses LLM to intelligently organize and present metadata in a structured way
+   */
+  private async formatMetadataForLLM(metadata: any): Promise<string> {
+    try {
+      // Skip formatting if no provider available or metadata is empty
+      if (!this.config.provider || !metadata || Object.keys(metadata).length === 0) {
+        return '';
+      }
+
+      // Filter out technical/internal fields that aren't useful for LLM
+      const filteredMetadata = { ...metadata };
+      const excludeFields = ['embedding', 'vector', 'chunkId', 'documentId', 'searchMethod', 'isOriginal', 'isAdjacent', 'parentOriginalChunk'];
+      excludeFields.forEach(field => delete filteredMetadata[field]);
+
+      // If no meaningful metadata left, return empty
+      if (Object.keys(filteredMetadata).length === 0) {
+        return '';
+      }
+
+      const prompt = `You are a metadata organizer. Given the following document metadata, create a concise, well-structured summary that will help an AI assistant understand the document context.
+
+Metadata:
+${JSON.stringify(filteredMetadata, null, 2)}
+
+Instructions:
+1. Organize the metadata into logical groups (e.g., Document Info, Dates, References, etc.)
+2. Use clear, human-readable labels
+3. Include only the most important and relevant information
+4. Format as a clean, readable summary (not JSON)
+5. Use bullet points or short lines
+6. If similarity/relevance score exists, include it as a percentage
+7. Keep it concise but informative
+
+Return only the formatted metadata summary, nothing else.`;
+
+      // Get the default model from provider and use its complete method
+      const defaultModelName = this.config.provider.getDefaultModel?.() || this.config.provider.listModels()[0];
+      if (!defaultModelName) {
+        throw new Error('No models available in provider');
+      }
+      
+      const model = this.config.provider.getModel(defaultModelName);
+      const response = await model.complete([{ role: 'user', content: prompt }], {
+        temperature: 0.1, // Low temperature for consistent formatting
+        maxTokens: 300 // Keep it concise
+      });
+
+      // Handle both string and structured response
+      const formattedMetadata = typeof response === 'string' ? response.trim() : '';
+      
+      // Validate that we got a reasonable response
+      if (formattedMetadata.length < 10 || formattedMetadata.toLowerCase().includes('i cannot') || formattedMetadata.toLowerCase().includes('i apologize')) {
+        console.log('🔧 DEBUG RAG: LLM metadata formatting failed, falling back to simple format');
+        return this.formatMetadataSimple(filteredMetadata);
+      }
+
+      return formattedMetadata;
+    } catch (error) {
+      console.log('🔧 DEBUG RAG: Error formatting metadata with LLM:', error);
+      // Fallback to simple formatting
+      return this.formatMetadataSimple(metadata);
+    }
+  }
+
+  /**
+   * Simple fallback metadata formatting when LLM formatting fails
+   */
+  private formatMetadataSimple(metadata: any): string {
+    const sections: string[] = [];
+    
+    Object.entries(metadata).forEach(([key, value]) => {
+      if (value && typeof value !== 'object') {
+        // Convert camelCase to readable format
+        const readableKey = key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+        sections.push(`${readableKey}: ${value}`);
+      }
+    });
+    
+    return sections.length > 0 ? sections.join('\n') : '';
+  }
+
+  /**
+   * Enhance results with grouped metadata to avoid duplication
+   * Groups chunks by document/source and adds metadata only to the first chunk of each group
+   */
+  private async enhanceResultsWithGroupedMetadata(results: RAGResult[]): Promise<RAGResult[]> {
+    if (results.length === 0) {
+      return results;
+    }
+
+    // Group results by document identifier (documentId, sourceId, or regulationCode)
+    const documentGroups = new Map<string, RAGResult[]>();
+    
+    results.forEach(result => {
+      // Create a unique document identifier
+      const documentId = result.metadata?.documentId || 
+                        result.metadata?.regulationCode || 
+                        result.metadata?.name || 
+                        result.sourceId || 
+                        'unknown';
+      
+      if (!documentGroups.has(documentId)) {
+        documentGroups.set(documentId, []);
+      }
+      documentGroups.get(documentId)!.push(result);
+    });
+
+    console.log(`🔧 DEBUG RAG: Grouped ${results.length} results into ${documentGroups.size} document groups`);
+
+    // Process each document group
+    const enhancedResults: RAGResult[] = [];
+    
+    for (const [documentId, groupResults] of documentGroups) {
+      console.log(`🔧 DEBUG RAG: Processing document group "${documentId}" with ${groupResults.length} chunks`);
+      
+      // Sort group results to ensure original chunks come first, then adjacent chunks
+      const sortedGroupResults = groupResults.sort((a, b) => {
+        // Original chunks first
+        if (a.metadata?.isOriginal && !b.metadata?.isOriginal) return -1;
+        if (!a.metadata?.isOriginal && b.metadata?.isOriginal) return 1;
+        
+        // Then by similarity (highest first)
+        return (b.similarity || 0) - (a.similarity || 0);
+      });
+
+      // Generate metadata summary only once for the first chunk of each document group
+      const firstChunk = sortedGroupResults[0];
+      const metadataSummary = await this.formatMetadataForLLM(firstChunk.metadata);
+      
+      // Process all chunks in this document group
+      for (let i = 0; i < sortedGroupResults.length; i++) {
+        const result = sortedGroupResults[i];
+        let enhancedContent = result.content;
+        
+        if (i === 0 && metadataSummary) {
+          // Add metadata summary only to the first chunk of each document group
+          enhancedContent = `${metadataSummary}\n\n---\n\n${result.content}`;
+          console.log(`🔧 DEBUG RAG: Added metadata summary to first chunk of document "${documentId}"`);
+        } else if (i > 0) {
+          // For subsequent chunks, add a context indicator
+          const contextType = result.metadata?.isAdjacent ? 'Adjacent Context' : 'Additional Content';
+          enhancedContent = `[${contextType} - Same Document]\n\n${result.content}`;
+        }
+        
+        enhancedResults.push({
+          ...result,
+          content: enhancedContent
+        });
+      }
+    }
+
+    console.log(`🔧 DEBUG RAG: Enhanced ${results.length} results with grouped metadata`);
+    return enhancedResults;
+  }
+
+  /**
    * Create RAG search tool for vector-based search
    * @returns Array with vector search tool
    */
   createRAGTools(): Plugin[] {
     return [{
       name: "rag_search",
-      description: "Search through documents using vector similarity to find relevant information. For regulation documents, automatically includes adjacent chunks for better context.",
+      description: "Enhanced search through documents using multiple query variations (short, medium, long) with vector similarity to find relevant information. Automatically includes adjacent chunks for better context and uses intelligent query expansion for comprehensive results.",
       parameters: [
         {
           name: "query",
@@ -1042,17 +1382,20 @@ export class VectorRAG implements VectorRAGInstance {
           
           console.log(`🔧 DEBUG RAG: Search completed with ${results.length} results`);
           
-          // Filter results by minimum similarity threshold (0.7) to ensure quality
-          const highQualityResults = results.filter(r => {
+          // Use lower similarity threshold for enhanced search with query variations
+          const minSimilarityThreshold = 0.5;
+          
+          // Filter results by minimum similarity threshold to ensure quality
+          const highQualityResults = results.filter((r: RAGResult) => {
             const similarity = r.similarity || r.metadata?.similarity || 0;
-            return similarity >= 0.7;
+            return similarity >= minSimilarityThreshold;
           });
           
-          console.log(`🔧 DEBUG RAG: Filtered to ${highQualityResults.length} high-quality results (similarity >= 0.7)`);
+          console.log(`🔧 DEBUG RAG: Filtered to ${highQualityResults.length} high-quality results (similarity >= ${minSimilarityThreshold})`);
           
           // If no high-quality results found, return "no results found" response
           if (highQualityResults.length === 0) {
-            console.log(`🔧 DEBUG RAG: No results meet minimum similarity threshold (0.7), returning no results`);
+            console.log(`🔧 DEBUG RAG: No results meet minimum similarity threshold (${minSimilarityThreshold}), returning no results`);
             return {
               success: true,
               results: [],
@@ -1062,19 +1405,22 @@ export class VectorRAG implements VectorRAGInstance {
               adjacentChunkCount: 0,
               contextExpanded: false,
               searchType: "vector_with_context",
-              message: "No relevant documents found with sufficient similarity. The query may be too specific or the information may not be available in the knowledge base."
+              message: `No relevant documents found with sufficient similarity (threshold: ${minSimilarityThreshold}). The query may be too specific or the information may not be available in the knowledge base.`
             };
           }
           
           // Separate original and adjacent chunks for better reporting
-          const originalChunks = highQualityResults.filter(r => r.metadata?.isOriginal !== false);
-          const adjacentChunks = highQualityResults.filter(r => r.metadata?.isAdjacent === true);
+          const originalChunks = highQualityResults.filter((r: RAGResult) => r.metadata?.isOriginal !== false);
+          const adjacentChunks = highQualityResults.filter((r: RAGResult) => r.metadata?.isAdjacent === true);
+          
+          // Group results by document/source and enhance with metadata intelligently
+          const enhancedResults = await this.enhanceResultsWithGroupedMetadata(highQualityResults);
           
           return {
             success: true,
-            results: highQualityResults,
+            results: enhancedResults,
             query: query,
-            resultCount: highQualityResults.length,
+            resultCount: enhancedResults.length,
             originalResultCount: originalChunks.length,
             adjacentChunkCount: adjacentChunks.length,
             contextExpanded: expandContext && expansionRange > 0,
@@ -1093,7 +1439,7 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
-   * Detect the primary language of documents using metadata
+   * Detect the primary language of documents using LLM-based intelligent detection
    * @returns Promise resolving to the detected language code
    */
   private async detectDocumentLanguage(): Promise<string> {
@@ -1135,8 +1481,9 @@ export class VectorRAG implements VectorRAGInstance {
               : result[0].metadata;
             
             if (metadata && metadata.language) {
-              const detectedLanguage = metadata.language.toLowerCase();
-              console.log(`🔧 DEBUG RAG: Found language in chunk metadata: ${detectedLanguage}`);
+              // Use LLM to intelligently detect the document language from metadata
+              const detectedLanguage = await this.detectLanguageWithLLM(metadata.language);
+              console.log(`🔧 DEBUG RAG: LLM detected language from metadata "${metadata.language}": ${detectedLanguage}`);
               return detectedLanguage;
             }
           } catch (parseError) {
@@ -1160,6 +1507,159 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
+   * Use LLM to intelligently detect language from any language representation
+   * @param languageText Any text that represents a language in any form (EN, en, English, İngilizce, etc.)
+   * @returns Promise resolving to a standardized language code
+   */
+  private async detectLanguageWithLLM(languageText: string): Promise<string> {
+    if (!this.config.provider) {
+      console.log(`🔧 DEBUG RAG: No provider available for language detection, using fallback`);
+      return 'en';
+    }
+    
+    try {
+      console.log(`🔧 DEBUG RAG: Using LLM to detect language from text: "${languageText}"`);
+      
+      const messages = [
+        {
+          role: "system" as const,
+          content: `You are a language detection expert. You will receive any text that represents a language in any form or format. This could be:
+- Language codes: "EN", "en", "TR", "tr", "DE", "de"
+- Language names in English: "English", "Turkish", "German", "French"
+- Language names in their own language: "İngilizce", "Türkçe", "Deutsch", "Français"
+- Any other way someone might write a language
+
+Your job is to understand what language is being referred to and return ONLY the standard 2-letter ISO language code in lowercase.
+
+Examples:
+- "EN" → "en"
+- "English" → "en" 
+- "İngilizce" → "en"
+- "TR" → "tr"
+- "Turkish" → "tr"
+- "Türkçe" → "tr"
+- "DE" → "de"
+- "German" → "de"
+- "Deutsch" → "de"
+- "FR" → "fr"
+- "French" → "fr"
+- "Français" → "fr"
+
+Return ONLY the 2-letter code, nothing else.`
+        },
+        {
+          role: "user" as const,
+          content: languageText
+        }
+      ];
+      
+      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const model = this.config.provider.getModel(defaultModel);
+      const response = await model.complete(messages, {
+        temperature: 0.1,
+        maxTokens: 10
+      });
+      
+      // Extract the language code from the response
+      const languageCode = typeof response === 'string' ? 
+        response.trim().toLowerCase() : 
+        response.content?.trim().toLowerCase() || 'en';
+      
+      // Validate that we got a reasonable 2-letter code
+      const cleanLanguageCode = languageCode.replace(/[^a-z]/g, '').substring(0, 2);
+      const finalLanguageCode = cleanLanguageCode.length === 2 ? cleanLanguageCode : 'en';
+      
+      console.log(`🔧 DEBUG RAG: LLM language detection result: "${languageText}" → "${finalLanguageCode}"`);
+      return finalLanguageCode;
+    } catch (error) {
+      console.log(`🔧 DEBUG RAG: LLM language detection failed, using fallback:`, error);
+      return 'en'; // Fall back to English if LLM detection fails
+    }
+  }
+
+
+  /**
+   * Generate multiple query variations using LLM for better search coverage
+   * @param query The original query
+   * @param language The language of the query
+   * @returns Promise resolving to array of query variations [short, medium, long]
+   */
+  private async generateQueryVariations(query: string, language: string): Promise<string[]> {
+    try {
+      if (!this.config.provider) {
+        console.log(`🔧 DEBUG RAG: No LLM provider available for query expansion`);
+        return [query]; // Return original query if no LLM
+      }
+
+      const prompt = `Given this search query: "${query}"
+
+Generate 3 different variations of this query to improve search results in a legal/regulatory document database:
+
+1. SHORT: A concise version using key terms only (2-4 words)
+2. MEDIUM: A balanced version with important context (5-8 words)  
+3. LONG: A detailed version with synonyms and related terms (10-15 words)
+
+Focus on legal, regulatory, trade, and technical terminology. Include relevant synonyms and related concepts.
+
+Response format (one per line):
+SHORT: [short version]
+MEDIUM: [medium version]
+LONG: [long version]`;
+
+      console.log(`🔧 DEBUG RAG: Generating query variations for: "${query}"`);
+      
+      const messages = [
+        {
+          role: "user" as const,
+          content: prompt
+        }
+      ];
+      
+      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const model = this.config.provider.getModel(defaultModel);
+      const response = await model.complete(messages, {
+        temperature: 0.3, // Low temperature for consistent results
+        maxTokens: 200
+      });
+
+      const responseText = typeof response === 'string' ? 
+        response : 
+        response.content || '';
+
+      if (!responseText) {
+        console.log(`🔧 DEBUG RAG: Invalid LLM response for query expansion`);
+        return [query];
+      }
+
+      // Parse the response
+      const lines = responseText.split('\n').filter(line => line.trim());
+      const variations: string[] = [];
+      
+      for (const line of lines) {
+        if (line.includes('SHORT:')) {
+          variations.push(line.replace('SHORT:', '').trim());
+        } else if (line.includes('MEDIUM:')) {
+          variations.push(line.replace('MEDIUM:', '').trim());
+        } else if (line.includes('LONG:')) {
+          variations.push(line.replace('LONG:', '').trim());
+        }
+      }
+
+      // Ensure we have at least the original query
+      if (variations.length === 0) {
+        variations.push(query);
+      }
+
+      console.log(`🔧 DEBUG RAG: Generated ${variations.length} query variations:`, variations);
+      return variations;
+
+    } catch (error) {
+      console.log(`🔧 DEBUG RAG: Query expansion failed:`, error);
+      return [query]; // Fallback to original query
+    }
+  }
+
+  /**
    * Translate query from source language to target language using the AI provider
    * @param query Original query text
    * @param fromLang Source language code
@@ -1177,33 +1677,14 @@ export class VectorRAG implements VectorRAGInstance {
       return query;
     }
     
-    // Normalize language codes
-    const normalizeLanguageCode = (code: string): string => {
-      code = code.toLowerCase().trim();
-      
-      // Map of common language names to ISO codes
-      const languageMap: Record<string, string> = {
-        'turkish': 'tr', 'türkçe': 'tr', 'türkce': 'tr', 'tr': 'tr',
-        'english': 'en', 'en': 'en', 'eng': 'en',
-        'german': 'de', 'deutsch': 'de', 'de': 'de',
-        'french': 'fr', 'français': 'fr', 'francais': 'fr', 'fr': 'fr',
-        'spanish': 'es', 'español': 'es', 'espanol': 'es', 'es': 'es'
-      };
-      
-      return languageMap[code] || code;
-    };
-    
-    const normalizedFromLang = normalizeLanguageCode(fromLang);
-    const normalizedToLang = normalizeLanguageCode(toLang);
-    
-    console.log(`🔧 DEBUG RAG: Translating from ${normalizedFromLang} to ${normalizedToLang}: "${query}"`);
+    console.log(`🔧 DEBUG RAG: Translating from ${fromLang} to ${toLang}: "${query}"`);
     
     try {
       // Simple prompt for direct translation
       const messages = [
         {
           role: "system" as const,
-          content: `You are a professional translator. Translate the search query from ${normalizedFromLang} to ${normalizedToLang}. Return ONLY the translated text without any additional explanation, formatting, or quotes.`
+          content: `You are a professional translator. Translate the search query from ${fromLang} to ${toLang}. Return ONLY the translated text without any additional explanation, formatting, or quotes.`
         },
         {
           role: "user" as const,
