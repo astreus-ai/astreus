@@ -90,7 +90,7 @@ export class Task implements TaskInstance {
       
       if (configPlugins.length > 0) {
         if (!this.toolSelectionLogged) {
-          logger.task(this.id, `Using ${configPlugins.length} plugins from task config`, this.config.name);
+          logger.debug(this.config.name || "Task", "Plugin", `Using ${configPlugins.length} plugins from task config`);
           this.toolSelectionLogged = true;
         }
         this.plugins = configPlugins;
@@ -101,7 +101,7 @@ export class Task implements TaskInstance {
     // Method 2: Use LLM to select appropriate tools if model is provided
     if (model) {
       try {
-        logger.task(this.id, "Using LLM to select tools for task", this.config.name);
+        logger.debug(this.config.name || "Task", "Plugin", "Using LLM to select tools for task");
         
         // Request tools with IntentRecognizer
         const selectedTools = await IntentRecognizer.recognizeIntent(
@@ -113,7 +113,7 @@ export class Task implements TaskInstance {
         
         if (selectedTools.length > 0) {
           if (!this.toolSelectionLogged) {
-            logger.task(this.id, 'LLM selected these tools for the task', selectedTools.map(t => t.name).join(', '));
+            logger.debug(this.config.name || "Task", "Plugin", `LLM selected tools: ${selectedTools.map(t => t.name).join(', ')}`);
             this.toolSelectionLogged = true;
           }
           this.plugins = selectedTools;
@@ -209,7 +209,7 @@ export class Task implements TaskInstance {
       // Use model to execute the task with the plugins if available
       const model = this.config.model;
       if (model && prioritizedPlugins.length > 0) {
-        logger.debug(`Task ${this.id} using model ${model.name} to execute with plugins`);
+        logger.debug(this.config.name || "Task", "Execution", `Using model ${model.name} to execute with plugins`);
         
         // Record model usage in memory
         await this.addTaskMemoryEntry(
@@ -688,7 +688,7 @@ Do not mention the technical details of the tool calls - just provide a natural,
       this.completedAt = new Date();
       if (this.result.success) {
         this.status = "completed";
-        logger.task(this.id, `Task ${this.status}`, this.config.name);
+        logger.info(this.config.name || "Task", "Execution", `Task ${this.status}: ${this.config.name}`);
         
         // Record task completion in memory
         await this.addTaskMemoryEntry(
@@ -698,7 +698,7 @@ Do not mention the technical details of the tool calls - just provide a natural,
         );
       } else {
         this.status = "failed";
-        logger.task(this.id, `Task ${this.status}`, this.config.name);
+        logger.info(this.config.name || "Task", "Execution", `Task ${this.status}: ${this.result.error}`);
         
         // Record task failure in memory
         await this.addTaskMemoryEntry(
@@ -706,48 +706,20 @@ Do not mention the technical details of the tool calls - just provide a natural,
           "task_event"
         );
       }
+
+      return this.result as TaskResult;
     } catch (error) {
-      // Handle error
+      this.status = "failed";
+      this.completedAt = new Date();
       this.result = {
         success: false,
-        error: error as Error,
+        error: error instanceof Error ? error : new Error(String(error))
       };
+
+      logger.error(this.config.name || "Task", "Execution", `Task ${this.status}: ${error}`);
       
-      logger.error(`Task ${this.id} failed with error:`, error);
-      
-      // Record task error in memory
-      await this.addTaskMemoryEntry(
-        `Task error: ${error instanceof Error ? error.message : error}`,
-        "task_event",
-        { errorType: error instanceof Error ? error.name : 'Unknown' }
-      );
-
-      // Retry if max retries not exceeded
-      if (this.retries < (this.config.maxRetries || 0)) {
-        this.retries++;
-        this.status = "pending";
-        logger.info(
-          `Retrying task '${this.id}', attempt ${this.retries}/${this.config.maxRetries}`
-        );
-        
-        // Record retry in memory
-        await this.addTaskMemoryEntry(
-          `Retrying task (attempt ${this.retries}/${this.config.maxRetries})`,
-          "task_event"
-        );
-
-        // Database state is managed by createTask static method
-
-        return this.execute(taskInput);
-      } else {
-        this.status = "failed";
-        this.completedAt = new Date();
-      }
+      return this.result as TaskResult;
     }
-
-
-
-    return this.result as TaskResult;
   }
 
   /**

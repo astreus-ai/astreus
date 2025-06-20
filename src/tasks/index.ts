@@ -16,7 +16,7 @@ export const createTaskManager = (
     logger.debug("Creating task manager instance");
     return new TaskManager(config);
   } catch (error) {
-    logger.error("Error creating task manager:", error);
+    logger.error("System", "TaskManager", `Error creating task manager: ${error}`);
     throw error;
   }
 };
@@ -35,7 +35,7 @@ export const createTask = async (
     logger.debug(`Creating task "${config.name}" asynchronously`);
     return await Task.createTask(config, memory);
   } catch (error) {
-    logger.error(`Error creating task "${config.name}":`, error);
+    logger.error("System", "TaskManager", `Error creating task "${config.name}": ${error}`);
     throw error;
   }
 };
@@ -54,7 +54,7 @@ export const createTaskSync = (
     logger.debug(`Creating task "${config.name}" synchronously`);
     return Task.createTaskSync(config, memory);
   } catch (error) {
-    logger.error(`Error creating task "${config.name}":`, error);
+    logger.error("System", "TaskManager", `Error creating task "${config.name}": ${error}`);
     throw error;
   }
 };

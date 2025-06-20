@@ -1,13 +1,12 @@
-import { 
-  ProviderType,
-  OpenAIModelConfig,
-  ProviderMessage,
+import OpenAI from "openai";
+import {
   ProviderModel,
+  ProviderType,
+  ProviderMessage,
   CompletionOptions,
-  ProviderTool
-} from '../types/provider';
-import { logger } from "../utils/logger";
-import { OpenAI } from "openai";
+  OpenAIModelConfig,
+} from "../types";
+import { logger, validateRequiredParam } from "../utils";
 
 /**
  * Create OpenAI configuration with defaults
@@ -35,44 +34,62 @@ export class OpenAIProvider implements ProviderModel {
   public config: OpenAIModelConfig;
   private client: OpenAI;
   
-  constructor(provider: ProviderType, config: OpenAIModelConfig) {
-    this.provider = provider;
+  constructor(type: ProviderType, config: OpenAIModelConfig) {
+    // Validate required parameters
+    validateRequiredParam(type, "type", "OpenAI constructor");
+    validateRequiredParam(config, "config", "OpenAI constructor");
+    validateRequiredParam(config.name, "config.name", "OpenAI constructor");
+
+    logger.info("System", "OpenAI", `Initializing OpenAI model: ${config.name}`);
+
+    this.provider = type;
     this.name = config.name;
-    this.config = config;
+    this.config = {
+      ...config,
+      apiKey: config.apiKey || process.env.OPENAI_API_KEY || "",
+      baseUrl: config.baseUrl || process.env.OPENAI_BASE_URL,
+      temperature: config.temperature ?? 0.7,
+      maxTokens: config.maxTokens ?? 2048,
+    };
+
+    // Validate API key
+    if (!this.config.apiKey) {
+      logger.error("System", "OpenAI", "OpenAI API key is required");
+      throw new Error("OpenAI API key is required. Set OPENAI_API_KEY environment variable or provide apiKey in config.");
+    }
+
+    // Initialize OpenAI client
+    const openaiConfig: any = {
+      apiKey: this.config.apiKey,
+    };
+
+    if (this.config.baseUrl) {
+      openaiConfig.baseURL = this.config.baseUrl;
+    }
+
+    if (this.config.organization) {
+      openaiConfig.organization = this.config.organization;
+    }
+
+    this.client = new OpenAI(openaiConfig);
     
-    this.client = new OpenAI({
-      apiKey: config.apiKey || process.env.OPENAI_API_KEY,
-      baseURL: config.baseUrl || process.env.OPENAI_BASE_URL,
-    });
+    logger.success("System", "OpenAI", `OpenAI model initialized: ${config.name}`);
   }
   
   async complete(messages: ProviderMessage[], options?: CompletionOptions): Promise<string | any> {
     try {
-      console.log(`🔧 DEBUG OPENAI: Starting complete() with options:`, {
-        hasOptions: !!options,
-        hasTools: !!(options?.tools && options.tools.length > 0),
-        toolCount: options?.tools?.length || 0,
-        toolCalling: options?.toolCalling,
-        stream: options?.stream,
-        hasOnChunk: !!options?.onChunk
-      });
+      logger.debug("Unknown", "OpenAI", `Starting complete with ${options?.tools?.length || 0} tools, stream: ${options?.stream}`);
 
       // Check if streaming is requested
       if (options?.stream && options?.onChunk) {
         // If tools are available, do tool calling first then artificial streaming
         if (options?.tools && options.tools.length > 0 && options?.toolCalling) {
-          console.log(`🔧 DEBUG OPENAI: Tools detected, doing tool calling first then artificial streaming`);
+          logger.debug("Unknown", "OpenAI", "Using tool calling with artificial streaming");
           
           // First do regular completion with tools
           const regularResponse = await this.regularComplete(messages, options);
           
-          console.log(`🔧 DEBUG OPENAI: Regular response structure:`, {
-            hasChoices: !!(typeof regularResponse === 'object' && regularResponse.choices),
-            choicesCount: (typeof regularResponse === 'object' && regularResponse.choices) ? regularResponse.choices.length : 0,
-            hasMessage: !!(typeof regularResponse === 'object' && regularResponse.message),
-            hasToolCalls: !!(typeof regularResponse === 'object' && regularResponse.tool_calls),
-            toolCallsCount: (typeof regularResponse === 'object' && regularResponse.tool_calls) ? regularResponse.tool_calls.length : 0
-          });
+          // Response structure logged for debugging
           
           // For tool calls, return the structured response immediately 
           // (streaming will be handled by the chat manager after tool execution)
@@ -98,23 +115,13 @@ export class OpenAIProvider implements ProviderModel {
       const requestOptions = this.buildRequestOptions(formattedMessages, options);
       
       // Log request info
-      console.log(`🔧 DEBUG OPENAI: Request options:`, { 
-        hasTools: !!requestOptions.tools, 
-        toolCount: requestOptions.tools?.length || 0,
-        tool_choice: requestOptions.tool_choice
-      });
+      logger.debug("Unknown", "OpenAI", `Request with ${requestOptions.tools?.length || 0} tools`);
       
       // Make API request
       const response = await this.client.chat.completions.create(requestOptions);
       
       // Log response structure
-      console.log(`🔧 DEBUG OPENAI: Raw response structure:`, {
-        hasChoices: !!response.choices,
-        choicesCount: response.choices?.length || 0,
-        hasMessage: !!response.choices?.[0]?.message,
-        hasToolCalls: !!response.choices?.[0]?.message?.tool_calls,
-        toolCallsCount: response.choices?.[0]?.message?.tool_calls?.length || 0
-      });
+      logger.debug("Unknown", "OpenAI", `Response with ${response.choices?.[0]?.message?.tool_calls?.length || 0} tool calls`);
       
       // Handle response - now can return either string or object with tool calls
       return this.processResponse(response);
@@ -162,7 +169,7 @@ export class OpenAIProvider implements ProviderModel {
       
       return fullResponse;
     } catch (error) {
-      console.error(`🔧 DEBUG OPENAI: Streaming error:`, error);
+      logger.error("Unknown", "OpenAI", `Streaming error: ${error}`);
       this.handleError(error);
       throw error;
     }
@@ -289,14 +296,7 @@ export class OpenAIProvider implements ProviderModel {
   }
   
   private processResponse(response: any): string | any {
-    console.log(`🔧 DEBUG OPENAI: processResponse called with response:`, {
-      hasChoices: !!response.choices,
-      choicesCount: response.choices?.length || 0,
-      hasMessage: !!response.choices?.[0]?.message,
-      messageContent: response.choices?.[0]?.message?.content?.substring(0, 30) || '',
-      hasToolCalls: !!response.choices?.[0]?.message?.tool_calls,
-      toolCallsCount: response.choices?.[0]?.message?.tool_calls?.length || 0
-    });
+    // Process OpenAI response
     
     // Check if the response has the expected structure
     if (!response.choices?.[0]?.message) {
@@ -327,10 +327,7 @@ export class OpenAIProvider implements ProviderModel {
     
     // Handle tool calls if present - Return both message content and structured tool calls
     if (toolCalls?.length > 0) {
-      console.log(`🔧 DEBUG OPENAI: Found ${toolCalls.length} tool calls!`);
-      
-      // Log detailed raw tool calls for debugging
-      console.log(`🔧 DEBUG OPENAI: Tool calls:`, JSON.stringify(toolCalls, null, 2));
+      logger.debug("Unknown", "OpenAI", `Found ${toolCalls.length} tool calls`);
       
       // Return structured data instead of formatted text
       const result = {
@@ -368,20 +365,12 @@ export class OpenAIProvider implements ProviderModel {
         })
       };
       
-      console.log(`🔧 DEBUG OPENAI: Returning structured response:`, {
-        content: result.content?.substring(0, 30) || '',
-        tool_calls: result.tool_calls.map((tc: any) => ({
-          type: tc.type,
-          id: tc.id,
-          name: tc.name
-        }))
-      });
+      logger.debug("Unknown", "OpenAI", `Returning structured response with ${result.tool_calls.length} tool calls`);
       
       return result;
     }
     
     // Return plain text response
-    console.log(`🔧 DEBUG OPENAI: No tool calls, returning plain text:`, message.content?.substring(0, 100) || '');
     return message.content || '';
   }
   
@@ -419,7 +408,7 @@ export class OpenAIProvider implements ProviderModel {
       // Handle response
       return this.processResponse(response);
     } catch (error) {
-      console.error(`🔧 DEBUG OPENAI: Regular completion error:`, error);
+      logger.error("Unknown", "OpenAI", `Regular completion error: ${error}`);
       this.handleError(error);
       throw error;
     }
@@ -427,7 +416,7 @@ export class OpenAIProvider implements ProviderModel {
   
   // Artificial streaming for tool calling results
   private async artificialStream(text: string, onChunk: (chunk: string) => void): Promise<string> {
-    console.log(`🔧 DEBUG OPENAI: Starting artificial streaming of response (length: ${text.length})`);
+    logger.debug("Unknown", "OpenAI", `Starting artificial streaming of ${text.length} characters`);
     
     // Split text into chunks for more natural streaming
     // Use a mix of sentences and words for more natural flow
@@ -466,7 +455,7 @@ export class OpenAIProvider implements ProviderModel {
       }
     }
     
-    console.log(`🔧 DEBUG OPENAI: Artificial streaming completed`);
+    logger.debug("Unknown", "OpenAI", "Artificial streaming completed");
     return text;
   }
 } 

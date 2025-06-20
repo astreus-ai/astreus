@@ -38,19 +38,23 @@ export class TaskManager implements TaskManagerInstance {
    * @param config Configuration options for the task manager
    */
   constructor(config?: TaskManagerConfig) {
-    this.config = config || { concurrency: 5 };
+    logger.info("System", "TaskManager", "Initializing task manager");
+    
+    this.config = config || {};
     this.agentId = config?.agentId;
     this.sessionId = config?.sessionId;
     this.memory = config?.memory;
     this.database = config?.database;
     this.providerModel = config?.providerModel;
+    
+    logger.debug("System", "TaskManager", `Configuration: agent=${this.agentId || 'none'}, session=${this.sessionId || 'none'}`);
 
     // Load existing tasks from the database
     this.loadTasksFromDatabase().catch((err) => {
-      logger.error("Error loading tasks from database:", err);
+      logger.error("System", "TaskManager", `Error loading tasks from database: ${err}`);
     });
     
-    logger.info("Task manager initialized");
+    logger.success("System", "TaskManager", "Task manager initialized");
   }
 
   /**
@@ -75,7 +79,7 @@ export class TaskManager implements TaskManagerInstance {
       if (!(task instanceof Task) && task.plugins) {
         const validPlugins = task.plugins.filter(plugin => typeof plugin === 'string');
         if (validPlugins.length !== task.plugins.length) {
-          logger.warn(`TaskManager: Filtered out ${task.plugins.length - validPlugins.length} invalid plugins from task config`);
+          logger.warn("System", "TaskManager", `Filtered out ${task.plugins.length - validPlugins.length} invalid plugins from task config`);
           task.plugins = validPlugins;
         }
       }
@@ -129,7 +133,7 @@ export class TaskManager implements TaskManagerInstance {
       
       return taskInstance;
     } catch (error) {
-      logger.error("Error adding existing task:", error);
+      logger.error("System", "TaskManager", `Error adding existing task: ${error}`);
       throw error;
     }
   }
@@ -149,10 +153,10 @@ export class TaskManager implements TaskManagerInstance {
           return;
         }
         // Parent doesn't exist, warn about it
-        logger.warn(`Parent task ${parentId} not found for task ${task.id}`);
+        logger.warn("System", "TaskManager", `Parent task ${parentId} not found for task ${task.id}`);
       }
     } catch (error) {
-      logger.error(`Error checking parent dependencies for task ${task.id}:`, error);
+              logger.error("System", "TaskManager", `Error checking parent dependencies for task ${task.id}: ${error}`);
     }
   }
 
@@ -180,6 +184,8 @@ export class TaskManager implements TaskManagerInstance {
    * @returns The created task instance
    */
   public async createTask(config: TaskConfig, model?: ProviderModel): Promise<TaskInstance> {
+    logger.info("System", "TaskManager", `Creating task: ${config.name}`);
+    
     try {
       // Determine which model to use, in order of preference:
       // 1. Explicitly provided model parameter
@@ -193,25 +199,28 @@ export class TaskManager implements TaskManagerInstance {
         taskModel = this.providerModel;
       }
       
-      // Create task with the manager's agent and session IDs if not provided
-      const updatedConfig = {
-        ...config,
-        agentId: config.agentId || this.agentId,
-        sessionId: config.sessionId || this.sessionId,
-        model: taskModel
-      };
+      logger.debug("System", "TaskManager", `Task model selected: ${taskModel ? 'available' : 'none'}`);
 
-      // Create the task with memory and database
-      const task = await Task.createTask(updatedConfig, this.memory, undefined, this.database);
+      // Create task instance using the static factory method
+      const task = await Task.createTask(
+        {
+          ...config,
+          agentId: config.agentId || this.agentId,
+          sessionId: config.sessionId || this.sessionId,
+          model: taskModel
+        },
+        this.memory,
+        taskModel,
+        this.database
+      );
 
-      // Add task to manager
-      this.addExistingTask(task);
+      // Add the task to our manager
+      this.tasks.set(task.id, task);
       
-      logger.info(`Created new task: "${task.config.name}" (${task.id})`);
-
+      logger.success("System", "TaskManager", `Task created and added: ${config.name} (ID: ${task.id})`);
       return task;
     } catch (error) {
-      logger.error("Error creating task:", error);
+      logger.error("System", "TaskManager", `Error creating task: ${error}`);
       throw error;
     }
   }
@@ -226,13 +235,13 @@ export class TaskManager implements TaskManagerInstance {
       const task = this.getTask(id);
       if (task) {
         task.cancel();
-        logger.info(`Task ${id} canceled`);
+        logger.info("System", "TaskManager", `Task ${id} canceled`);
         return true;
       }
-      logger.warn(`Task ${id} not found for cancellation`);
+      logger.warn("System", "TaskManager", `Task ${id} not found for cancellation`);
       return false;
     } catch (error) {
-      logger.error(`Error canceling task ${id}:`, error);
+              logger.error("System", "TaskManager", `Error canceling task ${id}: ${error}`);
       return false;
     }
   }
@@ -289,14 +298,14 @@ export class TaskManager implements TaskManagerInstance {
 
           logger.debug(`Loaded task ${task.id} from database with status: ${task.status}`);
         } catch (error) {
-          logger.error(`Error loading task ${record.id} from database:`, error);
+          logger.error("System", "TaskManager", `Error loading task ${record.id} from database: ${error}`);
           // Continue loading other tasks
         }
       }
 
-      logger.info(`Loaded ${this.tasks.size} tasks from database`);
+      logger.info("System", "TaskManager", `Loaded ${this.tasks.size} tasks from database`);
     } catch (error) {
-      logger.error("Error loading tasks from database:", error);
+      logger.error("System", "TaskManager", `Error loading tasks from database: ${error}`);
       // Don't throw error - allow task manager to continue without database tasks
     }
   }
@@ -333,10 +342,10 @@ export class TaskManager implements TaskManagerInstance {
         throw new Error(`Task with ID ${id} not found`);
       }
 
-      logger.info(`Executing task: "${task.config.name}" (${id})`);
+      logger.info("System", "TaskManager", `Executing task: "${task.config.name}" (${id})`);
       return task.execute(input);
     } catch (error) {
-      logger.error(`Error executing task ${id}:`, error);
+              logger.error("System", "TaskManager", `Error executing task ${id}: ${error}`);
       throw error;
     }
   }
@@ -408,7 +417,7 @@ export class TaskManager implements TaskManagerInstance {
       
       logger.debug("Memory instance set for task manager");
     } catch (error) {
-      logger.error("Error setting memory for task manager:", error);
+              logger.error("System", "TaskManager", `Error setting memory for task manager: ${error}`);
       throw error;
     }
   }
@@ -447,10 +456,10 @@ export class TaskManager implements TaskManagerInstance {
         .map((id) => this.getTask(id))
         .filter((task): task is TaskInstance => !!task);
       
-      logger.info(`Running ${tasksToRun.length} specified tasks`);
+              logger.info("System", "TaskManager", `Running ${tasksToRun.length} specified tasks`);
     } else {
       tasksToRun = this.getAllTasks();
-      logger.info(`Running all ${tasksToRun.length} tasks`);
+              logger.info("System", "TaskManager", `Running all ${tasksToRun.length} tasks`);
     }
 
     // Create a dependency graph and task execution order
@@ -583,7 +592,7 @@ export class TaskManager implements TaskManagerInstance {
             }
           }
         } catch (error) {
-          logger.error(`Error executing task ${task.id}:`, error);
+          logger.error("System", "TaskManager", `Error executing task ${task.id}: ${error}`);
           results.set(task.id, {
             success: false,
             error: error instanceof Error ? error : new Error(String(error))
@@ -601,7 +610,7 @@ export class TaskManager implements TaskManagerInstance {
     // Check for unresolved tasks (might be due to circular dependencies)
     const unresolvedTasks = tasksToRun.filter(t => !completedTasks.has(t.id));
     if (unresolvedTasks.length > 0) {
-      logger.warn(`${unresolvedTasks.length} tasks were not executed due to dependency issues or circular dependencies`);
+              logger.warn("System", "TaskManager", `${unresolvedTasks.length} tasks were not executed due to dependency issues or circular dependencies`);
       
       // Add failed results for these tasks
       for (const task of unresolvedTasks) {
@@ -612,7 +621,7 @@ export class TaskManager implements TaskManagerInstance {
       }
     }
     
-    logger.info(`Completed running ${completedTasks.size} tasks`);
+          logger.info("System", "TaskManager", `Completed running ${completedTasks.size} tasks`);
     return results;
   }
 
@@ -635,9 +644,9 @@ export class TaskManager implements TaskManagerInstance {
       for (const task of this.tasks.values()) {
         task.cancel();
       }
-      logger.info(`Canceled all ${this.tasks.size} tasks`);
+      logger.info("System", "TaskManager", `Canceled all ${this.tasks.size} tasks`);
     } catch (error) {
-      logger.error("Error canceling all tasks:", error);
+      logger.error("System", "TaskManager", `Error canceling all tasks: ${error}`);
     }
   }
 } 

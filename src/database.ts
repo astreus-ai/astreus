@@ -55,6 +55,8 @@ class Database implements DatabaseInstance {
       "Database constructor"
     );
     
+    logger.info("System", "Database", `Creating database instance: ${config.type}`);
+    
     this.config = config;
     
     // Apply table prefix if specified
@@ -70,21 +72,29 @@ class Database implements DatabaseInstance {
       custom: config.tableNames?.custom || {}
     };
 
+    logger.debug("System", "Database", `Table configuration: ${JSON.stringify(this.tableNames)}`);
+
     // Register custom tables
     if (config.tableNames?.custom) {
       Object.entries(config.tableNames.custom).forEach(([name, tableName]) => {
         this.customTables.set(name, prefix + tableName);
+        logger.debug("System", "Database", `Custom table registered: ${name} → ${prefix + tableName}`);
       });
     }
 
     // Initialize knex instance based on database type
     if (config.type === "sqlite") {
+      logger.debug("System", "Database", `Initializing SQLite connection`);
       this.knex = createSqliteDatabase(config);
     } else if (config.type === "postgresql") {
+      logger.debug("System", "Database", `Initializing PostgreSQL connection`);
       this.knex = createPostgresqlDatabase(config);
     } else {
+      logger.error("System", "Database", `Unsupported database type: ${config.type}`);
       throw new Error(`Unsupported database type: ${config.type}`);
     }
+    
+    logger.success("System", "Database", `Database instance created: ${config.type}`);
   }
 
   /**
@@ -95,9 +105,9 @@ class Database implements DatabaseInstance {
     try {
       // Test the connection
       await this.knex.raw("SELECT 1");
-      logger.database("Connect", `Connected to ${this.config.type} database`);
+      logger.success("System", "Database", `Connected to ${this.config.type}`);
     } catch (error) {
-      logger.error(`Error connecting to ${this.config.type} database:`, error);
+      logger.error("System", "Database", `Connection failed: ${error}`);
       throw error;
     }
   }
@@ -107,7 +117,7 @@ class Database implements DatabaseInstance {
    */
   async disconnect(): Promise<void> {
     await this.knex.destroy();
-    logger.database("Disconnect", `Disconnected from ${this.config.type} database`);
+    logger.info("System", "Database", `Disconnected from ${this.config.type}`);
   }
 
   /**
@@ -123,7 +133,7 @@ class Database implements DatabaseInstance {
     try {
       return this.knex.raw(query, params) as Promise<T[]>;
     } catch (error) {
-      logger.error("Error executing query:", error);
+      logger.error("System", "Database", `Query execution failed: ${error}`);
       throw error;
     }
   }
@@ -147,11 +157,13 @@ class Database implements DatabaseInstance {
     validateRequiredParam(tableName, "tableName", "createTable");
     validateRequiredParam(schema, "schema", "createTable");
     
+    logger.info("System", "Database", `Creating table: ${tableName}`);
+    
     try {
       await this.knex.schema.createTable(tableName, schema);
-      logger.database("CreateTable", `Created table: ${tableName}`);
+      logger.success("System", "Database", `Created table: ${tableName}`);
     } catch (error) {
-      logger.error(`Error creating table ${tableName}:`, error);
+      logger.error("System", "Database", `Table creation failed: ${error}`);
       throw error;
     }
   }
@@ -163,11 +175,13 @@ class Database implements DatabaseInstance {
   async dropTable(tableName: string): Promise<void> {
     validateRequiredParam(tableName, "tableName", "dropTable");
     
+    logger.info("System", "Database", `Dropping table: ${tableName}`);
+    
     try {
       await this.knex.schema.dropTableIfExists(tableName);
-      logger.database("DropTable", `Dropped table: ${tableName}`);
+      logger.success("System", "Database", `Dropped table: ${tableName}`);
     } catch (error) {
-      logger.error(`Error dropping table ${tableName}:`, error);
+      logger.error("System", "Database", `Table drop failed: ${error}`);
       throw error;
     }
   }
@@ -181,11 +195,14 @@ class Database implements DatabaseInstance {
     validateRequiredParam(tableName, "tableName", "ensureTable");
     validateRequiredParam(schema, "schema", "ensureTable");
     
+    logger.debug("System", "Database", `Ensuring table exists: ${tableName}`);
+    
     const exists = await this.hasTable(tableName);
     if (!exists) {
+      logger.info("System", "Database", `Table does not exist, creating: ${tableName}`);
       await this.createTable(tableName, schema);
     } else {
-      logger.database("EnsureTable", `Table ${tableName} already exists`);
+      logger.debug("System", "Database", `Table already exists: ${tableName}`);
     }
   }
 
@@ -200,7 +217,7 @@ class Database implements DatabaseInstance {
     
     const prefix = this.config.tablePrefix || '';
     this.customTables.set(name, prefix + tableName);
-    logger.database("RegisterCustomTable", `Registered custom table: ${name} -> ${prefix + tableName}`);
+    logger.debug("System", "Database", `Registered custom table: ${name} → ${prefix + tableName}`);
   }
 
   /**
@@ -223,9 +240,9 @@ class Database implements DatabaseInstance {
       
       // Mark as initialized
       this.initialized = true;
-      logger.database("InitializeSchema", "Database schema initialization complete (legacy migrations only)");
+      logger.info("System", "Database", "Schema initialized");
     } catch (error) {
-      logger.error("Error initializing database schema:", error);
+      logger.error("System", "Database", `Schema initialization failed: ${error}`);
       throw error;
     }
   }
@@ -237,18 +254,20 @@ class Database implements DatabaseInstance {
   private async migrateLegacyTables(memoriesTableName?: string): Promise<void> {
     const memoryTable = memoriesTableName || this.tableNames.memories;
     
+    logger.debug("System", "Database", "Checking for legacy tables to migrate");
+    
     // Check for task_contexts table (deprecated) and migrate data
     const hasTaskContextsTable = await this.knex.schema.hasTable("task_contexts");
     if (hasTaskContextsTable) {
+      logger.info("System", "Database", "Found legacy task_contexts table, migrating data");
       try {
         const contextRecords = await this.knex("task_contexts").select("*");
         if (contextRecords.length > 0) {
-          logger.database("InitializeSchema", `Migrating ${contextRecords.length} task contexts to memory system...`);
-
+          logger.info("System", "Database", `Migrating ${contextRecords.length} task context records`);
           // Check if memories table exists before migration
           const hasMemoriesTable = await this.knex.schema.hasTable(memoryTable);
           if (!hasMemoriesTable) {
-            logger.warn(`Memories table '${memoryTable}' does not exist. Skipping task contexts migration.`);
+            logger.warn("System", "Database", `Memories table missing, skipping migration`);
           } else {
             // Batch insert to memories table
             const memoryRecords = contextRecords.map((record: any) => ({
@@ -266,16 +285,20 @@ class Database implements DatabaseInstance {
             }));
 
             await this.knex(memoryTable).insert(memoryRecords);
-            logger.database("InitializeSchema", "Task contexts migration completed successfully");
+            logger.success("System", "Database", `Migrated ${memoryRecords.length} records to memories table`);
           }
+        } else {
+          logger.debug("System", "Database", "No task context records to migrate");
         }
       } catch (migrationError) {
-        logger.error("Error migrating task contexts:", migrationError);
+        logger.error("System", "Database", `Migration error: ${migrationError}`);
       }
 
       // Drop the deprecated table
       await this.knex.schema.dropTable("task_contexts");
-      logger.database("InitializeSchema", "Dropped deprecated task_contexts table");
+      logger.success("System", "Database", "Legacy task_contexts table removed");
+    } else {
+      logger.debug("System", "Database", "No legacy tables found");
     }
   }
 
@@ -302,7 +325,6 @@ class Database implements DatabaseInstance {
           const result = await knexInstance(tableName).insert(data);
           return result[0];
         } catch (error) {
-          logger.error(`Error inserting into ${tableName}:`, error);
           throw error;
         }
       },
@@ -318,7 +340,7 @@ class Database implements DatabaseInstance {
           }
           return query.select("*");
         } catch (error) {
-          logger.error(`Error finding in ${tableName}:`, error);
+          logger.error("System", "Database", `Find failed: ${String(error)}`);
           throw error;
         }
       },
@@ -336,7 +358,7 @@ class Database implements DatabaseInstance {
           const result = await knexInstance(tableName).where(filter).first();
           return result || null;
         } catch (error) {
-          logger.error(`Error finding one in ${tableName}:`, error);
+          logger.error("System", "Database", `FindOne failed: ${String(error)}`);
           throw error;
         }
       },
@@ -355,7 +377,7 @@ class Database implements DatabaseInstance {
         try {
           return await knexInstance(tableName).where(filter).update(data);
         } catch (error) {
-          logger.error(`Error updating in ${tableName}:`, error);
+          logger.error("System", "Database", `Update failed: ${String(error)}`);
           throw error;
         }
       },
@@ -370,7 +392,7 @@ class Database implements DatabaseInstance {
         try {
           return await knexInstance(tableName).where(filter).delete();
         } catch (error) {
-          logger.error(`Error deleting from ${tableName}:`, error);
+          logger.error("System", "Database", `Delete failed: ${String(error)}`);
           throw error;
         }
       },
@@ -397,8 +419,11 @@ class Database implements DatabaseInstance {
 export const createDatabase: DatabaseFactory = async (
   config?: DatabaseConfig
 ) => {
+  logger.info("System", "DatabaseFactory", "Creating database instance");
+  
   // If no config is provided, create a default one
   if (!config) {
+    logger.debug("System", "DatabaseFactory", "No config provided, creating default configuration");
     // Determine which database to use based on environment variables
     const dbType = process.env.DATABASE_TYPE || "sqlite";
 
@@ -410,7 +435,7 @@ export const createDatabase: DatabaseFactory = async (
       const dir = path.dirname(dbPath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
-        logger.database("CreateDatabase", `Created database directory: ${dir}`);
+        logger.debug("System", "DatabaseFactory", `Created directory: ${dir}`);
       }
       
       config = {
@@ -418,7 +443,7 @@ export const createDatabase: DatabaseFactory = async (
         connection: dbPath,
       };
       
-      logger.database("CreateDatabase", `Using SQLite database at ${dbPath}`);
+      logger.debug("System", "DatabaseFactory", `Using SQLite: ${dbPath}`);
     } else if (dbType === "postgresql") {
       // For PostgreSQL, use connection URL
       if (process.env.DATABASE_URL) {
@@ -441,14 +466,17 @@ export const createDatabase: DatabaseFactory = async (
           },
         };
         
-        logger.database("CreateDatabase", `Using PostgreSQL database from URL: ${host}:${port}/${database}`);
+        logger.debug("System", "DatabaseFactory", `Using PostgreSQL: ${host}:${port}/${database}`);
       } else {
+        logger.error("System", "DatabaseFactory", "PostgreSQL connection requires DATABASE_URL environment variable");
         throw new Error("PostgreSQL connection requires DATABASE_URL environment variable");
       }
     } else {
+      logger.error("System", "DatabaseFactory", `Unsupported database type: ${dbType}`);
       throw new Error(`Unsupported database type: ${dbType}`);
     }
   } else {
+    logger.debug("System", "DatabaseFactory", `Using provided config: ${config.type}`);
     // Validate the provided config
     validateRequiredParams(
       config,
@@ -466,5 +494,6 @@ export const createDatabase: DatabaseFactory = async (
   // Only run legacy migrations, no auto table creation
   await db.initializeSchema();
 
+  logger.success("System", "DatabaseFactory", `Database instance created and connected: ${config.type}`);
   return db;
 };

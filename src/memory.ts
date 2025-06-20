@@ -503,7 +503,7 @@ export class MemoryManager implements MemoryInstance {
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, limit);
       
-      logger.debug(`Found ${filteredResults.length} results in embedding search with threshold ${threshold}`);
+      logger.debug("System", "Memory", `Found ${filteredResults.length} results in embedding search with threshold ${threshold}`);
       
       return filteredResults;
     } catch (error) {
@@ -587,10 +587,10 @@ export class MemoryManager implements MemoryInstance {
         ...entry,
         embedding,
       });
-      logger.debug(`Added memory entry ${id} with embedding`);
+      logger.debug("System", "Memory", `Added memory entry ${id} with embedding`);
       return id;
     } catch (error) {
-      logger.error("Error adding memory entry with embedding:", error);
+      logger.error("System", "Memory", `Add with embedding failed: ${String(error)}`);
       throw error;
     }
   }
@@ -641,7 +641,7 @@ export class MemoryManager implements MemoryInstance {
         .orderBy('lastActivity', 'desc')
         .limit(limit || maxEntries!);
 
-      logger.debug(`Retrieved ${sessions.length} sessions for agent ${agentId}`);
+      logger.debug("System", "Memory", `Retrieved ${sessions.length} sessions for agent ${agentId}`);
 
       return sessions.map((session: any) => ({
         sessionId: session.sessionId,
@@ -651,7 +651,7 @@ export class MemoryManager implements MemoryInstance {
         metadata: session.metadata ? (typeof session.metadata === 'string' ? JSON.parse(session.metadata) : session.metadata) : undefined
       }));
     } catch (error) {
-      logger.error(`Error listing sessions for agent ${agentId}:`, error);
+      logger.error("System", "Memory", `Error listing sessions: ${error}`);
       throw error;
     }
   }
