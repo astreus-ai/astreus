@@ -216,22 +216,20 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
    */
   async searchVectors(vector: number[], limit: number = 10, threshold: number = 0.7): Promise<Array<{ id: string, similarity: number }>> {
     try {
-      console.log(`🔧 DEBUG POSTGRES: Starting vector search with ${vector.length} dimensions, limit: ${limit}, threshold: ${threshold}`);
+      logger.debug("Unknown", "PostgreSQL VectorDB", `Searching with ${vector.length} dimensions, limit: ${limit}, threshold: ${threshold}`);
       await this.ensureConnection();
       
       // For cosine similarity using pgvector: 1 - (embedding <=> ?) 
       // where <=> is cosine distance operator
       // We want similarity >= threshold, so cosine distance <= (1 - threshold)
       const distanceThreshold = 1 - threshold;
-      console.log(`🔧 DEBUG POSTGRES: Similarity threshold: ${threshold}, Cosine distance threshold: ${distanceThreshold}`);
+      // Calculate cosine distance threshold
       
-      // First, let's check how many total vectors we have
+      // Check total vectors for debugging
       const countResult = await this.knex.raw(`SELECT COUNT(*) as total FROM ${this.tableName}`);
       const totalVectors = countResult.rows[0]?.total || 0;
-      console.log(`🔧 DEBUG POSTGRES: Total vectors in table ${this.tableName}: ${totalVectors}`);
       
       // Query using cosine distance operator for better semantic similarity
-      console.log(`🔧 DEBUG POSTGRES: Executing cosine similarity query...`);
       const results = await this.knex.raw(`
         SELECT 
           id, 
@@ -248,23 +246,14 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       ]);
       
       const rows = results.rows;
-      console.log(`🔧 DEBUG POSTGRES: Query returned ${rows.length} rows`);
-      logger.debug(`Found ${rows.length} similar vectors in PostgreSQL`);
-      
-      if (rows.length > 0) {
-        console.log(`🔧 DEBUG POSTGRES: Sample result:`, {
-          id: rows[0].id,
-          similarity: rows[0].similarity
-        });
-      }
+      logger.debug("Unknown", "PostgreSQL VectorDB", `Found ${rows.length} similar vectors`);
       
       return rows.map((row: any) => ({
         id: row.id,
         similarity: parseFloat(row.similarity)
       }));
     } catch (error) {
-      console.log(`🔧 DEBUG POSTGRES: Error in searchVectors:`, error);
-      logger.error('Error searching vectors in PostgreSQL:', error);
+      logger.error("Unknown", "PostgreSQL VectorDB", `Error searching vectors: ${error}`);
       throw error;
     }
   }

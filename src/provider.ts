@@ -54,180 +54,153 @@ class Provider implements ProviderInstance {
       "Provider constructor"
     );
     
-    // Ensure we have either model or models specified
-    if (!config.model && (!config.models || config.models.length === 0)) {
-      throw new Error(`Either 'model' or 'models' must be specified in provider config`);
-    }
+    logger.info("System", "Provider", `Creating ${config.type} provider`);
     
     this.type = config.type;
-    this.config = config;
     this.models = new Map();
+    this.config = config;
 
-    // Initialize models
+    // Initialize models based on configuration
     this.initializeModels();
-
-    // Initialize embedding provider if specified
-    if (config.embeddingModel) {
-      // We need to run this asynchronously since it contains async operations
-      this.initializeEmbeddingModel().catch((error) => {
-        logger.error("Error initializing embedding model:", error);
-      });
-    }
+    
+    // Initialize embedding model
+    this.initializeEmbeddingModel();
+    
+    logger.success("System", "Provider", `${config.type} provider initialized with ${this.models.size} models`);
   }
 
   private initializeModels(): void {
-    const { type, models, model } = this.config;
+    const { config } = this;
+    
+    logger.debug("System", "Provider", `Initializing models for ${config.type} provider`);
+    
+    // Ensure we have either model or models specified
+    if (!config.model && (!config.models || config.models.length === 0)) {
+      logger.error("System", "Provider", "Either 'model' or 'models' must be specified in provider config");
+      throw new Error(`Either 'model' or 'models' must be specified in provider config`);
+    }
 
-    // Handle simplified format with single model
-    if (model) {
-      // Convert the single model string to an array for processing
-      this.processModels(type, [model]);
-      
-      // Set as default model if not already set
-      if (!this.config.defaultModel) {
-        this.config.defaultModel = model;
-      }
+    // Handle simple format (single model string)
+    if (config.model && typeof config.model === 'string') {
+      logger.debug("System", "Provider", `Processing single model: ${config.model}`);
+      this.processModels(config.type, [config.model]);
       return;
     }
 
-    // Handle traditional format with models array
-    if (models && models.length > 0) {
-      this.processModels(type, models);
-      
-      // Set default model if not specified
-      if (!this.config.defaultModel && models.length > 0) {
-        // Use the first model as default
-        const firstModel = models[0];
-        if (typeof firstModel === 'string') {
-          this.config.defaultModel = firstModel;
-        } else {
-          this.config.defaultModel = firstModel.name;
-        }
-      }
-    } else {
-      throw new Error(`No models specified for provider: ${type}`);
+    // Handle array format
+    if (config.models && Array.isArray(config.models)) {
+      logger.debug("System", "Provider", `Processing ${config.models.length} models`);
+      this.processModels(config.type, config.models);
+      return;
     }
+
+    logger.error("System", "Provider", "Invalid model configuration - no models found");
+    throw new Error("Invalid model configuration");
   }
 
   private processModels(type: ProviderType, modelsList: (ProviderModelConfig | string)[]): void {
-    // Validate required parameters
-    validateRequiredParam(type, "type", "processModels");
-    validateRequiredParam(modelsList, "modelsList", "processModels");
+    logger.debug("System", "Provider", `Processing ${modelsList.length} models for ${type} provider`);
     
-    if (type === "openai") {
-      for (const modelConfig of modelsList) {
-        // If only model name is provided, use default config
-        let fullModelConfig: OpenAIModelConfig;
+    for (const modelItem of modelsList) {
+      let modelConfig: ProviderModelConfig;
+      
+      if (typeof modelItem === 'string') {
+        // String format - use defaults from constants
+        const defaultConfigs = DEFAULT_MODEL_CONFIGS[type] as any;
+        const defaultConfig = defaultConfigs?.[modelItem];
         
-        if (typeof modelConfig === 'string') {
-          const defaultConfig = DEFAULT_MODEL_CONFIGS.openai[modelConfig as keyof typeof DEFAULT_MODEL_CONFIGS.openai];
-          if (!defaultConfig) {
-            throw new Error(`No default configuration found for OpenAI model: ${modelConfig}`);
-          }
-          fullModelConfig = {
-            name: modelConfig,
-            ...defaultConfig
+        if (defaultConfig) {
+          logger.debug("System", "Provider", `Using default config for model: ${modelItem}`);
+          modelConfig = {
+            ...defaultConfig,
+            name: modelItem
           };
         } else {
-          // Use provided config but fill in any missing defaults
-          const openAIConfig = modelConfig as OpenAIModelConfig;
-          const modelName = openAIConfig.name;
-          const defaultConfig = DEFAULT_MODEL_CONFIGS.openai[modelName as keyof typeof DEFAULT_MODEL_CONFIGS.openai] || {};
-          
-          // Apply defaults for required parameters
-          validateRequiredParam(modelName, "name", "OpenAI model configuration");
-          
-          fullModelConfig = {
-            ...defaultConfig,
-            ...openAIConfig,
-            temperature: openAIConfig.temperature ?? defaultConfig.temperature ?? 0.7,
-            maxTokens: openAIConfig.maxTokens ?? defaultConfig.maxTokens ?? 2048,
-            apiKey: openAIConfig.apiKey ?? defaultConfig.apiKey ?? process.env.OPENAI_API_KEY,
-            baseUrl: openAIConfig.baseUrl ?? defaultConfig.baseUrl ?? process.env.OPENAI_BASE_URL
+          logger.warn("System", "Provider", `No default config found for model: ${modelItem}, using basic config`);
+          // Fallback configuration
+          modelConfig = {
+            name: modelItem,
+            temperature: 0.7,
+            maxTokens: 2048
           };
-        }
-
-        const model = new OpenAIProvider(type, fullModelConfig);
-        this.models.set(model.name, model);
-      }
-    } else if (type === "ollama") {
-      for (const modelConfig of modelsList) {
-        // If only model name is provided, use default config
-        let fullModelConfig: OllamaModelConfig;
-        
-        if (typeof modelConfig === 'string') {
-          const defaultConfig = DEFAULT_MODEL_CONFIGS.ollama[modelConfig as keyof typeof DEFAULT_MODEL_CONFIGS.ollama];
-          if (!defaultConfig) {
-            throw new Error(`No default configuration found for Ollama model: ${modelConfig}`);
+          
+          // Add provider-specific defaults
+          if (type === 'openai') {
+            (modelConfig as OpenAIModelConfig).apiKey = this.config.apiKey || process.env.OPENAI_API_KEY || '';
+            (modelConfig as OpenAIModelConfig).baseUrl = this.config.baseUrl || process.env.OPENAI_BASE_URL;
+          } else if (type === 'ollama') {
+            (modelConfig as OllamaModelConfig).baseUrl = this.config.baseUrl || process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL;
           }
-          fullModelConfig = {
-            name: modelConfig,
-            ...defaultConfig
-          };
-        } else {
-          // Use provided config but fill in any missing defaults
-          const ollamaConfig = modelConfig as OllamaModelConfig;
-          const modelName = ollamaConfig.name;
-          const defaultConfig = DEFAULT_MODEL_CONFIGS.ollama[modelName as keyof typeof DEFAULT_MODEL_CONFIGS.ollama] || {};
-          
-          // Apply defaults for required parameters
-          validateRequiredParam(modelName, "name", "Ollama model configuration");
-          
-          fullModelConfig = {
-            ...defaultConfig,
-            ...ollamaConfig,
-            temperature: ollamaConfig.temperature ?? defaultConfig.temperature ?? 0.7,
-            maxTokens: ollamaConfig.maxTokens ?? defaultConfig.maxTokens ?? 2048,
-            baseUrl: ollamaConfig.baseUrl ?? defaultConfig.baseUrl ?? process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434'
-          };
         }
-
-        const model = new OllamaProvider(type, fullModelConfig);
-        this.models.set(model.name, model);
+      } else {
+        // Object format - use as provided
+        logger.debug("System", "Provider", `Using custom config for model: ${modelItem.name}`);
+        modelConfig = modelItem;
       }
-    } else {
-      throw new Error(`Unsupported provider type: ${type}`);
+
+      // Override with provider-level settings if provided
+      if (type === 'openai') {
+        const openaiConfig = modelConfig as OpenAIModelConfig;
+        if (this.config.apiKey) openaiConfig.apiKey = this.config.apiKey;
+        if (this.config.baseUrl) openaiConfig.baseUrl = this.config.baseUrl;
+        if (this.config.organization) openaiConfig.organization = this.config.organization;
+      } else if (type === 'ollama') {
+        const ollamaConfig = modelConfig as OllamaModelConfig;
+        if (this.config.baseUrl) ollamaConfig.baseUrl = this.config.baseUrl;
+      }
+
+      // Create the provider model instance
+      let providerModel: ProviderModel;
+      
+      if (type === 'openai') {
+        providerModel = new OpenAIProvider(type, modelConfig as OpenAIModelConfig);
+      } else if (type === 'ollama') {
+        providerModel = new OllamaProvider(type, modelConfig as OllamaModelConfig);
+      } else {
+        logger.error("System", "Provider", `Unsupported provider type: ${type}`);
+        throw new Error(`Unsupported provider type: ${type}`);
+      }
+
+      // Store the model
+      this.models.set(modelConfig.name, providerModel);
+      logger.debug("System", "Provider", `Model registered: ${modelConfig.name}`);
     }
+    
+    logger.success("System", "Provider", `Successfully processed ${modelsList.length} models`);
   }
 
   private async initializeEmbeddingModel(): Promise<void> {
-    const { embeddingModel } = this.config;
-
-    // Default embedding model if not specified
-    const defaultEmbeddingModel =
-      process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
-    const modelToUse = embeddingModel || defaultEmbeddingModel;
-
-    try {
-      // Test if the embedding utility works
-      const isWorking = await Embedding.isAvailable(modelToUse);
-      
-      if (isWorking) {
-        logger.info(`Embedding model initialized: ${modelToUse}`);
-        this.embeddingModel = modelToUse;
-      } else {
-        logger.warn(`Embedding model failed to initialize: ${modelToUse}`);
-        this.embeddingModel = null;
+    if (this.config.embeddingModel) {
+      logger.debug("System", "Provider", `Initializing embedding model: ${this.config.embeddingModel}`);
+      try {
+        // Test if the embedding model is available
+        const isAvailable = await this.testEmbeddingModel(this.config.embeddingModel);
+        if (isAvailable) {
+          this.embeddingModel = this.config.embeddingModel;
+          logger.success("System", "Provider", `Embedding model initialized: ${this.config.embeddingModel}`);
+        } else {
+          logger.warn("System", "Provider", `Embedding model not available: ${this.config.embeddingModel}`);
+        }
+      } catch (error) {
+        logger.error("System", "Provider", `Error initializing embedding model: ${error}`);
       }
-    } catch (error) {
-      logger.error("Error initializing embedding model:", error);
-      this.embeddingModel = null;
+    } else {
+      logger.debug("System", "Provider", "No embedding model specified");
     }
   }
 
   getModel(name: string): ProviderModel {
-    // Validate required parameters
     validateRequiredParam(name, "name", "getModel");
     
-    // If name is 'default', try to get the default model
-    if (name === 'default' && this.config.defaultModel) {
-      name = this.config.defaultModel;
-    }
+    logger.debug("System", "Provider", `Retrieving model: ${name}`);
     
     const model = this.models.get(name);
     if (!model) {
-      throw new Error(`Model '${name}' not found in provider: ${this.type}`);
+      logger.error("System", "Provider", `Model not found: ${name}. Available models: ${Array.from(this.models.keys()).join(', ')}`);
+      throw new Error(`Model '${name}' not found in provider. Available models: ${Array.from(this.models.keys()).join(', ')}`);
     }
+    
+    logger.debug("System", "Provider", `Model retrieved: ${name}`);
     return model;
   }
 
@@ -249,7 +222,7 @@ class Provider implements ProviderInstance {
     validateRequiredParam(text, "text", "generateEmbedding");
     
     if (!this.embeddingModel) {
-      logger.warn("No embedding model configured");
+      logger.warn("System", "Provider", "No embedding model configured");
       return null;
     }
 
@@ -257,7 +230,7 @@ class Provider implements ProviderInstance {
       // Use the Embedding utility to generate embeddings
       return await Embedding.generateEmbedding(text, this.embeddingModel);
     } catch (error) {
-      logger.error("Error generating embedding:", error);
+      logger.error("System", "Provider", `Error generating embedding: ${error}`);
       return null;
     }
   }
@@ -267,7 +240,7 @@ class Provider implements ProviderInstance {
       const modelToUse = name || this.embeddingModel || this.config.embeddingModel || 
         process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
       
-      logger.info(`Testing embedding model: ${modelToUse}`);
+      logger.info("System", "Provider", `Testing embedding model: ${modelToUse}`);
       
       // First check which embedding models are available (for debugging)
       const availableModels = await Embedding.listAvailableModels();
@@ -279,16 +252,16 @@ class Provider implements ProviderInstance {
       const isWorking = await Embedding.isAvailable(modelToUse);
 
       if (isWorking) {
-        logger.info(`Embedding model initialized: ${modelToUse}`);
+        logger.info("System", "Provider", `Embedding model initialized: ${modelToUse}`);
         this.embeddingModel = modelToUse;
         return true;
       } else {
-        logger.warn(`Embedding model failed to initialize: ${modelToUse}`);
+        logger.warn("System", "Provider", `Embedding model failed to initialize: ${modelToUse}`);
         this.embeddingModel = null;
         return false;
       }
     } catch (error) {
-      logger.error(`Error initializing embedding model:`, error);
+      logger.error("System", "Provider", `Error initializing embedding model: ${error}`);
       this.embeddingModel = null;
       return false;
     }
@@ -297,13 +270,10 @@ class Provider implements ProviderInstance {
 
 // Create provider factory
 export const createProvider: ProviderFactory = (config: ProviderConfig) => {
-  // Validate required parameters
-  validateRequiredParam(config, "config", "createProvider");
-  validateRequiredParams(
-    config,
-    ["type"],
-    "createProvider"
-  );
+  logger.info("System", "ProviderFactory", `Creating ${config.type} provider`);
   
-  return new Provider(config);
+  const provider = new Provider(config);
+  
+  logger.success("System", "ProviderFactory", `${config.type} provider created with ${provider.listModels().length} models`);
+  return provider;
 };

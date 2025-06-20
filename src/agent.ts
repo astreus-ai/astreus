@@ -52,8 +52,11 @@ class Agent implements AgentInstance {
       "Agent constructor"
     );
     
+    logger.info("System", "Agent", `Creating agent with config: ${config.name || DEFAULT_AGENT_NAME}`);
+    
     // Ensure either model or provider is specified
     if (!config.model && !config.provider) {
+      logger.error("System", "Agent", "Either 'model' or 'provider' must be specified in agent config");
       throw new Error("Either 'model' or 'provider' must be specified in agent config");
     }
     
@@ -62,13 +65,16 @@ class Agent implements AgentInstance {
       const defaultModelName = config.provider.getDefaultModel?.() || config.provider.listModels()[0];
       if (defaultModelName) {
         config.model = config.provider.getModel(defaultModelName);
+        logger.info("System", "Agent", `Using default model from provider: ${defaultModelName}`);
       } else {
+        logger.error("System", "Agent", "No default model available in provider");
         throw new Error("No default model available in provider");
       }
     }
     
     // Ensure we have a model at this point
     if (!config.model) {
+      logger.error("System", "Agent", "No model could be determined for the agent");
       throw new Error("No model could be determined for the agent");
     }
     
@@ -88,32 +94,37 @@ class Agent implements AgentInstance {
     this.taskManager = config.taskManager;
     this.rag = config.rag;
 
+    logger.info(this.config.name, "Agent", `Initialized with ID: ${this.id}`);
+    logger.debug(this.config.name, "Agent", `Model: ${config.model.name}, Memory: ${!!this.memory}, Database: ${!!this.database}`);
+
     // Initialize tools if provided
     if (this.config.tools) {
+      logger.info(this.config.name, "Agent", `Loading ${this.config.tools.length} direct tools`);
       this.config.tools.forEach((tool) => {
         this.tools.set(tool.name, tool);
+        logger.debug(this.config.name, "Tools", `Added tool: ${tool.name}`);
       });
     }
 
     // Create RAG tools if RAG instance is provided
     if (this.config.rag) {
-      logger.debug(`Agent ${this.config.name}: Checking RAG instance for tools...`);
-      
+      logger.info(this.config.name, "Agent", "Setting up RAG tools");
       // Check if RAG instance has createRAGTools method
       if ('createRAGTools' in this.config.rag && typeof this.config.rag.createRAGTools === 'function') {
         const ragTools = this.config.rag.createRAGTools();
         ragTools.forEach((tool: Plugin) => {
           this.tools.set(tool.name, tool);
+          logger.debug(this.config.name, "RAG", `Added tool: ${tool.name}`);
         });
-        logger.debug(`Agent ${this.config.name}: Added ${ragTools.length} RAG tools`);
+        logger.success(this.config.name, "RAG", `Added ${ragTools.length} tools`);
       } else {
-        logger.warn(`Agent ${this.config.name}: RAG instance does not have createRAGTools method`);
-        logger.debug(`Agent ${this.config.name}: RAG instance keys:`, Object.keys(this.config.rag));
+        logger.warn(this.config.name, "RAG", "No createRAGTools method found");
       }
     }
 
     // Initialize plugins and register their tools if provided
     if (this.config.plugins) {
+      logger.info(this.config.name, "Agent", `Loading ${this.config.plugins.length} plugins`);
       for (const plugin of this.config.plugins) {
         // Check if plugin has getTools method (PluginInstance)
         if (plugin && 'getTools' in plugin && typeof plugin.getTools === 'function') {
@@ -125,8 +136,10 @@ class Agent implements AgentInstance {
                 this.tools.set(tool.name, tool);
                 // Also register with the global registry
                 PluginManager.register(tool);
+                logger.debug(this.config.name, "Plugin", `Added tool: ${tool.name}`);
               }
             });
+            logger.success(this.config.name, "Plugin", `Loaded plugin with ${pluginTools.length} tools`);
           }
         } 
         // Check if it's a direct Plugin object
@@ -135,12 +148,13 @@ class Agent implements AgentInstance {
           const toolPlugin = plugin as Plugin;
           this.tools.set(toolPlugin.name, toolPlugin);
           PluginManager.register(toolPlugin);
+          logger.debug(this.config.name, "Plugin", `Added direct tool: ${toolPlugin.name}`);
         }
       }
     }
 
     // Log final tool count
-    logger.debug(`Agent ${this.config.name}: Initialized with ${this.tools.size} tools:`, Array.from(this.tools.keys()));
+    logger.success(this.config.name, "Agent", `Initialized with ${this.tools.size} tools total`);
   }
 
 
@@ -176,12 +190,17 @@ class Agent implements AgentInstance {
   // Memory access methods
   async getHistory(sessionId: string, limit?: number): Promise<any[]> {
     validateRequiredParam(sessionId, "sessionId", "getHistory");
-    return await this.memory.getBySession(sessionId, limit);
+    logger.debug(this.config.name, "Memory", `Retrieving history for session: ${sessionId}, limit: ${limit || 'none'}`);
+    const history = await this.memory.getBySession(sessionId, limit);
+    logger.debug(this.config.name, "Memory", `Retrieved ${history.length} messages for session: ${sessionId}`);
+    return history;
   }
 
   async clearHistory(sessionId: string): Promise<void> {
     validateRequiredParam(sessionId, "sessionId", "clearHistory");
+    logger.info(this.config.name, "Memory", `Clearing history for session: ${sessionId}`);
     await this.memory.clear(sessionId);
+    logger.success(this.config.name, "Memory", `History cleared for session: ${sessionId}`);
   }
 
   async addToMemory(params: {
@@ -194,13 +213,16 @@ class Agent implements AgentInstance {
     validateRequiredParam(params.role, "params.role", "addToMemory");
     validateRequiredParam(params.content, "params.content", "addToMemory");
 
-    return await this.memory.add({
+    logger.debug(this.config.name, "Memory", `Adding ${params.role} message to session: ${params.sessionId}`);
+    const messageId = await this.memory.add({
       agentId: this.id,
       sessionId: params.sessionId,
       role: params.role,
       content: params.content,
       metadata: params.metadata || {}
     });
+    logger.debug(this.config.name, "Memory", `Message added with ID: ${messageId}`);
+    return messageId;
   }
 
   // List all sessions for this agent
@@ -223,7 +245,7 @@ class Agent implements AgentInstance {
         metadata: session.metadata || {}
       }));
     } catch (error) {
-      logger.error(`Error listing sessions for agent ${this.id}:`, error);
+      logger.error("System", "Sessions", `Error listing sessions for agent ${this.id}: ${error}`);
       return [];
     }
   }
@@ -252,12 +274,16 @@ class Agent implements AgentInstance {
       onChunk
     } = params;
 
+    logger.info(this.config.name, "Chat", `Processing message in session: ${sessionId}`);
+    logger.debug(this.config.name, "Chat", `Message length: ${message.length}, Tools: ${this.tools.size}, Stream: ${stream}`);
+
     if (!this.chatManager) {
+      logger.error(this.config.name, "Chat", "ChatManager is required for agent chat functionality");
       throw new Error("ChatManager is required for agent chat functionality. Please configure a ChatManager in the agent config.");
     }
 
     // Use ChatManager for all chat functionality with streaming support
-    return await this.chatManager.chat({
+    const response = await this.chatManager.chat({
       message,
       chatId: sessionId,
       agentId: this.id,
@@ -270,6 +296,9 @@ class Agent implements AgentInstance {
       stream,
       onChunk
     });
+
+    logger.success(this.config.name, "Chat", `Response generated (${response.length} chars) for session: ${sessionId}`);
+    return response;
   }
 
   /**
@@ -289,7 +318,9 @@ class Agent implements AgentInstance {
       "addTool"
     );
     
+    logger.info(this.config.name, "Tools", `Adding tool: ${tool.name}`);
     this.tools.set(tool.name, tool);
+    logger.success(this.config.name, "Tools", `Tool added successfully: ${tool.name} (total: ${this.tools.size})`);
   }
 
   /**
@@ -472,8 +503,11 @@ export const createAgent: AgentFactory = async (config: AgentConfig) => {
     "createAgent"
   );
   
+  logger.info("System", "AgentFactory", `Creating new agent: ${config.name || DEFAULT_AGENT_NAME}`);
+  
   // Ensure either model or provider is specified
   if (!config.model && !config.provider) {
+    logger.error("System", "AgentFactory", "Either 'model' or 'provider' must be specified in agent config");
     throw new Error("Either 'model' or 'provider' must be specified in agent config");
   }
   
@@ -482,6 +516,7 @@ export const createAgent: AgentFactory = async (config: AgentConfig) => {
 
   // Save agent to database
   try {
+    logger.debug(agent.config.name, "Database", "Saving agent to database");
     // Use database from config if provided, otherwise create a new one
     const db = config.database || await createDatabase();
     const tableNames = db.getTableNames();
@@ -518,7 +553,7 @@ export const createAgent: AgentFactory = async (config: AgentConfig) => {
           supportsTaskSystem: true,
         }),
       });
-      logger.agent(agent.config.name || DEFAULT_AGENT_NAME, `Agent saved to database with ID: ${agent.id}`);
+      logger.success(agent.config.name, "Database", `Saved with ID: ${agent.id}`);
     } else {
       // Update existing agent
       await agentsTable.update(
@@ -535,11 +570,12 @@ export const createAgent: AgentFactory = async (config: AgentConfig) => {
           }),
         }
       );
-      logger.agent(agent.config.name || DEFAULT_AGENT_NAME, `Agent updated in database with ID: ${agent.id}`);
+      logger.success(agent.config.name, "Database", `Updated with ID: ${agent.id}`);
     }
   } catch (error) {
-    logger.error("Error saving agent to database:", error);
+    logger.error(agent.config.name, "Database", `Save failed: ${error}`);
   }
 
+  logger.success("System", "AgentFactory", `Agent created successfully: ${agent.config.name} (${agent.id})`);
   return agent;
 }; 

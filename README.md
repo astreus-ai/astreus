@@ -6,28 +6,34 @@
 
 An AI Agent Framework designed to help you easily build, deploy, and manage intelligent conversational agents powered by large language models (LLMs).
 
+**Current Version: 0.2.9** - Enhanced with professional logging, vector database support, and improved RAG capabilities.
+
 ## 🌟 Features
 
 - **Unified Agent API**: Create and manage AI agents with a consistent interface 
 - **Multi-Provider Support**: Works with OpenAI and Ollama models out of the box
 - **Memory Management**: Built-in conversation history with vector search capabilities
 - **Chat Management**: Advanced chat system with metadata, search, and organization
-- **Task Orchestration**: Break complex requests into manageable sub-tasks
-- **Plugin System**: Extend agent capabilities with custom tools
+- **Task Orchestration**: Break complex requests into manageable sub-tasks with dependency management
+- **Plugin System**: Extend agent capabilities with custom tools and integrations
 - **Persistence Layer**: Automatic storage using SQLite or PostgreSQL
-- **RAG Support**: Built-in Retrieval Augmented Generation with PDF parsing
+- **Advanced RAG Support**: Vector-based and document-based retrieval with external vector database support
+- **PDF Processing**: Built-in PDF parsing and document processing capabilities
 - **Embeddings Support**: Semantic search across conversations and documents
-- **Type Safety**: Fully typed with TypeScript
-- **Advanced Logging**: Structured logging system for improved debugging and monitoring
-- **Flexible Configuration**: Enhanced parameter validation and smart defaults
+- **Vector Database Integration**: Support for PostgreSQL with pgvector, Qdrant, Pinecone, and more
+- **Type Safety**: Fully typed with TypeScript for better development experience
+- **Professional Logging**: Structured logging system with color-coded output and consistent formatting
+- **Flexible Configuration**: Enhanced parameter validation, smart defaults, and environment-based setup
+- **Plugin Manager**: Advanced plugin management with automatic tool registration
 
 ## 🚀 Getting Started
 
 ### 🛠 Prerequisites
 
 - Node.js 16 or higher
-- Git
-- OpenAI API key or local Ollama setup
+- TypeScript (optional, but recommended for development)
+- OpenAI API key (for OpenAI provider) or local Ollama setup (for Ollama provider)
+- PostgreSQL (optional, for advanced vector database features)
 
 ### 💿 Installation
 
@@ -90,7 +96,7 @@ import {
 
   // Chat with your agent
   const response = await agent.chat("Tell me about TypeScript");
-  logger.info('Agent response:', response);
+  logger.info("Agent", "Response", response);
 })();
 ```
 
@@ -141,19 +147,32 @@ Help the user search, post, and analyze content on X.`,
 
 ### Working with RAG (Retrieval Augmented Generation)
 
-Astreus provides built-in RAG capabilities:
+Astreus provides built-in RAG capabilities with support for both vector-based and document-based retrieval:
 
 ```typescript
-import { createRAG, parsePDF } from '@astreus-ai/astreus';
+import { createRAG, parsePDF, RAGType } from '@astreus-ai/astreus';
 
 // Parse a PDF document
 const document = await parsePDF('path/to/document.pdf');
 
-// Create a RAG system
-const rag = await createRAG({
-  documents: [document],
-  embeddings: provider.getEmbeddingModel(),
-  database: db
+// Create a vector-based RAG system (recommended for semantic search)
+const vectorRAG = await createRAG({
+  type: RAGType.VECTOR,
+  database: db,
+  provider: provider,
+  tableName: 'knowledge_base',
+  chunkSize: 1000,
+  chunkOverlap: 200,
+  maxResults: 10
+});
+
+// Add documents to the RAG system
+await vectorRAG.addDocument({
+  content: document.content,
+  metadata: {
+    filename: 'climate_report.pdf',
+    type: 'research_paper'
+  }
 });
 
 // Use RAG with your agent
@@ -163,7 +182,7 @@ const agent = await createAgent({
   provider: provider,
   memory: memory,
   database: db,
-  rag: rag,
+  rag: vectorRAG,
   systemPrompt: 'You are a helpful assistant that can answer questions about documents.'
 });
 
@@ -191,7 +210,7 @@ const chat = await createChat({
 const newChat = await chat.createChat({
   agentId: 'my-agent',
   userId: 'user123',
-  title: 'Export Regulations Discussion'
+  title: 'AI Assistant Discussion'
 });
 
 // Add messages to the chat
@@ -200,7 +219,7 @@ await chat.addMessage({
   agentId: 'my-agent',
   userId: 'user123',
   role: 'user',
-  content: 'What are the export regulations for electronics?'
+  content: 'How can I improve my coding skills?'
 });
 
 // Get chat messages (integrates with memory system)
@@ -214,7 +233,7 @@ const userChats = await chat.listChats({
 
 // Search through chats
 const searchResults = await chat.searchChats({
-  query: 'electronics',
+  query: 'coding',
   userId: 'user123'
 });
 
@@ -241,6 +260,11 @@ The chat system provides:
 Creating and running tasks is straightforward:
 
 ```typescript
+import { createTaskManager } from '@astreus-ai/astreus';
+
+// Create a task manager
+const taskManager = createTaskManager();
+
 // Create a data processing task
 const analysisTask = agent.createTask({
   name: "Analyze Data",
@@ -257,16 +281,16 @@ try {
   const analysisResult = taskResults.get(analysisTask.id);
   
   if (analysisResult?.success) {
-    logger.success("Task completed successfully!");
+    logger.success("System", "Task", "Task completed successfully!");
     console.log(analysisResult.output);
   } else {
-    logger.warn("Task failed");
+    logger.warn("System", "Task", "Task failed");
     if (analysisResult?.output?.error) {
-      logger.error(`Error: ${analysisResult.output.error}`);
+      logger.error("System", "Task", `Error: ${analysisResult.output.error}`);
     }
   }
 } catch (error) {
-  logger.error("Error running task:", error);
+  logger.error("System", "Task", `Error running task: ${error}`);
 }
 ```
 
@@ -301,20 +325,174 @@ When using `dependsOn`, the system automatically:
 2. Passes the outputs from dependency tasks to dependent tasks in `_dependencyOutputs`
 3. Handles failed dependencies gracefully
 
+### Advanced Logging System
+
+Astreus includes a professional logging system with structured output:
+
+```typescript
+import { logger } from '@astreus-ai/astreus';
+
+// Professional logging with consistent format: "Astreus [AgentName] Component → Message"
+logger.info("MyAgent", "Database", "Connected to database successfully");
+logger.debug("MyAgent", "Memory", "Storing conversation context");
+logger.success("MyAgent", "Task", "Task completed successfully");
+logger.warn("MyAgent", "Provider", "Rate limit approaching");
+logger.error("MyAgent", "Plugin", "Plugin initialization failed");
+```
+
+The logging system features:
+- **Color-coded output**: Different colors for different log levels
+- **Consistent format**: Structured agent/component/message format
+- **Professional appearance**: Clean, readable logs without emojis
+- **Configurable levels**: Set LOG_LEVEL environment variable
+
+### Plugin Management
+
+Astreus includes an advanced plugin system with automatic tool registration:
+
+```typescript
+import { PluginManager } from '@astreus-ai/astreus';
+
+// Create plugin manager
+const pluginManager = new PluginManager();
+
+// Load plugins
+await pluginManager.loadPlugin(myCustomPlugin);
+
+// Create agent with plugin manager
+const agent = await createAgent({
+  name: 'PluginAgent',
+  provider: provider,
+  memory: memory,
+  database: db,
+  pluginManager: pluginManager,
+  systemPrompt: 'You are an assistant with extended capabilities.'
+});
+
+// Plugins are automatically registered and available to the agent
+```
+
 ## 🔧 Configuration
 
-Environment variables:
+### Environment Variables
 
 - `OPENAI_API_KEY` - Your OpenAI API key
 - `OPENAI_BASE_URL` - Optional custom base URL for OpenAI API
 - `OPENAI_EMBEDDING_API_KEY` - Optional separate key for embeddings (falls back to main key)
+- `OPENAI_EMBEDDING_MODEL` - Embedding model to use (default: "text-embedding-3-small")
 - `DATABASE_TYPE` - Type of database to use (sqlite or postgresql)
 - `DATABASE_PATH` - Path for SQLite database (if using SQLite)
 - `DATABASE_URL` - Connection string for PostgreSQL (if using PostgreSQL)
-- `OLLAMA_BASE_URL` - Base URL for Ollama API (if using Ollama)
+- `OLLAMA_BASE_URL` - Base URL for Ollama API (if using Ollama, default: "http://localhost:11434")
 - `LOG_LEVEL` - Logging level (default: "info")
 
+### Database Configuration
+
+Astreus supports both SQLite and PostgreSQL databases:
+
+```typescript
+// SQLite (default)
+const db = await createDatabase({
+  type: 'sqlite',
+  path: './astreus.db'
+});
+
+// PostgreSQL
+const db = await createDatabase({
+  type: 'postgresql',
+  connectionString: 'postgresql://user:password@localhost:5432/astreus'
+});
+```
+
+### Vector Database Support
+
+For advanced RAG capabilities, Astreus supports external vector databases:
+
+```typescript
+import { VectorDatabaseType } from '@astreus-ai/astreus';
+
+const vectorRAG = await createRAG({
+  type: RAGType.VECTOR,
+  database: db,
+  provider: provider,
+  vectorDatabase: {
+    type: VectorDatabaseType.POSTGRES,
+    connectionString: 'postgresql://user:password@localhost:5432/vector_db'
+  }
+});
+```
+
+### Additional Exports
+
+Astreus also exports utility functions and types for advanced usage:
+
+```typescript
+import { 
+  // Core functions
+  createAgent, createProvider, createMemory, createDatabase, createRAG, createChat,
+  
+  // Task system
+  createTaskManager, createTask, createTaskSync, TaskManager, Task,
+  
+  // RAG utilities
+  parsePDF, parseDirectoryOfPDFs, createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv,
+  
+  // Plugin system
+  PluginManager,
+  
+  // Utilities
+  logger, validateRequiredParam, validateRequiredParams,
+  
+  // Types and constants
+  RAGType, VectorDatabaseType
+} from '@astreus-ai/astreus';
+```
+
 **Note**: Each component (createMemory, createChat, createAgent, etc.) automatically creates its required database tables when first used.
+
+## 🔧 Troubleshooting
+
+### Common Issues
+
+**"Model not found" error**
+```bash
+Error: Model 'gpt-4o-mini' not found in provider
+```
+- Ensure the model name is correct
+- Check that your API key has access to the specified model
+- Verify the provider type matches the model
+
+**Database connection issues**
+```bash
+Error: connect ECONNREFUSED
+```
+- For PostgreSQL: Ensure the database server is running and accessible
+- Check connection string format and credentials
+- For SQLite: Ensure the directory exists and has write permissions
+
+**Embedding generation fails**
+```bash
+Error generating embedding: 401 Unauthorized
+```
+- Check `OPENAI_API_KEY` or `OPENAI_EMBEDDING_API_KEY` environment variables
+- Verify API key has access to embedding models
+- Ensure embedding model name is correct
+
+**Plugin loading errors**
+```bash
+Plugin initialization failed
+```
+- Check plugin compatibility with current Astreus version
+- Ensure plugin dependencies are installed
+- Verify plugin configuration is correct
+
+### Debug Mode
+
+Enable debug logging to get more detailed information:
+
+```bash
+LOG_LEVEL=debug node your-app.js
+```
 
 ## 🤝 Contributing
 

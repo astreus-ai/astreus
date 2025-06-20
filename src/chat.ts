@@ -31,14 +31,16 @@ export class ChatManager implements ChatInstance {
     validateRequiredParam(config.database, "config.database", "ChatManager constructor");
     validateRequiredParam(config.memory, "config.memory", "ChatManager constructor");
 
+    logger.info("System", "ChatManager", `Initializing chat manager with table: ${config.tableName || 'chats'}`);
+
     this.config = config;
     // Use user-provided table name or default
     this.tableName = config.tableName || "chats";
     this.maxChats = config.maxChats || 50;
     this.autoGenerateTitles = config.autoGenerateTitles !== false;
+    
+    logger.debug("System", "ChatManager", `Configuration: table=${this.tableName}, maxChats=${this.maxChats}, autoTitles=${this.autoGenerateTitles}`);
   }
-
-
 
   async createChat(params: {
     chatId?: string;
@@ -52,9 +54,12 @@ export class ChatManager implements ChatInstance {
     const chatId = params.chatId || generateChatId();
     const now = new Date();
 
+    logger.info("System", "ChatManager", `Creating chat: ${chatId} for agent: ${params.agentId}`);
+
     // Check if chat already exists
     const existingChat = await this.getChat(chatId);
     if (existingChat) {
+      logger.debug("System", "ChatManager", `Chat already exists: ${chatId}`);
       return existingChat;
     }
 
@@ -85,7 +90,7 @@ export class ChatManager implements ChatInstance {
       metadata: params.metadata ? JSON.stringify(params.metadata) : null
     });
 
-    logger.info(`Chat created: ${chatId}`);
+    logger.success("System", "ChatManager", `Chat created: ${chatId}`);
     return chatMetadata;
   }
 
@@ -124,7 +129,7 @@ export class ChatManager implements ChatInstance {
         title: params.title,
         metadata: params.metadata
       });
-      logger.info(`Created new chat: ${chatId} for agent: ${params.agentId}`);
+      logger.info("System", "ChatManager", `Created new chat: ${chatId} for agent: ${params.agentId}`);
     }
 
     // Process the message
@@ -185,6 +190,8 @@ export class ChatManager implements ChatInstance {
     // Get conversation history from chat system
     const history = await this.getMessages(chatId);
 
+    logger.debug("System", "ChatManager", `Processing message for chat: ${chatId}, history: ${history.length} messages`);
+
     // Add user message to chat
     await this.addMessage({
       chatId,
@@ -226,20 +233,13 @@ export class ChatManager implements ChatInstance {
     });
 
     // Get available tools - Convert parameters to proper format for provider
-    console.log(`🔧 DEBUG ASTREUS: Starting tool processing, received ${tools.length} tools`);
-    console.log(`🔧 DEBUG ASTREUS: useTaskSystem=${useTaskSystem}, taskManager exists=${!!taskManager}`);
-    
     const availableTools = tools.map((tool) => {
-      console.log(`🔧 DEBUG ASTREUS: Processing tool ${tool.name} with parameters:`, tool.parameters);
-      
       const result = convertToolParametersToSchema(tool);
-      
-      console.log(`🔧 DEBUG ASTREUS: Final tool format for ${tool.name}:`, JSON.stringify(result, null, 2));
       return result;
     });
     
-    console.log(`🔧 DEBUG ASTREUS: Total tools available: ${availableTools.length}`);
-
+    logger.debug("System", "ChatManager", `Available tools: ${availableTools.length}, Task system: ${useTaskSystem}`);
+    
     // If tools are available, add them to the system message
     if (availableTools.length > 0 && systemPrompt) {
       const systemMessage = messages.find((msg) => msg.role === "system");
@@ -327,7 +327,7 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
 
           response = typeof taskResponse === 'string' ? taskResponse : taskResponse.content;
         } catch (error) {
-          logger.error("Error processing tasks:", error);
+          logger.error("System", "TaskProcessing", `Error processing tasks: ${error}`);
           // Fallback to standard completion if task processing fails
           response = await model.complete(messages);
         }
@@ -337,9 +337,9 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
       }
     } else {
       // Regular chat completion
-      console.log(`🔧 DEBUG ASTREUS: Using regular chat completion`);
-      console.log(`🔧 DEBUG ASTREUS: Calling model.complete with tools:`, availableTools.length > 0 ? availableTools : undefined);
-      console.log(`🔧 DEBUG ASTREUS: toolCalling enabled:`, availableTools.length > 0);
+                                                      logger.debug('Unknown', 'Chat', 'Using regular chat completion');
+                logger.debug('Unknown', 'Chat', `Calling model.complete with tools: ${String(availableTools.length > 0 ? availableTools : undefined)}`);
+                logger.debug('Unknown', 'Chat', `toolCalling enabled: ${String(availableTools.length > 0)}`);
       
       response = await model.complete(messages, {
         tools: availableTools.length > 0 ? availableTools : undefined,
@@ -350,60 +350,44 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
         onChunk
       });
       
-      console.log(`🔧 DEBUG ASTREUS: Model response type:`, typeof response);
-      console.log(`🔧 DEBUG ASTREUS: Response has tool_calls:`, typeof response === 'object' && response.tool_calls ? response.tool_calls.length : 'NO');
+                  logger.debug('Unknown', 'Chat', `Model response type: ${typeof response}`);
+            logger.debug('Unknown', 'Chat', `Response has tool_calls: ${typeof response === 'object' && response.tool_calls ? response.tool_calls.length : 'NO'}`);
     }
 
     // Handle tool execution if the response contains tool calls
     if (typeof response === 'object' && response.tool_calls && Array.isArray(response.tool_calls)) {
-      console.log(`🔧 DEBUG CHAT: Chat ${chatId} received ${response.tool_calls.length} tool calls to execute`);
-      console.log(`🔧 DEBUG CHAT: Available tools:`, tools.map(t => ({ name: t.name, hasExecute: !!t.execute })));
+      logger.info("System", "ChatManager", `Chat ${chatId} received ${response.tool_calls.length} tool calls to execute`);
       
       const toolResults = [];
       for (const toolCall of response.tool_calls) {
         try {
           if (toolCall.type === 'function' && toolCall.name) {
-            console.log(`🔧 DEBUG CHAT: Executing tool: ${toolCall.name} with arguments:`, toolCall.arguments);
+            logger.debug("System", "ChatManager", `Executing tool: ${toolCall.name}`);
             
             // Find the tool to execute
             const tool = tools.find(t => t.name === toolCall.name);
-            console.log(`🔧 DEBUG CHAT: Found tool:`, tool ? { name: tool.name, hasExecute: !!tool.execute } : 'NOT FOUND');
             
             if (tool && tool.execute) {
-              console.log(`🔧 DEBUG CHAT: About to execute tool ${toolCall.name}...`);
-              
               // Inject userLanguage from metadata if available and tool supports it
               let toolArguments = toolCall.arguments || {};
               
-              console.log(`🔧 DEBUG CHAT: Metadata check:`, {
-                hasMetadata: !!metadata,
-                metadataKeys: metadata ? Object.keys(metadata) : [],
-                userLanguage: metadata?.userLanguage,
-                language: metadata?.language,
-                toolName: toolCall.name
-              });
-              
               if (metadata?.userLanguage && toolCall.name === 'rag_search') {
-                console.log(`🔧 DEBUG CHAT: Injecting userLanguage: ${metadata.userLanguage} into ${toolCall.name} tool`);
+                logger.debug("System", "ChatManager", `Injecting userLanguage: ${metadata.userLanguage} for ${toolCall.name}`);
                 toolArguments = {
                   ...toolArguments,
                   userLanguage: metadata.userLanguage
                 };
-                console.log(`🔧 DEBUG CHAT: Enhanced tool arguments:`, toolArguments);
               } else if (metadata?.language && toolCall.name === 'rag_search') {
-                console.log(`🔧 DEBUG CHAT: Using fallback language: ${metadata.language} for ${toolCall.name} tool`);
+                logger.debug("System", "ChatManager", `Using fallback language: ${metadata.language} for ${toolCall.name}`);
                 toolArguments = {
                   ...toolArguments,
                   userLanguage: metadata.language
                 };
-                console.log(`🔧 DEBUG CHAT: Enhanced tool arguments (fallback):`, toolArguments);
-              } else {
-                console.log(`🔧 DEBUG CHAT: No userLanguage injection for ${toolCall.name}. Metadata available: ${!!metadata}`);
               }
               
               // Execute the tool
               const result = await tool.execute(toolArguments);
-              console.log(`🔧 DEBUG CHAT: Tool ${toolCall.name} execution result:`, result);
+              logger.success("System", "ChatManager", `Tool ${toolCall.name} executed successfully`);
               
               toolResults.push({
                 name: toolCall.name,
@@ -412,11 +396,8 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
                 success: true
               });
               
-              console.log(`🔧 DEBUG CHAT: Tool ${toolCall.name} executed successfully`);
-              logger.debug(`Tool ${toolCall.name} executed successfully`);
             } else {
-              console.log(`🔧 DEBUG CHAT: Tool ${toolCall.name} not found or not executable`);
-              logger.warn(`Tool ${toolCall.name} not found or not executable`);
+              logger.warn("System", "ChatManager", `Tool ${toolCall.name} not found or not executable`);
               toolResults.push({
                 name: toolCall.name,
                 arguments: toolCall.arguments,
@@ -426,8 +407,7 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
             }
           }
         } catch (error) {
-          console.log(`🔧 DEBUG CHAT: Error executing tool ${toolCall.name}:`, error);
-          logger.error(`Error executing tool ${toolCall.name}:`, error);
+          logger.error("System", "ChatManager", `Error executing tool ${toolCall.name}: ${error}`);
           toolResults.push({
             name: toolCall.name,
             arguments: toolCall.arguments,
@@ -440,7 +420,7 @@ Do not mention that tasks were executed behind the scenes - just provide the inf
       // Generate a final response based on tool results
       if (toolResults.length > 0) {
         try {
-          logger.debug(`Generating final response based on ${toolResults.length} tool results`);
+          logger.info("System", "ChatManager", `Generating final response based on ${toolResults.length} tool results`);
           
           const toolResultsMessage = {
             role: "system" as const,
@@ -451,9 +431,6 @@ Result: ${tr.success ? JSON.stringify(tr.result) : 'ERROR: ' + tr.error}`).join(
 
 Based on these tool results, generate a helpful response to the user. Be natural and conversational - don't mention the technical details of the tool calls.`
           };
-          
-          // Log streaming options before final response generation
-          console.log(`🔧 DEBUG CHAT: Final response streaming options: stream=${stream}, hasOnChunk=${!!onChunk}`);
           
           // Call the model again with the tool results to generate the final response
           // Preserve streaming options for the final response
@@ -469,15 +446,13 @@ Based on these tool results, generate a helpful response to the user. Be natural
             toolCalling: false
           });
           
-          console.log(`🔧 DEBUG CHAT: Final response generated with streaming=${stream}, hasOnChunk=${!!onChunk}`);
-          
           // Update response to the final result
           response = typeof finalResponse === 'string' ? finalResponse : finalResponse.content;
           
           const responseText = typeof response === 'string' ? response : response.content;
-          logger.debug(`Generated final response after tool execution: ${responseText.length} characters`);
+          logger.success("System", "ChatManager", `Final response generated: ${responseText.length} chars`);
         } catch (error) {
-          logger.error('Error generating final response from tool results:', error);
+          logger.error("System", "ChatManager", `Error generating final response: ${error}`);
           // Fallback to original content plus tool results summary
           const originalContent = typeof response === 'string' ? response : response.content;
           response = `${originalContent}\n\nTool execution completed with ${toolResults.filter(r => r.success).length} successful results.`;
@@ -495,10 +470,7 @@ Based on these tool results, generate a helpful response to the user. Be natural
         const responseText = typeof response === 'string' ? response : response.content;
         assistantEmbedding = await Embedding.generateEmbedding(responseText);
       } catch (error) {
-        logger.warn(
-          "Error generating embedding for assistant response:",
-          error
-        );
+        logger.warn("System", "Embedding", `Error generating embedding: ${error}`);
       }
     }
 
@@ -563,7 +535,7 @@ Based on these tool results, generate a helpful response to the user. Be natural
       .where({ id: chatId })
       .update(updateData);
 
-    logger.info(`Chat updated: ${chatId}`);
+    logger.info("System", "ChatManager", `Chat updated: ${chatId}`);
   }
 
   async deleteChat(chatId: string): Promise<void> {
@@ -577,12 +549,12 @@ Based on these tool results, generate a helpful response to the user. Be natural
     // Clear messages from memory
     await this.config.memory.clear(chatId);
 
-    logger.info(`Chat deleted: ${chatId}`);
+    logger.info("System", "ChatManager", `Chat deleted: ${chatId}`);
   }
 
   async archiveChat(chatId: string): Promise<void> {
     await this.updateChat(chatId, { status: 'archived' });
-    logger.info(`Chat archived: ${chatId}`);
+    logger.info("System", "ChatManager", `Chat archived: ${chatId}`);
   }
 
   async listChats(params: {
@@ -878,7 +850,7 @@ export async function createChat(config: ChatConfig): Promise<ChatInstance> {
     table.index(['status', 'updatedAt'], 'chats_status_updated_idx');
   });
   
-  logger.info(`Chat manager initialized with custom table: ${tableName}`);
+  logger.info("System", "ChatManager", `Chat manager initialized with custom table: ${tableName}`);
   return chatManager;
 }
 
