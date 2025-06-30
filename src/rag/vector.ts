@@ -29,6 +29,8 @@ export class VectorRAG implements VectorRAGInstance {
   private vectorDatabaseConnector: VectorDatabaseConnector;
   private documentsTableName: string;
   private chunksTableName: string;
+  private embeddingCache: Map<string, { embedding: number[], timestamp: number }> = new Map();
+  private readonly CACHE_TTL = 15 * 60 * 1000; // 15 minutes cache TTL
 
   constructor(config: VectorRAGConfig) {
     validateRequiredParam(config, "config", "VectorRAG constructor");
@@ -173,28 +175,45 @@ export class VectorRAG implements VectorRAGInstance {
       
       const chunks = this.chunkDocument(documentId, document);
       
-      if (this.config.provider && this.config.provider.generateEmbedding) {
-        const batchSize = 10;
+      if (this.config.provider && this.config.provider.generateEmbedding || 
+          this.config.memory && this.config.memory.searchByEmbedding) {
+        // Process chunks in larger batches for better performance
+        const batchSize = 20; // Increased batch size
+        
         for (let i = 0; i < chunks.length; i += batchSize) {
           const batch = chunks.slice(i, i + batchSize);
-          await Promise.all(
-            batch.map(async (chunk) => {
-              await this.storeChunkWithEmbedding(chunk);
-            })
+          
+          // Generate embeddings in parallel first
+          const embeddingPromises = batch.map(chunk => 
+            this.generateEmbeddingWithCache(chunk.content)
           );
+          
+          const embeddings = await Promise.all(embeddingPromises);
+          
+          // Then store all chunks with their embeddings
+          const storePromises = batch.map(async (chunk, index) => {
+            const chunkId = uuidv4();
+            const embedding = embeddings[index];
+            
+            await this.vectorDatabaseConnector.addVectors([{
+              id: chunkId,
+              vector: embedding,
+              metadata: {
+                ...chunk.metadata,
+                documentId: chunk.documentId,
+                content: chunk.content
+              }
+            }]);
+            
+            return chunkId;
+          });
+          
+          await Promise.all(storePromises);
+          
+          logger.debug("System", "VectorRAG", `Processed batch of ${batch.length} chunks`);
         }
-        logger.debug("System", "VectorRAG", `Added ${chunks.length} chunks with provider-based embeddings for document ${documentId}`);
-      } else if (this.config.memory && this.config.memory.searchByEmbedding) {
-        const batchSize = 10;
-        for (let i = 0; i < chunks.length; i += batchSize) {
-          const batch = chunks.slice(i, i + batchSize);
-          await Promise.all(
-            batch.map(async (chunk) => {
-              await this.storeChunkWithEmbedding(chunk);
-            })
-          );
-        }
-        logger.debug("System", "VectorRAG", `Added ${chunks.length} chunks with memory-based embeddings for document ${documentId}`);
+        
+        logger.debug("System", "VectorRAG", `Added ${chunks.length} chunks with embeddings for document ${documentId}`);
       } else {
         logger.warn("System", "VectorRAG", "No provider or memory with embedding support provided, chunks stored without embeddings");
         if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
@@ -258,6 +277,77 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
+   * Generate embedding with caching support
+   * @param text The text to generate embedding for
+   * @returns Promise resolving to the embedding vector
+   */
+  private async generateEmbeddingWithCache(text: string): Promise<number[]> {
+    // Check cache first
+    const cacheKey = text.substring(0, 100); // Use first 100 chars as key to avoid memory issues
+    const cached = this.embeddingCache.get(cacheKey);
+    
+    if (cached && (Date.now() - cached.timestamp) < this.CACHE_TTL) {
+      logger.debug("System", "VectorRAG", "Using cached embedding");
+      return cached.embedding;
+    }
+    
+    // Clean expired cache entries periodically
+    if (this.embeddingCache.size > 1000) {
+      const now = Date.now();
+      for (const [key, value] of this.embeddingCache.entries()) {
+        if (now - value.timestamp > this.CACHE_TTL) {
+          this.embeddingCache.delete(key);
+        }
+      }
+    }
+    
+    let embedding: number[] = [];
+    
+    if (this.config.provider && this.config.provider.generateEmbedding) {
+      try {
+        const textForEmbedding = text.substring(0, 8000);
+        embedding = await this.config.provider.generateEmbedding(textForEmbedding) || [];
+        
+        // Cache the result
+        this.embeddingCache.set(cacheKey, { embedding, timestamp: Date.now() });
+        
+        logger.debug("System", "VectorRAG", `Generated and cached embedding (${embedding.length} dimensions)`);
+      } catch (error) {
+        logger.warn("System", "VectorRAG", `Failed to generate embedding: ${error}`);
+        
+        // Try memory fallback if available
+        if (this.config.memory && this.config.memory.searchByEmbedding) {
+          try {
+            const { Embedding } = await import("../providers");
+            embedding = await Embedding.generateEmbedding(text.substring(0, 8000));
+            
+            // Cache the fallback result too
+            this.embeddingCache.set(cacheKey, { embedding, timestamp: Date.now() });
+            
+            logger.debug("System", "VectorRAG", `Generated embedding using memory fallback (${embedding.length} dimensions)`);
+          } catch (memoryError) {
+            logger.warn("System", "VectorRAG", `Failed to generate embedding using memory fallback: ${memoryError}`);
+          }
+        }
+      }
+    } else if (this.config.memory && this.config.memory.searchByEmbedding) {
+      try {
+        const { Embedding } = await import("../providers");
+        embedding = await Embedding.generateEmbedding(text.substring(0, 8000));
+        
+        // Cache the result
+        this.embeddingCache.set(cacheKey, { embedding, timestamp: Date.now() });
+        
+        logger.debug("System", "VectorRAG", `Generated embedding using memory (${embedding.length} dimensions)`);
+      } catch (error) {
+        logger.warn("System", "VectorRAG", `Failed to generate embedding using memory: ${error}`);
+      }
+    }
+    
+    return embedding;
+  }
+
+  /**
    * Store a chunk with its embedding
    * @param chunk The chunk to store
    * @returns Promise resolving to the chunk ID
@@ -268,47 +358,8 @@ export class VectorRAG implements VectorRAGInstance {
     const { database, tableName, provider, memory } = this.config;
     
     try {
-      let embedding: number[] = [];
-      
-      if (provider && provider.generateEmbedding) {
-        try {
-          const textForEmbedding = chunk.content.substring(0, 8000);
-          
-          const embeddingResult = await provider.generateEmbedding(textForEmbedding);
-          embedding = embeddingResult || [];
-          
-          logger.debug("System", "VectorRAG", `Generated embedding using provider (${embedding.length} dimensions)`);
-        } catch (embeddingError) {
-          logger.warn("System", "VectorRAG", `Failed to generate embedding using provider, trying memory fallback: ${embeddingError}`);
-          
-          if (memory && memory.searchByEmbedding) {
-            try {
-              const textForEmbedding = chunk.content.substring(0, 8000);
-              
-              const { Embedding } = await import("../providers");
-              embedding = await Embedding.generateEmbedding(textForEmbedding);
-              
-              logger.debug("System", "VectorRAG", `Generated embedding using memory fallback (${embedding.length} dimensions)`);
-            } catch (memoryError) {
-              logger.warn("System", "VectorRAG", `Failed to generate embedding using memory fallback: ${memoryError}`);
-            }
-          }
-        }
-      } else if (memory && memory.searchByEmbedding) {
-        try {
-          const textForEmbedding = chunk.content.substring(0, 8000);
-          
-          const { Embedding } = await import("../providers");
-          embedding = await Embedding.generateEmbedding(textForEmbedding);
-          
-          logger.debug("System", "VectorRAG", `Generated embedding using memory (${embedding.length} dimensions)`);
-        } catch (embeddingError) {
-          logger.warn("System", "VectorRAG", `Failed to generate embedding using memory: ${embeddingError}`);
-          embedding = [];
-        }
-      } else {
-        logger.warn("System", "VectorRAG", "No provider or memory with embedding support provided for chunk storage");
-      }
+      // Use cached embedding generation
+      const embedding = await this.generateEmbeddingWithCache(chunk.content);
       
       const chunkId = uuidv4();
       
@@ -461,42 +512,59 @@ export class VectorRAG implements VectorRAGInstance {
       const allResults: RAGResult[] = [];
       const resultsPerVariation = Math.ceil(maxResults / queryVariations.length);
       
-      for (let i = 0; i < queryVariations.length; i++) {
-        const variation = queryVariations[i];
+      // Process all query variations in parallel for better performance
+      const searchPromises = queryVariations.map(async (variation, i) => {
         const queryType = i === 0 ? 'SHORT' : i === 1 ? 'MEDIUM' : 'LONG';
         
         try {
-          if (this.config.provider && this.config.provider.generateEmbedding) {
-            const queryEmbedding = await this.config.provider.generateEmbedding(variation);
+          const queryEmbedding = await this.generateEmbeddingWithCache(variation);
+          
+          if (queryEmbedding && queryEmbedding.length > 0) {
+            const searchThreshold = 0.5;
             
-            if (queryEmbedding && queryEmbedding.length > 0) {
-              const searchThreshold = 0.5;
-              
-              const results = await this.searchByVector(queryEmbedding, resultsPerVariation, searchThreshold, expandContext, expansionRange);
-              
-              results.forEach(result => {
-                result.metadata = {
-                  ...result.metadata,
-                  queryType: queryType,
-                  queryVariation: variation,
-                  originalQuery: query
-                };
-              });
-              
-              allResults.push(...results);
-            }
+            const results = await this.searchByVector(queryEmbedding, resultsPerVariation, searchThreshold, expandContext, expansionRange);
+            
+            return results.map(result => ({
+              ...result,
+              metadata: {
+                ...result.metadata,
+                queryType: queryType,
+                queryVariation: variation,
+                originalQuery: query
+              }
+            }));
           }
+          return [];
         } catch (variationError) {
-        }
-      }
-
-      const uniqueResults = new Map<string, RAGResult>();
-      allResults.forEach(result => {
-        const key = result.sourceId;
-        if (!uniqueResults.has(key) || (result.similarity || 0) > (uniqueResults.get(key)?.similarity || 0)) {
-          uniqueResults.set(key, result);
+          logger.debug("System", "VectorRAG", `Error searching with variation ${queryType}: ${variationError}`);
+          return [];
         }
       });
+      
+      // Wait for all searches to complete and flatten results
+      const searchResults = await Promise.all(searchPromises);
+      searchResults.forEach(results => allResults.push(...results));
+
+      // Optimized deduplication using content-based key for better accuracy
+      const uniqueResults = new Map<string, RAGResult>();
+      
+      for (const result of allResults) {
+        // Create a composite key using documentId and chunk index for better deduplication
+        const documentId = result.metadata?.documentId || result.sourceId;
+        const chunkIndex = result.metadata?.chunk_index;
+        const key = chunkIndex !== undefined ? `${documentId}_${chunkIndex}` : result.sourceId;
+        
+        // Use content hash for duplicate detection if chunk indices are not available
+        if (!uniqueResults.has(key)) {
+          uniqueResults.set(key, result);
+        } else {
+          // Keep the result with higher similarity
+          const existing = uniqueResults.get(key)!;
+          if ((result.similarity || 0) > (existing.similarity || 0)) {
+            uniqueResults.set(key, result);
+          }
+        }
+      }
 
       let finalResults = Array.from(uniqueResults.values())
         .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
@@ -653,11 +721,74 @@ export class VectorRAG implements VectorRAGInstance {
     excludeChunkId: string
   ): Promise<any[]> {
     try {
-      const dummyEmbedding = new Array(1536).fill(0);
+      // If the connector supports metadata-based search, use that instead
+      if ('searchByMetadata' in this.vectorDatabaseConnector) {
+        const metadataFilter = {
+          documentId: documentId,
+          chunk_index: { $gte: minIndex, $lte: maxIndex }
+        };
+        
+        const adjacentChunks = await (this.vectorDatabaseConnector as any).searchByMetadata(
+          metadataFilter,
+          maxIndex - minIndex + 1
+        );
+        
+        return adjacentChunks
+          .filter((chunk: any) => chunk.id !== excludeChunkId)
+          .map((chunk: any) => ({
+            ...chunk,
+            metadata: chunk.metadata,
+            content: chunk.metadata.content
+          }));
+      }
       
+      // Fallback: Create a more targeted embedding search
+      // Use the document's average embedding if available, or a specific pattern
+      const searchLimit = Math.min(100, (maxIndex - minIndex + 1) * 5); // Limit based on expected chunks
+      
+      // Get metadata for all chunks in batch if possible
+      if ('getVectorMetadataBatch' in this.vectorDatabaseConnector) {
+        const dummyEmbedding = new Array(1536).fill(0);
+        const candidates = await this.vectorDatabaseConnector.searchVectors(
+          dummyEmbedding,
+          searchLimit,
+          0.0
+        );
+        
+        const chunkIds = candidates.map(c => c.id);
+        const metadataMap = await (this.vectorDatabaseConnector as any).getVectorMetadataBatch(chunkIds);
+        
+        const adjacentChunks = [];
+        for (const chunk of candidates) {
+          const metadata = metadataMap[chunk.id];
+          if (!metadata) continue;
+          
+          const chunkDocumentId = metadata.documentId;
+          const chunkIndex = metadata.chunk_index;
+          
+          if (
+            chunk.id !== excludeChunkId &&
+            chunkDocumentId === documentId &&
+            chunkIndex !== undefined &&
+            chunkIndex >= minIndex &&
+            chunkIndex <= maxIndex
+          ) {
+            adjacentChunks.push({
+              ...chunk,
+              metadata,
+              content: metadata.content
+            });
+          }
+        }
+        
+        return adjacentChunks;
+      }
+      
+      // Original fallback for basic connectors
+      const dummyEmbedding = new Array(1536).fill(0);
       const allChunks = await this.vectorDatabaseConnector.searchVectors(
         dummyEmbedding,
-        1000,
+        searchLimit,
         0.0
       );
 
@@ -684,12 +815,13 @@ export class VectorRAG implements VectorRAGInstance {
             });
           }
         } catch (error) {
+          logger.debug("System", "VectorRAG", `Error getting metadata for chunk ${chunk.id}: ${error}`);
         }
       }
 
-      
       return adjacentChunks;
     } catch (error) {
+      logger.warn("System", "VectorRAG", `Error finding adjacent chunks: ${error}`);
       return [];
     }
   }
