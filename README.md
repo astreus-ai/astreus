@@ -1,5 +1,5 @@
 <p align="center">
-   <img src="https://raw.githubusercontent.com/astreus-ai/astreus/main/src/assets/astreus-logo.svg" alt="Astreus Logo" width="150" />
+   <img src="https://raw.githubusercontent.com/astreus-ai/astreus/main/src/assets/astreus-logo-bg.png" alt="Astreus Logo" width="150" />
 </p>
 
 <h1 align="center">Astreus</h1>
