@@ -6,8 +6,6 @@
 
 An AI Agent Framework designed to help you easily build, deploy, and manage intelligent conversational agents powered by large language models (LLMs).
 
-**Current Version: 0.2.9** - Enhanced with professional logging, vector database support, and improved RAG capabilities.
-
 ## 🌟 Features
 
 - **Unified Agent API**: Create and manage AI agents with a consistent interface 
@@ -19,8 +17,12 @@ An AI Agent Framework designed to help you easily build, deploy, and manage inte
 - **Persistence Layer**: Automatic storage using SQLite or PostgreSQL
 - **Advanced RAG Support**: Vector-based and document-based retrieval with external vector database support
 - **PDF Processing**: Built-in PDF parsing and document processing capabilities
+- **Media Analysis**: AI-powered image, document, and file analysis capabilities
+- **Intent Recognition**: Intelligent tool selection using LLM-powered intent detection
 - **Embeddings Support**: Semantic search across conversations and documents
 - **Vector Database Integration**: Support for PostgreSQL with pgvector, Qdrant, Pinecone, and more
+- **Enhanced Database Management**: Flexible table naming, automatic schema creation, and migration support
+- **Structured Responses**: Built-in support for structured completion responses
 - **Type Safety**: Fully typed with TypeScript for better development experience
 - **Professional Logging**: Structured logging system with color-coded output and consistent formatting
 - **Flexible Configuration**: Enhanced parameter validation, smart defaults, and environment-based setup
@@ -372,6 +374,73 @@ const agent = await createAgent({
 // Plugins are automatically registered and available to the agent
 ```
 
+### Media Analysis
+
+Astreus includes powerful media analysis capabilities powered by AI:
+
+```typescript
+import { analyzeMedia, analyzeImage, analyzeDocument } from '@astreus-ai/astreus';
+
+// Analyze images with custom prompts
+const imageAnalysis = await agent.analyzeImage({
+  imagePath: './screenshot.png',
+  prompt: 'What UI elements are visible in this screenshot?',
+  detail: 'high'
+});
+
+// Analyze documents (PDF, Word, etc.)
+const documentAnalysis = await agent.analyzeDocument({
+  filePath: './contract.pdf',
+  prompt: 'Extract key terms and conditions from this contract'
+});
+
+// General media analysis with context
+const mediaAnalysis = await agent.analyzeMedia({
+  filePath: './presentation.pptx',
+  analysisType: 'detailed',
+  prompt: 'Summarize the main points of this presentation'
+});
+```
+
+### Intent Recognition & Smart Tool Selection
+
+Astreus can automatically select the right tools for tasks using LLM-powered intent recognition:
+
+```typescript
+// The agent will automatically determine which tools to use based on the task
+const task = agent.createTask({
+  name: "Send Email Report",
+  description: "Generate a sales report and send it via email to the team",
+  input: { period: "Q1 2024" }
+});
+
+// Intent recognition will automatically select email and reporting tools
+const result = await agent.runTasks([task.id]);
+```
+
+### Enhanced Database Features
+
+Astreus provides flexible database management with custom table naming:
+
+```typescript
+// Create memory with custom table name
+const memory = await createMemory({
+  database: db,
+  tableName: "custom_memories",  // Use your own table name
+  maxEntries: 1000,
+  enableEmbeddings: true
+});
+
+// Create chat manager with custom table
+const chat = await createChat({
+  database: db,
+  memory: memory,
+  tableName: "custom_chats",     // Use your own table name
+  maxChats: 100,
+  autoGenerateTitles: true
+});
+```
+
 ## 🔧 Configuration
 
 ### Environment Variables
@@ -439,6 +508,12 @@ import {
   
   // Plugin system
   PluginManager,
+  
+  // Media analysis
+  analyzeMedia, analyzeImage, analyzeDocument, analyzeWithContext,
+  
+  // Intent recognition
+  IntentRecognizer,
   
   // Utilities
   logger, validateRequiredParam, validateRequiredParams,
