@@ -7,6 +7,11 @@ import {
   OpenAIModelConfig,
 } from "../types";
 import { logger, validateRequiredParam } from "../utils";
+import { promises as fs } from "fs";
+import path from "path";
+// Lazy import to avoid initialization issues
+// @ts-ignore
+import mammoth from "mammoth";
 
 /**
  * Create OpenAI configuration with defaults
@@ -32,7 +37,7 @@ export class OpenAIProvider implements ProviderModel {
   public provider: ProviderType;
   public name: string;
   public config: OpenAIModelConfig;
-  private client: OpenAI;
+  public client: OpenAI;
   
   constructor(type: ProviderType, config: OpenAIModelConfig) {
     // Validate required parameters
@@ -177,10 +182,70 @@ export class OpenAIProvider implements ProviderModel {
   
   private prepareMessages(messages: ProviderMessage[], systemMessage?: string) {
     // Convert to OpenAI message format
-    const formattedMessages = messages.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }));
+    const formattedMessages = messages.map(msg => {
+      // Handle multimodal content
+      if (Array.isArray(msg.content)) {
+        const content = msg.content.map(item => {
+          switch (item.type) {
+            case "text":
+              return {
+                type: "text" as const,
+                text: item.text
+              };
+            case "image_url":
+              return {
+                type: "image_url" as const,
+                image_url: item.image_url
+              };
+            case "image_file":
+              // Convert file path to base64 for OpenAI
+              try {
+                const fs = require('fs');
+                const fileBuffer = fs.readFileSync(item.image_file.path);
+                const base64 = fileBuffer.toString('base64');
+                const ext = path.extname(item.image_file.path).toLowerCase();
+                const mimeType = this.getMimeType(ext);
+                
+                return {
+                  type: "image_url" as const,
+                  image_url: {
+                    url: `data:${mimeType};base64,${base64}`,
+                    detail: "auto"
+                  }
+                };
+              } catch (error) {
+                logger.error("Unknown", "OpenAI", `Failed to read image file: ${error}`);
+                return {
+                  type: "text" as const,
+                  text: `[Error reading image file: ${item.image_file.path}]`
+                };
+              }
+            case "document":
+              // For documents, we'll provide a text representation
+              return {
+                type: "text" as const,
+                text: `[Document: ${item.document.filename}]`
+              };
+            default:
+              return {
+                type: "text" as const,
+                text: "[Unsupported content type]"
+              };
+          }
+        });
+        
+        return {
+          role: msg.role,
+          content
+        };
+      } else {
+        // Handle simple text content
+        return {
+          role: msg.role,
+          content: msg.content
+        };
+      }
+    });
     
     // Add system message if provided
     if (systemMessage) {
@@ -457,5 +522,346 @@ export class OpenAIProvider implements ProviderModel {
     
     logger.debug("Unknown", "OpenAI", "Artificial streaming completed");
     return text;
+  }
+
+  // Get API key for specific service
+  private getApiKey(serviceType: 'general' | 'embedding' | 'image'): string {
+    let apiKey: string | undefined;
+    
+    switch (serviceType) {
+      case 'embedding':
+        apiKey = process.env.OPENAI_EMBEDDING_API_KEY || this.config.apiKey;
+        break;
+      case 'image':
+        apiKey = process.env.OPENAI_VISION_API_KEY || this.config.apiKey;
+        break;
+      default:
+        apiKey = this.config.apiKey;
+    }
+    
+    if (!apiKey) {
+      const envVar = serviceType === 'embedding' ? 'OPENAI_EMBEDDING_API_KEY' : 
+                    serviceType === 'image' ? 'OPENAI_VISION_API_KEY' : 'OPENAI_API_KEY';
+      throw new Error(`API key required for ${serviceType} service. Set ${envVar} environment variable.`);
+    }
+    
+    return apiKey;
+  }
+
+  // Create OpenAI client for specific service
+  private createServiceClient(serviceType: 'general' | 'embedding' | 'image'): OpenAI {
+    const apiKey = this.getApiKey(serviceType);
+    
+    const openaiConfig: any = {
+      apiKey,
+    };
+
+    // For vision/image analysis, always use standard OpenAI API
+    if (serviceType === 'image') {
+      // Use standard OpenAI base URL for vision
+      openaiConfig.baseURL = process.env.OPENAI_VISION_BASE_URL || "https://api.openai.com/v1";
+      logger.debug("Unknown", "OpenAI", `Using OpenAI base URL for vision: ${openaiConfig.baseURL}`);
+    } else {
+      // For other services, use configured base URL
+      if (this.config.baseUrl) {
+        openaiConfig.baseURL = this.config.baseUrl;
+      }
+    }
+
+    if (this.config.organization) {
+      openaiConfig.organization = this.config.organization;
+    }
+
+    return new OpenAI(openaiConfig);
+  }
+
+  // Media Analysis Methods
+  async analyzeImage(
+    imagePath?: string, 
+    imageUrl?: string, 
+    base64Data?: string,
+    prompt?: string,
+    detail: 'low' | 'high' | 'auto' = 'auto'
+  ): Promise<string> {
+    try {
+      let imageContent: any;
+      
+      if (imageUrl) {
+        imageContent = {
+          type: "image_url",
+          image_url: {
+            url: imageUrl,
+            detail
+          }
+        };
+      } else if (base64Data) {
+        imageContent = {
+          type: "image_url",
+          image_url: {
+            url: `data:image/jpeg;base64,${base64Data}`,
+            detail
+          }
+        };
+      } else if (imagePath) {
+        const fileBuffer = await fs.readFile(imagePath);
+        const base64 = fileBuffer.toString('base64');
+        const ext = path.extname(imagePath).toLowerCase();
+        const mimeType = this.getMimeType(ext);
+        
+        imageContent = {
+          type: "image_url",
+          image_url: {
+            url: `data:${mimeType};base64,${base64}`,
+            detail
+          }
+        };
+      } else {
+        throw new Error("No image source provided");
+      }
+
+      const messages = [
+        {
+          role: "user" as const,
+          content: [
+            {
+              type: "text" as const,
+              text: prompt || "What do you see in this image?"
+            },
+            imageContent
+          ]
+        }
+      ];
+
+      // Use image-specific API key
+      const imageClient = this.createServiceClient('image');
+      logger.debug("Unknown", "OpenAI", "Using image analysis API key for image processing");
+
+      const response = await imageClient.chat.completions.create({
+        model: this.name.includes('gpt-4') ? this.name : 'gpt-4o',
+        messages,
+        max_tokens: 1000
+      });
+
+      return response.choices[0]?.message?.content || "No analysis available";
+    } catch (error) {
+      logger.error("Unknown", "OpenAI", `Image analysis error: ${error}`);
+      throw error;
+    }
+  }
+
+  async analyzePDF(filePath: string, prompt?: string): Promise<{ text: string; analysis: string; pages: number }> {
+    try {
+      // Use our PDF parser with chunk system for RAG compatibility
+      const { parsePDF } = await import("../utils/pdf-parser");
+      const parseResult = await parsePDF(filePath, {
+        splitStrategy: 'simple',
+        chunkSize: 2000,
+        chunkOverlap: 200
+      });
+      
+      // Combine all chunks into one text
+      const text = parseResult.documents.map(doc => doc.content).join('\n\n');
+      
+      const analysisPrompt = prompt || 
+        "Analyze this PDF document and provide a comprehensive summary including key points, structure, and important information.";
+      
+      const messages = [
+        {
+          role: "system" as const,
+          content: "You are a document analysis expert. Analyze the provided text content and give insights."
+        },
+        {
+          role: "user" as const,
+          content: `${analysisPrompt}\n\nDocument content:\n${text}`
+        }
+      ];
+
+      const response = await this.client.chat.completions.create({
+        model: this.name,
+        messages,
+        max_tokens: 2000
+      });
+
+      const analysis = response.choices[0]?.message?.content || "No analysis available";
+
+      return {
+        text,
+        analysis,
+        pages: parseResult.pdfMetadata.numPages
+      };
+    } catch (error) {
+      logger.error("Unknown", "OpenAI", `PDF analysis error: ${error}`);
+      throw error;
+    }
+  }
+
+  async analyzeDocument(filePath: string, prompt?: string): Promise<{ text: string; analysis: string }> {
+    try {
+      const ext = path.extname(filePath).toLowerCase();
+      let text = "";
+
+      if (ext === '.pdf') {
+        const pdfResult = await this.analyzePDF(filePath, prompt);
+        return {
+          text: pdfResult.text,
+          analysis: pdfResult.analysis
+        };
+      } else if (ext === '.docx' || ext === '.doc') {
+        const buffer = await fs.readFile(filePath);
+        const result = await mammoth.extractRawText({ buffer });
+        text = result.value;
+      } else {
+        throw new Error(`Unsupported document format: ${ext}`);
+      }
+
+      const analysisPrompt = prompt || 
+        "Analyze this document and provide a comprehensive summary including key points, structure, and important information.";
+      
+      const messages = [
+        {
+          role: "system" as const,
+          content: "You are a document analysis expert. Analyze the provided text content and give insights."
+        },
+        {
+          role: "user" as const,
+          content: `${analysisPrompt}\n\nDocument content:\n${text}`
+        }
+      ];
+
+      const response = await this.client.chat.completions.create({
+        model: this.name,
+        messages,
+        max_tokens: 2000
+      });
+
+      const analysis = response.choices[0]?.message?.content || "No analysis available";
+
+      return {
+        text,
+        analysis
+      };
+    } catch (error) {
+      logger.error("Unknown", "OpenAI", `Document analysis error: ${error}`);
+      throw error;
+    }
+  }
+
+  async analyzeMedia(
+    filePath?: string,
+    url?: string,
+    base64Data?: string,
+    prompt?: string,
+    options?: { detail?: 'low' | 'high' | 'auto', maxTokens?: number }
+  ): Promise<{ type: string; content: string; analysis: string; metadata?: any }> {
+    try {
+      let fileType: string;
+      
+      if (filePath) {
+        fileType = this.detectFileType(filePath);
+      } else if (url) {
+        fileType = 'image'; // Assume URLs are images
+      } else if (base64Data) {
+        fileType = 'image'; // Assume base64 is image
+      } else {
+        throw new Error("No media source provided");
+      }
+
+      switch (fileType) {
+        case 'image': {
+          const analysis = await this.analyzeImage(
+            filePath, 
+            url, 
+            base64Data, 
+            prompt, 
+            options?.detail
+          );
+          return {
+            type: 'image',
+            content: analysis,
+            analysis
+          };
+        }
+        case 'pdf': {
+          if (!filePath) throw new Error("File path required for PDF analysis");
+          const result = await this.analyzePDF(filePath, prompt);
+          return {
+            type: 'pdf',
+            content: result.text,
+            analysis: result.analysis,
+            metadata: { pages: result.pages }
+          };
+        }
+        case 'document': {
+          if (!filePath) throw new Error("File path required for document analysis");
+          const result = await this.analyzeDocument(filePath, prompt);
+          return {
+            type: 'document',
+            content: result.text,
+            analysis: result.analysis
+          };
+        }
+        default:
+          throw new Error(`Unsupported file type: ${fileType}`);
+      }
+    } catch (error) {
+      logger.error("Unknown", "OpenAI", `Media analysis error: ${error}`);
+      throw error;
+    }
+  }
+
+  private detectFileType(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase();
+    
+    const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
+    const documentExtensions = ['.docx', '.doc'];
+    
+    if (imageExtensions.includes(ext)) {
+      return 'image';
+    } else if (ext === '.pdf') {
+      return 'pdf';
+    } else if (documentExtensions.includes(ext)) {
+      return 'document';
+    } else {
+      throw new Error(`Unsupported file extension: ${ext}`);
+    }
+  }
+
+  private getMimeType(extension: string): string {
+    const mimeTypes: { [key: string]: string } = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.bmp': 'image/bmp'
+    };
+    
+    return mimeTypes[extension] || 'image/jpeg';
+  }
+
+  // Embedding generation with dedicated API key
+  async generateEmbedding(text: string, model?: string): Promise<number[]> {
+    try {
+      if (!text || typeof text !== 'string') {
+        throw new Error('Invalid text input for embedding generation');
+      }
+
+      // Use embedding-specific API key
+      const embeddingClient = this.createServiceClient('embedding');
+      logger.debug("Unknown", "OpenAI", "Using embedding API key for embedding generation");
+
+      const embeddingModel = model || process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
+
+      const response = await embeddingClient.embeddings.create({
+        model: embeddingModel,
+        input: text,
+        encoding_format: 'float'
+      });
+
+      return response.data[0].embedding;
+    } catch (error) {
+      logger.error("Unknown", "OpenAI", `Embedding generation error: ${error}`);
+      throw error;
+    }
   }
 } 

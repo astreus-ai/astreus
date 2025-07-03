@@ -52,12 +52,45 @@ export interface ProviderConfig {
   organization?: string;
 }
 
+// Content types for multimodal messages
+export interface TextContent {
+  type: "text";
+  text: string;
+}
+
+export interface ImageUrlContent {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "low" | "high" | "auto";
+  };
+}
+
+export interface ImageFileContent {
+  type: "image_file";
+  image_file: {
+    path: string;
+    mimeType?: string;
+  };
+}
+
+export interface DocumentContent {
+  type: "document";
+  document: {
+    path: string;
+    filename: string;
+    mimeType: string;
+  };
+}
+
+export type MessageContent = TextContent | ImageUrlContent | ImageFileContent | DocumentContent;
+
 // Provider message interface for chat completions
 export interface ProviderMessage {
   /** Required: Role of the message sender */
   role: "system" | "user" | "assistant";
-  /** Required: Content of the message */
-  content: string;
+  /** Required: Content of the message - can be string for simple text or array for multimodal */
+  content: string | MessageContent[];
 }
 
 // Provider tool interface for function calling

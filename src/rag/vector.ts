@@ -1447,7 +1447,7 @@ Return only the formatted metadata summary, nothing else.`;
 
   /**
    * Use LLM to intelligently detect language from any language representation
-   * @param languageText Any text that represents a language in any form (EN, en, English, İngilizce, etc.)
+   * @param languageText Any text that represents a language in any form (EN, en, English, Ingilizce, etc.)
    * @returns Promise resolving to a standardized language code
    */
   private async detectLanguageWithLLM(languageText: string): Promise<string> {
@@ -1463,7 +1463,7 @@ Return only the formatted metadata summary, nothing else.`;
           content: `You are a language detection expert. You will receive any text that represents a language in any form or format. This could be:
 - Language codes: "EN", "en", "TR", "tr", "DE", "de"
 - Language names in English: "English", "Turkish", "German", "French"
-- Language names in their own language: "İngilizce", "Türkçe", "Deutsch", "Français"
+- Language names in their own language: "English", "Turkish", "Deutsch", "Français"
 - Any other way someone might write a language
 
 Your job is to understand what language is being referred to and return ONLY the standard 2-letter ISO language code in lowercase.
@@ -1471,10 +1471,10 @@ Your job is to understand what language is being referred to and return ONLY the
 Examples:
 - "EN" → "en"
 - "English" → "en" 
-- "İngilizce" → "en"
+- "English" → "en"
 - "TR" → "tr"
 - "Turkish" → "tr"
-- "Türkçe" → "tr"
+- "Turkish" → "tr"
 - "DE" → "de"
 - "German" → "de"
 - "Deutsch" → "de"
