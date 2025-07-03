@@ -5,7 +5,7 @@ import { createAgent } from './agent';
 import { createProvider } from './providers';
 import { createMemory } from './memory';
 import { createDatabase } from './database';
-import { createRAG, parsePDF, parseDirectoryOfPDFs } from './rag';
+import { createRAG, parsePDF } from './rag';
 import { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv } from './rag/vector-db';
 import { createChat } from './chat';
 
@@ -15,7 +15,7 @@ export { createMemory };
 export { createDatabase };
 export { createRAG };
 export { createChat };
-export { parsePDF, parseDirectoryOfPDFs };
+export { parsePDF };
 export { logger };
 export { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv };
 

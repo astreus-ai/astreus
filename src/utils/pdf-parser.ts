@@ -1,9 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { PDFDocument } from 'pdf-lib';
-import { Document } from '../types';
-import { logger } from '../utils';
+import { logger } from './logger';
 import { v4 as uuidv4 } from 'uuid';
+import { Document } from '../types';
 
 export interface PDFParseOptions {
   /**
@@ -34,6 +33,7 @@ export interface PDFParseOptions {
    */
   metadata?: Record<string, any>;
 }
+
 
 export interface PDFParseResult {
   /**
@@ -82,42 +82,28 @@ export async function parsePDF(
       metadata: options.metadata || {},
     };
     
-    // Read the PDF file
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`PDF file not found: ${filePath}`);
+    }
+    
+    // Read PDF file
     const dataBuffer = fs.readFileSync(filePath);
     
-    // Load the PDF document
-    const pdfDoc = await PDFDocument.load(dataBuffer);
+    // Use pdf-parse to extract text
+    const pdfParse = await import('pdf-parse');
+    const options_parse = {};
+    const data = await pdfParse.default(dataBuffer, options_parse);
     
-    // Get PDF metadata - pdf-lib uses individual getters instead of a single getMetadata method
-    const title = pdfDoc.getTitle();
-    const author = pdfDoc.getAuthor();
-    const creationDate = pdfDoc.getCreationDate();
+    const allText = data.text;
+    const numPages = data.numpages;
     
-    // Count pages
-    const numPages = pdfDoc.getPageCount();
-    
-    // Extract text content from all pages
-    let allText = '';
-    
-    // Basic text extraction
-    logger.debug(`Extracting text from PDF with ${numPages} pages`);
-    
-    try {
-      const pdfParse = await import('pdf-parse');
-      const data = await pdfParse.default(dataBuffer);
-      allText = data.text;
-      
-      logger.debug(`Successfully extracted ${allText.length} characters of text`);
-    } catch (error) {
-      logger.error("Error extracting text from PDF:", error);
-      // Fallback to basic info when text extraction fails
-      allText = `PDF document with ${numPages} pages. Text extraction failed.`;
-    }
+    logger.debug(`PDF parsed successfully: ${allText.length} characters, ${numPages} pages`);
     
     // Create base metadata with document identification
     const baseMetadata = {
       source: path.basename(filePath),
-      documentId: documentId,  // Add document ID to all chunks
+      documentId: documentId,
       fileName: path.basename(filePath),
       filePath: filePath,
       ...opts.metadata,
@@ -125,10 +111,10 @@ export async function parsePDF(
     
     // PDF metadata for the result
     const pdfMetadata = {
-      title: title || path.basename(filePath),
-      author: author,
+      title: data.info?.Title || path.basename(filePath),
+      author: data.info?.Author,
       numPages: numPages,
-      creationDate: creationDate ? new Date(creationDate) : undefined,
+      creationDate: data.info?.CreationDate ? new Date(data.info.CreationDate) : undefined,
     };
     
     // Get documents based on splitting strategy
@@ -142,7 +128,7 @@ export async function parsePDF(
       documentId,
     };
   } catch (error) {
-    logger.error(`Error parsing PDF ${filePath}:`, error);
+    logger.error(`PDF parsing failed for ${filePath}:`, error);
     throw error;
   }
 }
@@ -304,12 +290,8 @@ function splitBySections(
   let charCount = 0;
   
   // Heuristics for detecting headers
-  // 1. Headers are typically short (< 200 chars)
-  // 2. Often start with numbers (1., 1.1, I., A., etc.)
-  // 3. Often in ALL CAPS or Title Case
-  // 4. Usually don't end with punctuation
   const headerRegex = /^(?:\d+[.):]|[A-Z][.):]|[IVXLCDM]+[.):]|APPENDIX|Chapter|Section|CHAPTER|SECTION)/;
-  const allCapsRegex = /^[A-Z0-9\s.,;:()\-–—]+$/;
+  const allCapsRegex = /^[A-Z0-9\s.,;:()\\-–—]+$/;
   
   let currentSection = '';
   let currentTitle = '';
@@ -399,43 +381,3 @@ function splitBySections(
   
   return chunks;
 }
-
-/**
- * Parse a directory of PDFs and load into RAG system
- * @param dirPath Directory path containing PDFs
- * @param options Parse options
- * @returns Array of results for each processed PDF
- */
-export async function parseDirectoryOfPDFs(
-  dirPath: string,
-  options: PDFParseOptions
-): Promise<Record<string, PDFParseResult>> {
-  try {
-    logger.debug(`Processing directory of PDFs: ${dirPath}`);
-    
-    // Read directory contents
-    const files = fs.readdirSync(dirPath);
-    
-    // Filter for PDF files
-    const pdfFiles = files.filter(file => file.toLowerCase().endsWith('.pdf'));
-    
-    // Process each PDF
-    const results: Record<string, PDFParseResult> = {};
-    
-    for (const pdfFile of pdfFiles) {
-      const filePath = path.join(dirPath, pdfFile);
-      try {
-        results[pdfFile] = await parsePDF(filePath, options);
-        logger.debug(`Successfully processed ${pdfFile}`);
-      } catch (error) {
-        logger.error(`Error processing ${pdfFile}:`, error);
-        // Continue with other files even if one fails
-      }
-    }
-    
-    return results;
-  } catch (error) {
-    logger.error(`Error processing PDF directory ${dirPath}:`, error);
-    throw error;
-  }
-} 

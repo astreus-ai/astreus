@@ -31,11 +31,12 @@ import {
 } from "./constants";
 import { createDatabase } from "./database";
 import { PluginManager } from "./plugin";
+import { analyzeMedia, analyzeImage, analyzeDocument, analyzeWithContext } from "./utils/analyze";
 
 // Agent implementation
 class Agent implements AgentInstance {
   public id: string;
-  public config: AgentConfig;
+  public config: AgentConfig & { name: string };
   private memory: MemoryInstance;
   private tools: Map<string, Plugin>;
   private chatManager?: ChatInstance;
@@ -487,6 +488,79 @@ class Agent implements AgentInstance {
       metadata: params.metadata,
       temperature: params.temperature,
       maxTokens: params.maxTokens
+    });
+  }
+
+  // Media Analysis Methods
+  async analyzeMedia(params: {
+    filePath?: string;
+    url?: string;
+    base64Data?: string;
+    prompt?: string;
+    analysisType?: 'general' | 'detailed' | 'ocr' | 'document_analysis';
+    sessionId?: string;
+    metadata?: Record<string, unknown>;
+    addToMemory?: boolean;
+  }): Promise<{
+    type: string;
+    content: string;
+    analysis: string;
+    metadata?: any;
+  }> {
+    return analyzeMedia(params, {
+      agentName: this.config.name,
+      agentId: this.id,
+      model: this.getModel(),
+      memory: this.memory
+    });
+  }
+
+  async analyzeImage(params: {
+    imagePath?: string;
+    imageUrl?: string;
+    base64Data?: string;
+    prompt?: string;
+    detail?: 'low' | 'high' | 'auto';
+    sessionId?: string;
+    addToMemory?: boolean;
+  }): Promise<string> {
+    return analyzeImage(params, {
+      agentName: this.config.name,
+      agentId: this.id,
+      model: this.getModel(),
+      memory: this.memory
+    });
+  }
+
+  async analyzeDocument(params: {
+    filePath?: string;
+    url?: string;
+    prompt?: string;
+    sessionId?: string;
+    addToMemory?: boolean;
+  }): Promise<{ text: string; analysis: string; metadata?: any }> {
+    return analyzeDocument(params, {
+      agentName: this.config.name,
+      agentId: this.id,
+      model: this.getModel(),
+      memory: this.memory
+    });
+  }
+
+  async analyzeWithContext(params: {
+    filePath?: string;
+    url?: string;
+    base64Data?: string;
+    context: string;
+    sessionId?: string;
+    addToMemory?: boolean;
+  }): Promise<string> {
+    return analyzeWithContext(params, {
+      agentName: this.config.name,
+      agentId: this.id,
+      model: this.getModel(),
+      memory: this.memory,
+      chat: this.chat.bind(this)
     });
   }
 

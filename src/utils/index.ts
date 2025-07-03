@@ -1,6 +1,8 @@
 export * from "./logger";
 export * from "./intent";
 export * from "./validation";
+export * from "./pdf-parser";
+export * from "./analyze";
 
 // Tool parameter conversion utility
 export function convertToolParametersToSchema(tool: any): {

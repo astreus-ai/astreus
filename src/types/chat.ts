@@ -1,6 +1,38 @@
 import { MemoryEntry, MemoryInstance } from "./memory";
 import { DatabaseInstance } from "./database";
 
+// Media attachment interface
+export interface MediaAttachment {
+  id?: string;
+  type: "image" | "document" | "file";
+  data?: string | Buffer; // base64 or file buffer
+  filePath?: string; // local file path
+  url?: string; // for image URLs
+  filename?: string;
+  mimeType?: string;
+  size?: number;
+  metadata?: Record<string, unknown>;
+}
+
+// Message content interface for multimodal support
+export interface ChatMessageContent {
+  type: "text" | "image_url" | "image_file" | "document";
+  text?: string;
+  image_url?: {
+    url: string;
+    detail?: "low" | "high" | "auto";
+  };
+  image_file?: {
+    path: string;
+    mimeType?: string;
+  };
+  document?: {
+    path: string;
+    filename: string;
+    mimeType: string;
+  };
+}
+
 // Chat message interface - extends MemoryEntry for compatibility
 export interface ChatMessage extends MemoryEntry {
   chatId: string; // Same as sessionId for compatibility
@@ -68,7 +100,8 @@ export interface ChatInstance {
     title?: string;
     metadata?: Record<string, unknown>;
     // Chat functionality parameters
-    message: string;
+    message?: string;
+    media?: MediaAttachment[];
     model: any; // ProviderModel
     systemPrompt?: string;
     tools?: any[]; // Plugin[]
@@ -129,7 +162,8 @@ export interface ChatInstance {
 
   // Agent integration - advanced chat with AI model
   chat(params: {
-    message: string;
+    message?: string;
+    media?: MediaAttachment[];
     chatId: string;
     agentId: string;
     userId?: string;

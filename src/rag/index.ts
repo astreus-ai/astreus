@@ -1,6 +1,6 @@
 import { createVectorRAG } from "./vector";
 import { createDocumentRAG } from "./document";
-import { parsePDF, parseDirectoryOfPDFs } from "./pdf-parser";
+import { parsePDF } from "../utils/pdf-parser";
 import { RAGType, RAGFactoryConfig, RAGFactory, VectorRAGConfig, DocumentRAGConfig } from "../types/rag";
 
 /**
@@ -39,7 +39,7 @@ export const createRAG: RAGFactory = async (config: RAGFactoryConfig) => {
 };
 
 // Re-export PDF processing utilities
-export { parsePDF, parseDirectoryOfPDFs };
+export { parsePDF };
 
 // Re-export types
 export * from "../types/rag"; 
