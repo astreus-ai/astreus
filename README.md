@@ -1,6 +1,4 @@
-<p align="center">
-   <img src="https://raw.githubusercontent.com/astreus-ai/astreus/main/src/assets/astreus-logo-bg.png" alt="Astreus Logo" width="150" />
-</p>
+![Astreus](src/assets/astreus-logo-bg-wide.webp)
 
 <h1 align="center">Astreus</h1>
 
