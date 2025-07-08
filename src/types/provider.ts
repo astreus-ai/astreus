@@ -1,5 +1,5 @@
 // Provider type definitions
-export type ProviderType = "openai" | "ollama";
+export type ProviderType = "openai" | "ollama" | "claude" | "gemini";
 
 // Base model configuration interface
 export interface ModelConfig {
@@ -29,12 +29,32 @@ export interface OllamaModelConfig extends ModelConfig {
   baseUrl?: string;
 }
 
+// Claude (Anthropic) specific model configuration
+export interface ClaudeModelConfig extends ModelConfig {
+  /** Optional: API key for authentication, defaults to ANTHROPIC_API_KEY env var */
+  apiKey?: string;
+  /** Optional: Base URL for API, defaults to ANTHROPIC_BASE_URL env var or standard Anthropic URL */
+  baseUrl?: string;
+  /** Optional: API version, defaults to latest stable version */
+  apiVersion?: string;
+}
+
+// Gemini (Google) specific model configuration
+export interface GeminiModelConfig extends ModelConfig {
+  /** Optional: API key for authentication, defaults to GOOGLE_API_KEY env var */
+  apiKey?: string;
+  /** Optional: Base URL for API, defaults to GOOGLE_BASE_URL env var or standard Google URL */
+  baseUrl?: string;
+  /** Optional: Project ID for Google Cloud */
+  projectId?: string;
+}
+
 // Union type for all model configurations
-export type ProviderModelConfig = OpenAIModelConfig | OllamaModelConfig;
+export type ProviderModelConfig = OpenAIModelConfig | OllamaModelConfig | ClaudeModelConfig | GeminiModelConfig;
 
 // Provider configuration interface
 export interface ProviderConfig {
-  /** Required: Type of the provider (openai or ollama) */
+  /** Required: Type of the provider (openai, ollama, claude, or gemini) */
   type: ProviderType;
   /** Optional: Simple format - just specify model name (exclusive with models) */
   model?: string;

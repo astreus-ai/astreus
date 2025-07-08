@@ -46,7 +46,7 @@ const defaultOptions: LoggerOptions = {
 };
 
 // Current options
-let currentOptions = { ...defaultOptions };
+const currentOptions = { ...defaultOptions };
 
 /**
  * Get color wrapper function

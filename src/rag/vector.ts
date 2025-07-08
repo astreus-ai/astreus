@@ -348,45 +348,6 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
-   * Store a chunk with its embedding
-   * @param chunk The chunk to store
-   * @returns Promise resolving to the chunk ID
-   */
-  private async storeChunkWithEmbedding(
-    chunk: Omit<Chunk, "id" | "embedding">
-  ): Promise<string> {
-    const { database, tableName, provider, memory } = this.config;
-    
-    try {
-      // Use cached embedding generation
-      const embedding = await this.generateEmbeddingWithCache(chunk.content);
-      
-      const chunkId = uuidv4();
-      
-      const chunkIndex = chunk.metadata.chunk_index || 0;
-      
-      await this.vectorDatabaseConnector.addVectors([
-        {
-          id: chunkId,
-          vector: embedding,
-          metadata: {
-            ...chunk.metadata,
-            documentId: chunk.documentId,
-            content: chunk.content
-          }
-        }
-      ]);
-      
-      logger.debug("System", "VectorRAG", `Chunk ${chunkId} stored with all data in vector metadata`);
-      
-      return chunkId;
-    } catch (error) {
-      logger.error("System", "VectorRAG", `Error storing chunk with embedding: ${error}`);
-      throw error;
-    }
-  }
-
-  /**
    * Get a document by its ID
    * @param id The document ID to retrieve
    * @returns Promise resolving to the document or null if not found
@@ -459,15 +420,6 @@ export class VectorRAG implements VectorRAGInstance {
   }
 
   /**
-   * Search for documents using the query
-   * @param query The search query
-   * @param limit Maximum number of results to return
-   * @param userLanguage Optional user language for translation
-   * @returns Promise resolving to an array of search results
-   */
-  
-
-  /**
    * Standard search method - wrapper around internal search
    * @param query Search query
    * @param limit Maximum number of results
@@ -495,22 +447,21 @@ export class VectorRAG implements VectorRAGInstance {
   ): Promise<RAGResult[]> {
     validateRequiredParam(query, "query", "search");
     
-    try {
-      const maxResults = limit || this.config.maxResults || 10;
+    const maxResults = limit || this.config.maxResults || 10;
+    
+    let searchQuery = query;
+    if (userLanguage) {
+      const documentLanguage = await this.detectDocumentLanguage();
       
-      let searchQuery = query;
-      if (userLanguage) {
-        const documentLanguage = await this.detectDocumentLanguage();
-        
-        if (documentLanguage && userLanguage.toLowerCase() !== documentLanguage.toLowerCase()) {
-          searchQuery = await this.translateQuery(query, userLanguage, documentLanguage);
-        }
+      if (documentLanguage && userLanguage.toLowerCase() !== documentLanguage.toLowerCase()) {
+        searchQuery = await this.translateQuery(query, userLanguage, documentLanguage);
       }
+    }
 
-      const queryVariations = await this.generateQueryVariations(searchQuery, userLanguage || 'en');
+    const queryVariations = await this.generateQueryVariations(searchQuery, userLanguage || 'en');
 
-      const allResults: RAGResult[] = [];
-      const resultsPerVariation = Math.ceil(maxResults / queryVariations.length);
+    const allResults: RAGResult[] = [];
+    const resultsPerVariation = Math.ceil(maxResults / queryVariations.length);
       
       // Process all query variations in parallel for better performance
       const searchPromises = queryVariations.map(async (variation, i) => {
@@ -587,10 +538,6 @@ export class VectorRAG implements VectorRAGInstance {
 
       
       return finalResults;
-      
-    } catch (error) {
-      throw error;
-    }
   }
 
   /**
@@ -1014,114 +961,6 @@ export class VectorRAG implements VectorRAGInstance {
       logger.error("Error searching by vector:", error);
       throw error;
     }
-  }
-
-  /**
-   * Search for documents using keyword matching
-   * @param query The search query
-   * @param limit Maximum number of results to return
-   * @returns Promise resolving to an array of search results with enhanced metadata
-   */
-  private async searchByKeyword(
-    query: string,
-    limit?: number
-  ): Promise<RAGResult[]> {
-    const { database } = this.config;
-    const maxResults = limit || this.config.maxResults || 10;
-    
-    // Simple LIKE query for keyword search
-    const chunkResults = await database.knex(this.chunksTableName)
-      .whereRaw("LOWER(content) LIKE ?", [`%${query.toLowerCase()}%`])
-      .limit(maxResults)
-      .select("*");
-    
-    // Get parent document information for context
-    const documentIds = [...new Set(chunkResults.map((chunk: any) => chunk.documentId))];
-    const documents = await database.knex(this.documentsTableName)
-      .whereIn("id", documentIds)
-      .select("*");
-    
-    const documentsMap = documents.reduce((map: any, doc: any) => {
-      map[doc.id] = doc;
-      return map;
-    }, {});
-    
-    return chunkResults.map((result: any) => {
-      const parentDocument = documentsMap[result.documentId];
-      
-      try {
-        const chunkMetadata = result.metadata;
-        const documentMetadata = parentDocument 
-          ? (typeof parentDocument.metadata === 'string' ? JSON.parse(parentDocument.metadata) : parentDocument.metadata)
-          : {};
-        
-        return {
-          content: result.content,
-          metadata: {
-            // Include original chunk metadata
-            ...chunkMetadata,
-            // Add chunk-specific information
-            chunkId: result.id,
-            documentId: result.documentId,
-            chunkType: 'text_chunk',
-            searchMethod: 'keyword',
-            chunkLength: result.content.length,
-            chunkCreatedAt: result.createdAt,
-            // Include parent document metadata for context
-            document: {
-              ...documentMetadata,
-              documentLength: parentDocument ? parentDocument.content.length : null,
-              documentCreatedAt: parentDocument ? parentDocument.createdAt : null
-            }
-          },
-          sourceId: result.id,
-        };
-      } catch (parseError) {
-        logger.warn(`Error parsing metadata for chunk ${result.id}, using empty object:`, parseError);
-        return {
-          content: result.content,
-          metadata: {
-            chunkId: result.id,
-            documentId: result.documentId,
-            chunkType: 'text_chunk',
-            searchMethod: 'keyword',
-            error: 'metadata_parse_error'
-          },
-          sourceId: result.id,
-        };
-      }
-    });
-  }
-
-  /**
-   * Calculate cosine similarity between two vectors
-   * @param vecA First vector
-   * @param vecB Second vector
-   * @returns Similarity score between 0 and 1
-   */
-  private calculateCosineSimilarity(vecA: number[], vecB: number[]): number {
-    if (vecA.length !== vecB.length) {
-      throw new Error("Vector dimensions do not match");
-    }
-    
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    
-    for (let i = 0; i < vecA.length; i++) {
-      dotProduct += vecA[i] * vecB[i];
-      normA += vecA[i] * vecA[i];
-      normB += vecB[i] * vecB[i];
-    }
-    
-    normA = Math.sqrt(normA);
-    normB = Math.sqrt(normB);
-    
-    if (normA === 0 || normB === 0) {
-      return 0;
-    }
-    
-    return dotProduct / (normA * normB);
   }
 
   /**

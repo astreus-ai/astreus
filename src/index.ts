@@ -2,7 +2,7 @@
 
 import { logger } from './utils/logger';
 import { createAgent } from './agent';
-import { createProvider } from './providers';
+import { createProvider } from './provider';
 import { createMemory } from './memory';
 import { createDatabase } from './database';
 import { createRAG, parsePDF } from './rag';

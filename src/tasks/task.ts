@@ -199,7 +199,7 @@ export class Task implements TaskInstance {
       }
 
       // Use the plugins as they are
-      let prioritizedPlugins = [...this.plugins];
+      const prioritizedPlugins = [...this.plugins];
 
       // Check if we have plugins to execute
       if (prioritizedPlugins.length === 0) {

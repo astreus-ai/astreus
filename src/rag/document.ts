@@ -5,14 +5,13 @@ import {
   DocumentRAGConfig,
   DocumentRAGInstance,
   DocumentRAGFactory,
-  DatabaseInstance,
 } from "../types";
 import { Plugin } from "../types";
 import { logger } from "../utils";
 import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
-import { Embedding } from "../providers";
-import {
-  DEFAULT_MAX_RESULTS
+import { 
+  DEFAULT_MAX_RESULTS,
+  DEFAULT_VECTOR_SIMILARITY_THRESHOLD
 } from "../constants";
 
 /**
@@ -22,17 +21,15 @@ import {
 export class DocumentRAG implements DocumentRAGInstance {
   public config: DocumentRAGConfig;
   private documentsTableName: string;
+  private embeddingCache: Map<string, { embedding: number[], timestamp: number }> = new Map();
+  private readonly CACHE_TTL = 15 * 60 * 1000; // 15 minutes cache TTL
 
   constructor(config: DocumentRAGConfig) {
-    // Validate required parameters
     validateRequiredParam(config, "config", "DocumentRAG constructor");
-    validateRequiredParams(
-      config,
-      ["database"],
-      "DocumentRAG constructor"
-    );
+    validateRequiredParam(config.database, "config.database", "DocumentRAG constructor");
     
-    // Apply defaults for optional config parameters
+    logger.info("System", "DocumentRAG", `Initializing document RAG with collection: ${config.tableName || 'default'}`);
+    
     this.config = {
       ...config,
       tableName: config.tableName || "rag",
@@ -40,10 +37,11 @@ export class DocumentRAG implements DocumentRAGInstance {
       storeEmbeddings: config.storeEmbeddings || false,
     };
     
-    // Set up table name based on the config tableName
-    this.documentsTableName = `${this.config.tableName}_documents`;
+    const baseTableName = this.config.tableName;
+    this.documentsTableName = `${baseTableName}_documents`;
     
-    logger.debug("Document RAG system initialized");
+    logger.debug("System", "DocumentRAG", `Configuration: storeEmbeddings=${this.config.storeEmbeddings}, threshold=${DEFAULT_VECTOR_SIMILARITY_THRESHOLD}`);
+    logger.success("System", "DocumentRAG", "Document RAG initialized successfully");
   }
 
   /**
@@ -52,7 +50,6 @@ export class DocumentRAG implements DocumentRAGInstance {
    * @returns Promise that resolves to the new document RAG instance
    */
   static async create(config: DocumentRAGConfig): Promise<DocumentRAGInstance> {
-    // Validate required parameters
     validateRequiredParam(config, "config", "DocumentRAG.create");
     validateRequiredParams(
       config,
@@ -65,7 +62,7 @@ export class DocumentRAG implements DocumentRAGInstance {
       await instance.initializeDatabase();
       return instance;
     } catch (error) {
-      logger.error("Error creating document RAG instance:", error);
+      logger.error("System", "DocumentRAG", `Error creating document RAG instance: ${error}`);
       throw error;
     }
   }
@@ -77,19 +74,16 @@ export class DocumentRAG implements DocumentRAGInstance {
     try {
       const { database, storeEmbeddings } = this.config;
       
-      // Use database's enhanced table management
       await database.ensureTable(this.documentsTableName, (table) => {
         table.string("id").primary();
         table.text("content").notNullable();
         table.json("metadata").notNullable();
-        // Add embedding column if enabled
         if (storeEmbeddings) {
           table.json("embedding");
         }
         table.timestamp("createdAt").defaultTo(database.knex.fn.now());
       });
       
-      // Check if embeddings are enabled and ensure embedding column exists
       if (storeEmbeddings) {
         const hasEmbeddingColumn = await database.knex.schema.hasColumn(
           this.documentsTableName,
@@ -97,17 +91,17 @@ export class DocumentRAG implements DocumentRAGInstance {
         );
         
         if (!hasEmbeddingColumn) {
-          // Add embedding column if it doesn't exist
           await database.knex.schema.table(this.documentsTableName, (table) => {
             table.json("embedding");
           });
-          logger.debug(`Added embedding column to ${this.documentsTableName} table`);
+          logger.debug("System", "DocumentRAG", `Added embedding column to ${this.documentsTableName} table`);
         }
       }
       
-      logger.info(`Document RAG initialized with custom table: ${this.documentsTableName}`);
+      logger.info("System", "DocumentRAG", `Document RAG initialized with custom table: ${this.documentsTableName}`);
+      logger.debug("System", "DocumentRAG", "Document RAG database initialized");
     } catch (error) {
-      logger.error("Error initializing document RAG database:", error);
+      logger.error("System", "DocumentRAG", `Error initializing document RAG database: ${error}`);
       throw error;
     }
   }
@@ -117,8 +111,7 @@ export class DocumentRAG implements DocumentRAGInstance {
    * @param document The document to add
    * @returns Promise resolving to the document ID
    */
-  async addDocument(document: Omit<Document, "id">): Promise<string> {
-    // Validate required parameters
+  async addDocument(document: Omit<Document, "id" | "embedding">): Promise<string> {
     validateRequiredParam(document, "document", "addDocument");
     validateRequiredParams(
       document,
@@ -128,47 +121,106 @@ export class DocumentRAG implements DocumentRAGInstance {
     
     try {
       const { database, storeEmbeddings } = this.config;
-      const id = uuidv4();
+      const documentId = uuidv4();
       
       const docToInsert: any = {
-        id,
+        id: documentId,
         content: document.content,
         metadata: JSON.stringify(document.metadata),
         createdAt: new Date(),
       };
       
-      // Handle embedding if enabled and provided or can be generated
       if (storeEmbeddings) {
-        let embedding = document.embedding;
-        
-        // Generate embedding if not provided
-        if (!embedding) {
-          try {
-            // Use the Embedding utility directly
-            const { Embedding } = await import("../providers");
-            embedding = await Embedding.generateEmbedding(document.content.substring(0, 8000));
-            
-            logger.debug(`Generated embedding for document ${id} (${embedding.length} dimensions)`);
-          } catch (embeddingError) {
-            logger.warn("Error generating embedding for document:", embeddingError);
+        try {
+          const embedding = await this.generateEmbeddingWithCache(document.content);
+          if (embedding && embedding.length > 0) {
+            docToInsert.embedding = JSON.stringify(embedding);
+            logger.debug("System", "DocumentRAG", `Generated embedding for document ${documentId} (${embedding.length} dimensions)`);
           }
-        }
-        
-        // Store embedding if available
-        if (embedding) {
-          docToInsert.embedding = JSON.stringify(embedding);
+        } catch (embeddingError) {
+          logger.warn("System", "DocumentRAG", `Error generating embedding for document: ${embeddingError}`);
         }
       }
       
-      // Store document in database
       await database.knex(this.documentsTableName).insert(docToInsert);
       
-      logger.debug(`Added document ${id} to RAG system`);
-      return id;
+      logger.debug("System", "DocumentRAG", `Added document ${documentId} to RAG system`);
+      return documentId;
     } catch (error) {
-      logger.error("Error adding document to RAG system:", error);
+      logger.error("System", "DocumentRAG", `Error adding document to RAG system: ${error}`);
       throw error;
     }
+  }
+
+  /**
+   * Generate embedding with caching support
+   * @param text The text to generate embedding for
+   * @returns Promise resolving to the embedding vector
+   */
+  private async generateEmbeddingWithCache(text: string): Promise<number[]> {
+    // Check cache first
+    const cacheKey = text.substring(0, 100); // Use first 100 chars as key to avoid memory issues
+    const cached = this.embeddingCache.get(cacheKey);
+    
+    if (cached && (Date.now() - cached.timestamp) < this.CACHE_TTL) {
+      logger.debug("System", "DocumentRAG", "Using cached embedding");
+      return cached.embedding;
+    }
+    
+    // Clean expired cache entries periodically
+    if (this.embeddingCache.size > 1000) {
+      const now = Date.now();
+      for (const [key, value] of this.embeddingCache.entries()) {
+        if (now - value.timestamp > this.CACHE_TTL) {
+          this.embeddingCache.delete(key);
+        }
+      }
+    }
+    
+    let embedding: number[] = [];
+    
+    if (this.config.provider && this.config.provider.generateEmbedding) {
+      try {
+        const textForEmbedding = text.substring(0, 8000);
+        embedding = await this.config.provider.generateEmbedding(textForEmbedding) || [];
+        
+        // Cache the result
+        this.embeddingCache.set(cacheKey, { embedding, timestamp: Date.now() });
+        
+        logger.debug("System", "DocumentRAG", `Generated and cached embedding (${embedding.length} dimensions)`);
+      } catch (error) {
+        logger.warn("System", "DocumentRAG", `Failed to generate embedding: ${error}`);
+        
+        // Try memory fallback if available
+        if (this.config.memory && this.config.memory.searchByEmbedding) {
+          try {
+            const { Embedding } = await import("../providers");
+            embedding = await Embedding.generateEmbedding(text.substring(0, 8000));
+            
+            // Cache the fallback result too
+            this.embeddingCache.set(cacheKey, { embedding, timestamp: Date.now() });
+            
+            logger.debug("System", "DocumentRAG", `Generated embedding using memory fallback (${embedding.length} dimensions)`);
+          } catch (memoryError) {
+            logger.warn("System", "DocumentRAG", `Failed to generate embedding using memory fallback: ${memoryError}`);
+          }
+        }
+      }
+    } else if (this.config.memory && this.config.memory.searchByEmbedding) {
+      try {
+        const { Embedding } = await import("../providers");
+        embedding = await Embedding.generateEmbedding(text.substring(0, 8000));
+        
+        // Cache the result
+        this.embeddingCache.set(cacheKey, { embedding, timestamp: Date.now() });
+        
+        logger.debug("System", "DocumentRAG", `Generated embedding using memory (${embedding.length} dimensions)`);
+      } catch (error) {
+        logger.warn("System", "DocumentRAG", `Failed to generate embedding using memory: ${error}`);
+      }
+    }
+    
+    return embedding;
   }
 
   /**
@@ -177,40 +229,26 @@ export class DocumentRAG implements DocumentRAGInstance {
    * @returns Promise resolving to the document or null if not found
    */
   async getDocumentById(id: string): Promise<Document | null> {
-    // Validate required parameters
     validateRequiredParam(id, "id", "getDocumentById");
     
     try {
       const { database } = this.config;
       
-      // Query document
       const document = await database.knex(this.documentsTableName)
-        .where({ id })
+        .where("id", id)
         .first();
       
       if (!document) {
         return null;
       }
       
-      // Process document data
-      const result: Document = {
+      return {
         id: document.id,
         content: document.content,
         metadata: typeof document.metadata === 'string' ? JSON.parse(document.metadata) : document.metadata,
       };
-      
-      // Add embedding if available
-      if (document.embedding) {
-        try {
-          result.embedding = typeof document.embedding === 'string' ? JSON.parse(document.embedding) : document.embedding;
-        } catch (error) {
-          logger.warn(`Error parsing embedding for document ${id}:`, error);
-        }
-      }
-      
-      return result;
     } catch (error) {
-      logger.error(`Error getting document ${id}:`, error);
+      logger.error("System", "DocumentRAG", `Error getting document by ID: ${error}`);
       throw error;
     }
   }
@@ -221,76 +259,134 @@ export class DocumentRAG implements DocumentRAGInstance {
    * @returns Promise resolving when the document is deleted
    */
   async deleteDocument(id: string): Promise<void> {
-    // Validate required parameters
     validateRequiredParam(id, "id", "deleteDocument");
     
     try {
       const { database } = this.config;
       
-      // Delete document
       await database.knex(this.documentsTableName)
-        .where({ id })
+        .where("id", id)
         .delete();
       
-      logger.debug(`Deleted document ${id}`);
+      logger.debug("System", "DocumentRAG", `Successfully deleted document ${id}`);
     } catch (error) {
-      logger.error(`Error deleting document ${id}:`, error);
+      logger.error("System", "DocumentRAG", `Error deleting document: ${error}`);
       throw error;
     }
   }
 
   /**
-   * Search for documents using text query with automatic language support
-   * @param query The search query
-   * @param limit Maximum number of results to return
-   * @param userLanguage The language of the user's query (optional)
-   * @returns Promise resolving to array of search results with document metadata
+   * Standard search method - wrapper around internal search
+   * @param query Search query
+   * @param limit Maximum number of results
+   * @param userLanguage User's language for translation
+   * @returns Search results
    */
-  async search(query: string, limit?: number, userLanguage?: string): Promise<RAGResult[]> {
-    // Validate required parameters
+  async search(
+    query: string, 
+    limit?: number, 
+    userLanguage?: string
+  ): Promise<RAGResult[]> {
+    return this.searchInternal(query, limit, userLanguage);
+  }
+
+  private async searchInternal(
+    query: string, 
+    limit?: number, 
+    userLanguage?: string
+  ): Promise<RAGResult[]> {
     validateRequiredParam(query, "query", "search");
     
-    try {
-      // Detect document language and translate query if needed
-      let searchQuery = query;
-      if (userLanguage) {
-        try {
-          const documentLanguage = await this.detectDocumentLanguage();
-          logger.debug(`Document language: ${documentLanguage}, User language: ${userLanguage}`);
-          
-          // If user language is different from document language, translate the query
-          if (documentLanguage && userLanguage !== documentLanguage) {
-            searchQuery = await this.translateQuery(query, userLanguage, documentLanguage);
-            logger.debug(`Translated query from "${query}" to "${searchQuery}"`);
-          }
-        } catch (translationError) {
-          logger.warn("Translation failed, using original query:", translationError);
-          searchQuery = query;
-        }
+    const maxResults = limit || this.config.maxResults || 10;
+    
+    let searchQuery = query;
+    if (userLanguage) {
+      const documentLanguage = await this.detectDocumentLanguage();
+      
+      if (documentLanguage && userLanguage.toLowerCase() !== documentLanguage.toLowerCase()) {
+        searchQuery = await this.translateQuery(query, userLanguage, documentLanguage);
       }
-      
-      const { storeEmbeddings } = this.config;
-      
-      // Use vector search if embeddings are available
-      if (storeEmbeddings) {
-        try {
-          // Generate embedding for (possibly translated) query using Embedding utility directly
-          const { Embedding } = await import("../providers");
-          const queryEmbedding = await Embedding.generateEmbedding(searchQuery);
-          
-          // Search using the embedding
-          return this.searchWithEmbedding(queryEmbedding, limit);
-        } catch (embeddingError) {
-          logger.warn("Error performing embedding search, falling back to keyword search:", embeddingError);
-        }
-      }
-      
-      // Fall back to keyword search
-      return this.searchByKeyword(searchQuery, limit);
-    } catch (error) {
-      logger.error(`Error searching with query "${query}":`, error);
-      throw error;
     }
+
+    const queryVariations = await this.generateQueryVariations(searchQuery, userLanguage || 'en');
+
+    const allResults: RAGResult[] = [];
+    const resultsPerVariation = Math.ceil(maxResults / queryVariations.length);
+      
+    // Process all query variations in parallel for better performance
+    const searchPromises = queryVariations.map(async (variation, i) => {
+      const queryType = i === 0 ? 'SHORT' : i === 1 ? 'MEDIUM' : 'LONG';
+      
+      try {
+        const { storeEmbeddings } = this.config;
+        
+        if (storeEmbeddings) {
+          try {
+            const queryEmbedding = await this.generateEmbeddingWithCache(variation);
+            
+            if (queryEmbedding && queryEmbedding.length > 0) {
+              const searchThreshold = 0.5;
+              
+              const results = await this.searchWithEmbedding(queryEmbedding, resultsPerVariation, searchThreshold);
+              
+              return results.map(result => ({
+                ...result,
+                metadata: {
+                  ...result.metadata,
+                  queryType: queryType,
+                  queryVariation: variation,
+                  originalQuery: query
+                }
+              }));
+            }
+          } catch (embeddingError) {
+            logger.warn("System", "DocumentRAG", `Error performing embedding search: ${embeddingError}`);
+          }
+        }
+        
+        // Fall back to keyword search
+        const results = await this.searchByKeyword(variation, resultsPerVariation);
+        return results.map(result => ({
+          ...result,
+          metadata: {
+            ...result.metadata,
+            queryType: queryType,
+            queryVariation: variation,
+            originalQuery: query
+          }
+        }));
+      } catch (variationError) {
+        logger.debug("System", "DocumentRAG", `Error searching with variation ${queryType}: ${variationError}`);
+        return [];
+      }
+    });
+    
+    // Wait for all searches to complete and flatten results
+    const searchResults = await Promise.all(searchPromises);
+    searchResults.forEach(results => allResults.push(...results));
+
+    // Optimized deduplication using content-based key for better accuracy
+    const uniqueResults = new Map<string, RAGResult>();
+    
+    for (const result of allResults) {
+      const key = result.sourceId;
+      
+      if (!uniqueResults.has(key)) {
+        uniqueResults.set(key, result);
+      } else {
+        // Keep the result with higher similarity
+        const existing = uniqueResults.get(key)!;
+        if ((result.similarity || 0) > (existing.similarity || 0)) {
+          uniqueResults.set(key, result);
+        }
+      }
+    }
+
+    const finalResults = Array.from(uniqueResults.values())
+      .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
+      .slice(0, maxResults);
+
+    return finalResults;
   }
 
   /**
@@ -340,47 +436,44 @@ export class DocumentRAG implements DocumentRAGInstance {
    * Search for documents using embedding similarity
    * @param embedding The query embedding vector
    * @param limit Maximum number of results to return
+   * @param threshold Minimum similarity threshold (0-1)
    * @returns Promise resolving to array of search results with similarity scores and full metadata
    */
   private async searchWithEmbedding(
     embedding: number[],
-    limit?: number
+    limit?: number,
+    threshold: number = DEFAULT_VECTOR_SIMILARITY_THRESHOLD
   ): Promise<RAGResult[]> {
     try {
       const { database, maxResults } = this.config;
       
-      // Get all documents with embeddings
+      logger.debug("System", "DocumentRAG", `Searching by embedding with ${embedding.length} dimensions, limit: ${limit || maxResults}`);
+      
       const documents = await database.knex(this.documentsTableName)
         .select("*")
         .whereNotNull("embedding");
       
-      // Calculate similarity and filter results
+      logger.debug("System", "DocumentRAG", `Found ${documents.length} documents with embeddings`);
+      
       const results: RAGResult[] = [];
       
       for (const doc of documents) {
         try {
-          // Parse embedding from JSON
           const docEmbedding = typeof doc.embedding === 'string' ? JSON.parse(doc.embedding) : doc.embedding;
           
-          // Skip documents with invalid embeddings
           if (!Array.isArray(docEmbedding) || docEmbedding.length === 0) {
             continue;
           }
           
-          // Calculate cosine similarity
           const similarity = this.calculateCosineSimilarity(embedding, docEmbedding);
           
-          // Only include results with similarity >= 0.7
-          if (similarity >= 0.7) {
+          if (similarity >= threshold) {
             const parsedMetadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
             
-            // Add to results with enhanced metadata
             results.push({
               content: doc.content,
               metadata: {
-                // Include original document metadata
                 ...parsedMetadata,
-                // Add document-level information for LLM context
                 documentId: doc.id,
                 documentType: 'full_document',
                 searchMethod: 'embedding',
@@ -394,17 +487,16 @@ export class DocumentRAG implements DocumentRAGInstance {
             });
           }
         } catch (error) {
-          logger.warn(`Error processing document ${doc.id}, skipping:`, error);
+          logger.warn("System", "DocumentRAG", `Error processing document ${doc.id}, skipping: ${error}`);
           continue;
         }
       }
       
-      // Sort by similarity (descending) and limit results
       return results
         .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
         .slice(0, limit || maxResults);
     } catch (error) {
-      logger.error("Error searching with embedding:", error);
+      logger.error("System", "DocumentRAG", `Error searching with embedding: ${error}`);
       throw error;
     }
   }
@@ -445,77 +537,225 @@ export class DocumentRAG implements DocumentRAGInstance {
    * Detect the primary language of documents using LLM
    * @returns Promise resolving to the detected language code or null
    */
-  private async detectDocumentLanguage(): Promise<string | null> {
+  private async detectDocumentLanguage(): Promise<string> {
     try {
       const { database } = this.config;
       
-      // First check metadata for explicit language info
-      const sampleDocuments = await database.knex(this.documentsTableName)
-        .select('metadata')
-        .limit(10);
-      
-      for (const doc of sampleDocuments) {
-        try {
-          const metadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
-          if (metadata && metadata.language) {
-            logger.debug(`Found document language in metadata: ${metadata.language}`);
-            return metadata.language;
-          }
-        } catch (parseError) {
-          continue;
-        }
-      }
-      
-      // If no metadata, get sample content and let LLM detect language
-      const sampleContent = await database.knex(this.documentsTableName)
-        .select('content')
-        .limit(3);
-      
-      if (sampleContent.length === 0) {
-        logger.debug(`No content found, defaulting to English`);
+      if (!database) {
         return 'en';
       }
       
-      // Combine sample texts for better detection
-      const sampleText = sampleContent
-        .map(doc => doc.content)
-        .join('\n\n')
-        .substring(0, 1000); // Limit for efficiency
-      
-      // Use LLM for language detection
-      const { Embedding } = await import("../providers");
-      
-      logger.debug(`Using LLM to detect language from sample text`);
-      return 'en'; // Simplified for now - could implement LLM detection here too
-      
-    } catch (error) {
-      logger.warn(`Error detecting document language:`, error);
+      try {
+        const result = await database.knex(this.documentsTableName)
+          .select('metadata')
+          .whereNotNull('metadata')
+          .limit(1);
+        
+        if (result && result.length > 0 && result[0].metadata) {
+          try {
+            const metadata = typeof result[0].metadata === 'string' 
+              ? JSON.parse(result[0].metadata) 
+              : result[0].metadata;
+            
+            if (metadata && metadata.language) {
+              const detectedLanguage = await this.detectLanguageWithLLM(metadata.language);
+              return detectedLanguage;
+            }
+          } catch (_parseError) {
+          }
+        }
+        
+        return 'en';
+      } catch (_error) {
+        return 'en';
+      }
+    } catch (_error) {
       return 'en';
     }
   }
 
   /**
-   * Translate query from source language to target language using LLM
+   * Use LLM to intelligently detect language from any language representation
+   * @param languageText Any text that represents a language in any form
+   * @returns Promise resolving to a standardized language code
+   */
+  private async detectLanguageWithLLM(languageText: string): Promise<string> {
+    if (!this.config.provider) {
+      return 'en';
+    }
+    
+    try {
+      const messages = [
+        {
+          role: "system" as const,
+          content: `You are a language detection expert. You will receive any text that represents a language in any form or format. This could be:
+- Language codes: "EN", "en", "TR", "tr", "DE", "de"
+- Language names in English: "English", "Turkish", "German", "French"
+- Language names in their own language: "English", "Turkish", "Deutsch", "Français"
+- Any other way someone might write a language
+
+Your job is to understand what language is being referred to and return ONLY the standard 2-letter ISO language code in lowercase.
+
+Examples:
+- "EN" → "en"
+- "English" → "en" 
+- "English" → "en"
+- "TR" → "tr"
+- "Turkish" → "tr"
+- "Turkish" → "tr"
+- "DE" → "de"
+- "German" → "de"
+- "Deutsch" → "de"
+- "FR" → "fr"
+- "French" → "fr"
+- "Français" → "fr"
+
+Return ONLY the 2-letter code, nothing else.`
+        },
+        {
+          role: "user" as const,
+          content: languageText
+        }
+      ];
+      
+      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const model = this.config.provider.getModel(defaultModel);
+      const response = await model.complete(messages, {
+        temperature: 0.1,
+        maxTokens: 10
+      });
+      
+      const languageCode = typeof response === 'string' ? 
+        response.trim().toLowerCase() : 
+        response.content?.trim().toLowerCase() || 'en';
+      
+      const cleanLanguageCode = languageCode.replace(/[^a-z]/g, '').substring(0, 2);
+      const finalLanguageCode = cleanLanguageCode.length === 2 ? cleanLanguageCode : 'en';
+      
+      return finalLanguageCode;
+    } catch (_error) {
+      return 'en';
+    }
+  }
+
+  /**
+   * Generate multiple query variations using LLM for better search coverage
+   * @param query The original query
+   * @param language The language of the query
+   * @returns Promise resolving to array of query variations [short, medium, long]
+   */
+  private async generateQueryVariations(query: string, _language: string): Promise<string[]> {
+    try {
+      if (!this.config.provider) {
+        return [query];
+      }
+
+      const prompt = `Given this search query: "${query}"
+
+Generate 3 different variations of this query to improve search results in a document database:
+
+1. SHORT: A concise version using key terms only (2-4 words)
+2. MEDIUM: A balanced version with important context (5-8 words)  
+3. LONG: A detailed version with synonyms and related terms (10-15 words)
+
+Focus on relevant terminology and concepts. Include relevant synonyms and related terms.
+
+Response format (one per line):
+SHORT: [short version]
+MEDIUM: [medium version]
+LONG: [long version]`;
+
+      
+      const messages = [
+        {
+          role: "user" as const,
+          content: prompt
+        }
+      ];
+      
+      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const model = this.config.provider.getModel(defaultModel);
+      const response = await model.complete(messages, {
+        temperature: 0.3,
+        maxTokens: 200
+      });
+
+      const responseText = typeof response === 'string' ? 
+        response : 
+        response.content || '';
+
+      if (!responseText) {
+        return [query];
+      }
+
+      const lines = responseText.split('\n').filter(line => line.trim());
+      const variations: string[] = [];
+      
+      for (const line of lines) {
+        if (line.includes('SHORT:')) {
+          variations.push(line.replace('SHORT:', '').trim());
+        } else if (line.includes('MEDIUM:')) {
+          variations.push(line.replace('MEDIUM:', '').trim());
+        } else if (line.includes('LONG:')) {
+          variations.push(line.replace('LONG:', '').trim());
+        }
+      }
+
+      if (variations.length === 0) {
+        variations.push(query);
+      }
+
+      return variations;
+
+    } catch (_error) {
+      return [query];
+    }
+  }
+
+  /**
+   * Translate query from source language to target language using the AI provider
    * @param query Original query text
    * @param fromLang Source language code
    * @param toLang Target language code
    * @returns Promise resolving to translated query
    */
   private async translateQuery(query: string, fromLang: string, toLang: string): Promise<string> {
-    try {
-      // Use the Embedding utility which has access to OpenAI
-      const { Embedding } = await import("../providers");
-      
-      // For DocumentRAG, use a simplified translation approach
-      // In a full implementation, this would also use the LLM provider
-      logger.debug(`Translating query from ${fromLang} to ${toLang}: ${query}`);
-      
-      // For now, return original query - could implement full LLM translation here
+    if (!this.config.provider) {
+      throw new Error('No provider available for translation');
+    }
+    
+    if (fromLang.toLowerCase() === toLang.toLowerCase()) {
       return query;
+    }
+    
+    try {
+      const messages = [
+        {
+          role: "system" as const,
+          content: `You are a professional translator. Translate the search query from ${fromLang} to ${toLang}. Return ONLY the translated text without any additional explanation, formatting, or quotes.`
+        },
+        {
+          role: "user" as const,
+          content: query
+        }
+      ];
       
-    } catch (error) {
-      logger.warn(`Translation error:`, error);
-      return query; // Fall back to original query
+      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const model = this.config.provider.getModel(defaultModel);
+      const response = await model.complete(messages, {
+        temperature: 0.1,
+        maxTokens: 150
+      });
+      
+      const translation = typeof response === 'string' ? 
+        response.trim() : 
+        response.content?.trim() || query;
+      
+      const cleanTranslation = translation.replace(/^["']|["']$/g, '').trim();
+      
+      return cleanTranslation;
+    } catch (_error) {
+      return query;
     }
   }
 

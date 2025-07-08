@@ -7,10 +7,8 @@ import {
   OpenAIModelConfig,
 } from "../types";
 import { logger, validateRequiredParam } from "../utils";
-import { promises as fs } from "fs";
+import fs from "fs";
 import path from "path";
-// Lazy import to avoid initialization issues
-// @ts-ignore
 import mammoth from "mammoth";
 
 /**
@@ -200,7 +198,6 @@ export class OpenAIProvider implements ProviderModel {
             case "image_file":
               // Convert file path to base64 for OpenAI
               try {
-                const fs = require('fs');
                 const fileBuffer = fs.readFileSync(item.image_file.path);
                 const base64 = fileBuffer.toString('base64');
                 const ext = path.extname(item.image_file.path).toLowerCase();
@@ -486,7 +483,6 @@ export class OpenAIProvider implements ProviderModel {
     // Split text into chunks for more natural streaming
     // Use a mix of sentences and words for more natural flow
     const sentences = text.split(/(?<=[.!?])\s+/);
-    let currentText = '';
     let sentCount = 0;
     
     for (const sentence of sentences) {
@@ -502,7 +498,6 @@ export class OpenAIProvider implements ProviderModel {
           
           // Send chunk every few words
           if (i % 5 === 4 || i === words.length - 1) {
-            currentText += chunk;
             onChunk(chunk);
             chunk = '';
             
@@ -512,7 +507,6 @@ export class OpenAIProvider implements ProviderModel {
         }
       } else {
         // Send shorter sentences as a single chunk
-        currentText += sentence + (sentCount < sentences.length ? ' ' : '');
         onChunk(sentence + (sentCount < sentences.length ? ' ' : ''));
         
         // Slightly longer delay between sentences
@@ -603,7 +597,7 @@ export class OpenAIProvider implements ProviderModel {
           }
         };
       } else if (imagePath) {
-        const fileBuffer = await fs.readFile(imagePath);
+        const fileBuffer = fs.readFileSync(imagePath);
         const base64 = fileBuffer.toString('base64');
         const ext = path.extname(imagePath).toLowerCase();
         const mimeType = this.getMimeType(ext);
@@ -707,7 +701,7 @@ export class OpenAIProvider implements ProviderModel {
           analysis: pdfResult.analysis
         };
       } else if (ext === '.docx' || ext === '.doc') {
-        const buffer = await fs.readFile(filePath);
+        const buffer = fs.readFileSync(filePath);
         const result = await mammoth.extractRawText({ buffer });
         text = result.value;
       } else {

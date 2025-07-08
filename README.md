@@ -7,7 +7,7 @@ An AI Agent Framework designed to help you easily build, deploy, and manage inte
 ## 🌟 Features
 
 - **Unified Agent API**: Create and manage AI agents with a consistent interface 
-- **Multi-Provider Support**: Works with OpenAI and Ollama models out of the box
+- **Multi-Provider Support**: Works with OpenAI, Ollama, Claude (Anthropic), and Gemini (Google) models out of the box
 - **Memory Management**: Built-in conversation history with vector search capabilities
 - **Chat Management**: Advanced chat system with metadata, search, and organization
 - **Task Orchestration**: Break complex requests into manageable sub-tasks with dependency management
@@ -32,7 +32,7 @@ An AI Agent Framework designed to help you easily build, deploy, and manage inte
 
 - Node.js 16 or higher
 - TypeScript (optional, but recommended for development)
-- OpenAI API key (for OpenAI provider) or local Ollama setup (for Ollama provider)
+- AI Provider API keys: OpenAI, Anthropic (Claude), Google (Gemini), or local Ollama setup
 - PostgreSQL (optional, for advanced vector database features)
 
 ### 💿 Installation
@@ -113,11 +113,23 @@ const openaiProvider = createProvider({
   model: 'gpt-4o-mini'
 });
 
+// For Claude (Anthropic)
+const claudeProvider = createProvider({
+  type: 'claude',
+  model: 'claude-3-5-sonnet-20241022'
+});
+
+// For Gemini (Google)
+const geminiProvider = createProvider({
+  type: 'gemini',
+  model: 'gemini-1.5-pro'
+});
+
 // For Ollama (local models)
 const ollamaProvider = createProvider({
   type: 'ollama',
   baseUrl: "http://localhost:11434",
-  model: "llama3"
+  model: "llama3.1"
 });
 ```
 
@@ -447,6 +459,10 @@ const chat = await createChat({
 - `OPENAI_BASE_URL` - Optional custom base URL for OpenAI API
 - `OPENAI_EMBEDDING_API_KEY` - Optional separate key for embeddings (falls back to main key)
 - `OPENAI_EMBEDDING_MODEL` - Embedding model to use (default: "text-embedding-3-small")
+- `ANTHROPIC_API_KEY` - Your Anthropic API key (for Claude)
+- `ANTHROPIC_BASE_URL` - Optional custom base URL for Anthropic API
+- `GOOGLE_API_KEY` - Your Google API key (for Gemini)
+- `GOOGLE_BASE_URL` - Optional custom base URL for Google API
 - `DATABASE_TYPE` - Type of database to use (sqlite or postgresql)
 - `DATABASE_PATH` - Path for SQLite database (if using SQLite)
 - `DATABASE_URL` - Connection string for PostgreSQL (if using PostgreSQL)

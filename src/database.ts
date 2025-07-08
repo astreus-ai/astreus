@@ -321,12 +321,8 @@ class Database implements DatabaseInstance {
         // Validate required parameters
         validateRequiredParam(data, "data", "insert");
         
-        try {
-          const result = await knexInstance(tableName).insert(data);
-          return result[0];
-        } catch (error) {
-          throw error;
-        }
+        const result = await knexInstance(tableName).insert(data);
+        return result[0];
       },
 
       /**
