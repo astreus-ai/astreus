@@ -4,7 +4,6 @@ import {
   ProviderMessage,
   ProviderModel,
   CompletionOptions,
-  ProviderTool,
   StructuredCompletionResponse
 } from "../types/provider";
 import { DEFAULT_OLLAMA_BASE_URL } from "../constants";

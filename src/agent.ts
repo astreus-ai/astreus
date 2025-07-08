@@ -5,9 +5,7 @@ import {
   AgentFactory,
   ProviderModel,
   ProviderInstance,
-  ProviderMessage,
   MemoryInstance,
-  TaskInstance,
   TaskManagerInstance,
   DatabaseInstance,
   Plugin,
@@ -15,18 +13,10 @@ import {
   ChatInstance,
   ChatMetadata,
   ChatSummary,
-  StructuredCompletionResponse,
-  TaskConfig,
-  TaskResult,
-  PluginWithTools,
 } from "./types";
-import { createTaskManager } from "./tasks";
 import { logger } from "./utils";
 import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
-import { convertToolParametersToSchema } from "./utils";
 import { 
-  DEFAULT_TEMPERATURE, 
-  DEFAULT_MAX_TOKENS,
   DEFAULT_AGENT_NAME
 } from "./constants";
 import { createDatabase } from "./database";

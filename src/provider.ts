@@ -6,35 +6,41 @@ import {
   ProviderModelConfig,
   OpenAIModelConfig,
   OllamaModelConfig,
+  ClaudeModelConfig,
+  GeminiModelConfig,
   ProviderFactory,
 } from "./types/provider";
 import dotenv from "dotenv";
-import { OpenAIProvider, OllamaProvider, Embedding } from "./providers";
+import { OpenAIProvider, OllamaProvider, ClaudeProvider, GeminiProvider, Embedding } from "./providers";
 import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
 import { logger } from "./utils/logger";
 import { 
-  PROVIDER_TYPES,
-  DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OLLAMA_BASE_URL,
-  DEFAULT_MODEL_CONFIGS
+  DEFAULT_MODEL_CONFIGS,
+  AVAILABLE_MODELS
 } from './constants';
 
 // Load environment variables
 dotenv.config();
 
-// Define types for default configurations
-type OpenAIDefaultConfigs = {
+// Define types for default configurations (prefixed with _ to indicate intentionally unused)
+type _OpenAIDefaultConfigs = {
   [key: string]: Omit<OpenAIModelConfig, 'name'>;
 };
 
-type OllamaDefaultConfigs = {
+type _OllamaDefaultConfigs = {
   [key: string]: Omit<OllamaModelConfig, 'name'>;
 };
 
-type DefaultModelConfigs = {
-  openai: OpenAIDefaultConfigs;
-  ollama: OllamaDefaultConfigs;
+type _ClaudeDefaultConfigs = {
+  [key: string]: Omit<ClaudeModelConfig, 'name'>;
 };
+
+type _GeminiDefaultConfigs = {
+  [key: string]: Omit<GeminiModelConfig, 'name'>;
+};
+
+// DefaultModelConfigs type is defined by the imported constants
 
 // Using DEFAULT_MODEL_CONFIGS imported from constants
 
@@ -130,6 +136,12 @@ class Provider implements ProviderInstance {
             (modelConfig as OpenAIModelConfig).baseUrl = this.config.baseUrl || process.env.OPENAI_BASE_URL;
           } else if (type === 'ollama') {
             (modelConfig as OllamaModelConfig).baseUrl = this.config.baseUrl || process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL;
+          } else if (type === 'claude') {
+            (modelConfig as ClaudeModelConfig).apiKey = this.config.apiKey || process.env.ANTHROPIC_API_KEY || '';
+            (modelConfig as ClaudeModelConfig).baseUrl = this.config.baseUrl || process.env.ANTHROPIC_BASE_URL;
+          } else if (type === 'gemini') {
+            (modelConfig as GeminiModelConfig).apiKey = this.config.apiKey || process.env.GOOGLE_API_KEY || '';
+            (modelConfig as GeminiModelConfig).baseUrl = this.config.baseUrl || process.env.GOOGLE_BASE_URL;
           }
         }
       } else {
@@ -147,6 +159,14 @@ class Provider implements ProviderInstance {
       } else if (type === 'ollama') {
         const ollamaConfig = modelConfig as OllamaModelConfig;
         if (this.config.baseUrl) ollamaConfig.baseUrl = this.config.baseUrl;
+      } else if (type === 'claude') {
+        const claudeConfig = modelConfig as ClaudeModelConfig;
+        if (this.config.apiKey) claudeConfig.apiKey = this.config.apiKey;
+        if (this.config.baseUrl) claudeConfig.baseUrl = this.config.baseUrl;
+      } else if (type === 'gemini') {
+        const geminiConfig = modelConfig as GeminiModelConfig;
+        if (this.config.apiKey) geminiConfig.apiKey = this.config.apiKey;
+        if (this.config.baseUrl) geminiConfig.baseUrl = this.config.baseUrl;
       }
 
       // Create the provider model instance
@@ -156,6 +176,10 @@ class Provider implements ProviderInstance {
         providerModel = new OpenAIProvider(type, modelConfig as OpenAIModelConfig);
       } else if (type === 'ollama') {
         providerModel = new OllamaProvider(type, modelConfig as OllamaModelConfig);
+      } else if (type === 'claude') {
+        providerModel = new ClaudeProvider(type, modelConfig as ClaudeModelConfig);
+      } else if (type === 'gemini') {
+        providerModel = new GeminiProvider(type, modelConfig as GeminiModelConfig);
       } else {
         logger.error("System", "Provider", `Unsupported provider type: ${type}`);
         throw new Error(`Unsupported provider type: ${type}`);
@@ -211,6 +235,13 @@ class Provider implements ProviderInstance {
 
   listModels(): string[] {
     return Array.from(this.models.keys());
+  }
+
+  /**
+   * Get all available models for this provider type
+   */
+  getAvailableModels(): string[] {
+    return AVAILABLE_MODELS[this.type] || [];
   }
 
   getEmbeddingModel(): string | null {

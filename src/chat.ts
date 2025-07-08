@@ -5,7 +5,7 @@ import {
   ChatSummary, 
   ChatMessage 
 } from "./types/chat";
-import { MemoryEntry, ProviderMessage, StructuredCompletionResponse, TaskConfig, TaskResult, ProviderModel } from "./types";
+import { MemoryEntry, ProviderMessage, StructuredCompletionResponse, TaskConfig } from "./types";
 import { logger } from "./utils/logger";
 import { validateRequiredParam } from "./utils/validation";
 import { convertToolParametersToSchema } from "./utils";
@@ -461,14 +461,14 @@ Based on these tool results, generate a helpful response to the user. Be natural
     }
 
     // Generate embedding for assistant response if needed
-    let assistantEmbedding: number[] | undefined = undefined;
+    let _assistantEmbedding: number[] | undefined = undefined;
     const enableEmbeddings = this.config.memory.config?.enableEmbeddings;
 
     if (enableEmbeddings && embedding) {
       try {
         // Convert response to string for embedding generation
         const responseText = typeof response === 'string' ? response : response.content;
-        assistantEmbedding = await Embedding.generateEmbedding(responseText);
+        _assistantEmbedding = await Embedding.generateEmbedding(responseText);
       } catch (error) {
         logger.warn("System", "Embedding", `Error generating embedding: ${error}`);
       }
