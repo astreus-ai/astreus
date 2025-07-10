@@ -516,7 +516,7 @@ Example format:
         const entities = JSON.parse(entityText.trim());
         logger.debug(`LLM entity extraction successful: ${Object.keys(entities).length} categories`);
         return entities;
-      } catch (parseError) {
+      } catch {
         logger.warn('Failed to parse LLM entity extraction response, falling back to simple extraction');
         return this.simpleEntityExtraction(content);
       }
@@ -641,7 +641,7 @@ ${conversationText}`;
           keyPoints: result.keyPoints || [],
           entities: result.entities || {}
         };
-      } catch (parseError) {
+      } catch {
         logger.warn('Failed to parse intelligent summary response, falling back');
         const text = messages.map(m => m.content).join(' ');
         const entities = await this.extractEntities(text);

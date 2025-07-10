@@ -11,6 +11,9 @@ export * from "./config";
 
 // Import provider types
 import { ProviderModel } from "../types/provider";
+import { AdaptiveContextManager } from "./processor";
+import { ContextCompressor } from "./compression";
+import { DEFAULT_TOKEN_BUDGET, DEFAULT_PRIORITY_WEIGHTS } from "./config";
 
 /**
  * Create an enhanced adaptive context manager with LLM integration
