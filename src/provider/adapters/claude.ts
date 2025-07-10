@@ -7,9 +7,9 @@ import {
   ClaudeModelConfig,
   StructuredCompletionResponse,
   ProviderToolCall,
-} from "../types/provider";
-import { logger, validateRequiredParam } from "../utils";
-import { DEFAULT_CLAUDE_BASE_URL, DEFAULT_CLAUDE_API_VERSION } from "../constants";
+} from "../../types/provider";
+import { logger, validateRequiredParam } from "../../utils";
+import { DEFAULT_CLAUDE_BASE_URL, DEFAULT_CLAUDE_API_VERSION } from "../config";
 
 /**
  * Create Claude configuration with defaults

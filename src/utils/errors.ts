@@ -8,4 +8,4 @@ export const ERROR_MESSAGES = {
   INVALID_VECTOR_DB: 'Invalid vector database configuration',
   INVALID_TASK: 'Invalid task configuration',
   INVALID_EMBEDDING: 'Invalid embedding configuration',
-}; 
+};

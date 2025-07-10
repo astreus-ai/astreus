@@ -5,8 +5,8 @@ import {
   ProviderMessage,
   CompletionOptions,
   OpenAIModelConfig,
-} from "../types";
-import { logger, validateRequiredParam } from "../utils";
+} from "../../types";
+import { logger, validateRequiredParam } from "../../utils";
 import fs from "fs";
 import path from "path";
 import mammoth from "mammoth";
@@ -646,7 +646,7 @@ export class OpenAIProvider implements ProviderModel {
   async analyzePDF(filePath: string, prompt?: string): Promise<{ text: string; analysis: string; pages: number }> {
     try {
       // Use our PDF parser with chunk system for RAG compatibility
-      const { parsePDF } = await import("../utils/pdf-parser");
+      const { parsePDF } = await import("../../utils/pdf-parser");
       const parseResult = await parsePDF(filePath, {
         splitStrategy: 'simple',
         chunkSize: 2000,
@@ -654,7 +654,7 @@ export class OpenAIProvider implements ProviderModel {
       });
       
       // Combine all chunks into one text
-      const text = parseResult.documents.map(doc => doc.content).join('\n\n');
+      const text = parseResult.documents.map((doc: any) => doc.content).join('\n\n');
       
       const analysisPrompt = prompt || 
         "Analyze this PDF document and provide a comprehensive summary including key points, structure, and important information.";

@@ -3,28 +3,33 @@ import {
   MemoryConfig,
   MemoryInstance,
   MemoryEntry,
-  MemoryFactory,
   SimilaritySearchResult,
-} from "./types";
-import { Embedding } from "./providers";
-import { logger } from "./utils";
-import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
-import { DEFAULT_MEMORY_SIZE } from "./constants";
+  ContextLayers,
+  CompressionStrategy,
+  CompressionResult,
+} from "../types";
+import { Embedding } from "../provider/adapters";
+import { logger } from "../utils";
+import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
+import { DEFAULT_MEMORY_SIZE } from "./config";
+import { AdaptiveContextManager, ContextCompressor } from "../context";
 
 /**
- * Memory manager implementation using database storage
+ * Memory storage implementation using database storage
  * Provides storage and retrieval of conversation history and vector embeddings
  */
-export class MemoryManager implements MemoryInstance {
+export class MemoryStorage implements MemoryInstance {
   public config: MemoryConfig;
+  public contextManager?: AdaptiveContextManager;
+  private contextManagers: Map<string, AdaptiveContextManager> = new Map();
 
   constructor(config: MemoryConfig) {
     // Validate required parameters
-    validateRequiredParam(config, "config", "MemoryManager constructor");
+    validateRequiredParam(config, "config", "MemoryStorage constructor");
     validateRequiredParams(
       config,
       ["database"],
-      "MemoryManager constructor"
+      "MemoryStorage constructor"
     );
     
     // Apply defaults for optional config parameters
@@ -32,10 +37,16 @@ export class MemoryManager implements MemoryInstance {
       ...config,
       tableName: config.tableName || "memories",
       maxEntries: config.maxEntries || DEFAULT_MEMORY_SIZE,
-      enableEmbeddings: config.enableEmbeddings || false
+      enableEmbeddings: config.enableEmbeddings || false,
+      enableAdaptiveContext: config.enableAdaptiveContext || false
     };
     
     logger.debug("Memory manager initialized");
+    
+    // Initialize adaptive context if enabled
+    if (this.config.enableAdaptiveContext) {
+      logger.debug("Adaptive context management enabled");
+    }
   }
 
   /**
@@ -45,11 +56,11 @@ export class MemoryManager implements MemoryInstance {
    */
   static async create(config: MemoryConfig): Promise<MemoryInstance> {
     // Validate required parameters
-    validateRequiredParam(config, "config", "MemoryManager.create");
+    validateRequiredParam(config, "config", "MemoryStorage.create");
     validateRequiredParams(
       config,
       ["database"],
-      "MemoryManager.create"
+      "MemoryStorage.create"
     );
     
     try {
@@ -60,7 +71,8 @@ export class MemoryManager implements MemoryInstance {
         ...config,
         tableName: config.tableName || "memories", // Use user-provided name or default
         maxEntries: config.maxEntries || DEFAULT_MEMORY_SIZE,
-        enableEmbeddings: config.enableEmbeddings || false
+        enableEmbeddings: config.enableEmbeddings || false,
+        enableAdaptiveContext: config.enableAdaptiveContext || false
       };
       
       // Use user's custom table name
@@ -96,7 +108,7 @@ export class MemoryManager implements MemoryInstance {
       }
 
       logger.info(`Memory created with custom table: ${tableName}`);
-      return new MemoryManager(fullConfig);
+      return new MemoryStorage(fullConfig);
     } catch (error) {
       logger.error("Error creating memory instance:", error);
       throw error;
@@ -177,6 +189,15 @@ export class MemoryManager implements MemoryInstance {
       await database.getTable(tableName!).insert(dbEntry);
       logger.debug(`Added memory entry ${id}${entryToInsert.embedding ? ' with embedding' : ''} with role: ${entryToInsert.role}`);
 
+      // Update adaptive context if enabled
+      if (this.config.enableAdaptiveContext) {
+        await this.updateContextLayersForSession(entryToInsert.sessionId, {
+          id,
+          timestamp,
+          ...entryToInsert
+        } as MemoryEntry);
+      }
+      
       return id;
     } catch (error) {
       logger.error("Error adding memory entry:", error);
@@ -655,21 +676,180 @@ export class MemoryManager implements MemoryInstance {
       throw error;
     }
   }
-}
-
-/**
- * Factory function to create a new memory instance
- * @param config Configuration for the memory instance
- * @returns Promise that resolves to the new memory instance
- */
-export const createMemory: MemoryFactory = async (config: MemoryConfig) => {
-  // Validate required parameters
-  validateRequiredParam(config, "config", "createMemory");
-  validateRequiredParams(
-    config,
-    ["database"],
-    "createMemory"
-  );
   
-  return MemoryManager.create(config);
-};
+  /**
+   * Get adaptive context for a session using hierarchical memory
+   */
+  async getAdaptiveContext(sessionId: string, maxTokens: number): Promise<ContextLayers> {
+    validateRequiredParam(sessionId, "sessionId", "getAdaptiveContext");
+    
+    try {
+      // Get or create context manager for this session
+      let contextManager = this.contextManagers.get(sessionId);
+      
+      if (!contextManager) {
+        contextManager = new AdaptiveContextManager(
+          sessionId,
+          maxTokens,
+          this.config.tokenBudget,
+          this.config.priorityWeights
+        );
+        
+        // Initialize with existing data
+        await this.initializeContextManager(contextManager, sessionId);
+        this.contextManagers.set(sessionId, contextManager);
+      }
+      
+      return contextManager.layers;
+    } catch (error) {
+      logger.error(`Error getting adaptive context for session ${sessionId}:`, error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Update context layers based on new interaction
+   */
+  async updateContextLayers(sessionId: string, newEntry: MemoryEntry): Promise<void> {
+    await this.updateContextLayersForSession(sessionId, newEntry);
+  }
+  
+  /**
+   * Compress context layers to optimize token usage
+   */
+  async compressContext(sessionId: string, strategy: CompressionStrategy): Promise<CompressionResult> {
+    validateRequiredParam(sessionId, "sessionId", "compressContext");
+    
+    try {
+      const contextManager = this.contextManagers.get(sessionId);
+      if (!contextManager) {
+        throw new Error(`No context manager found for session ${sessionId}`);
+      }
+      
+      // Get current immediate messages for compression
+      const messages = contextManager.layers.immediate.messages;
+      
+      const result = await ContextCompressor.compress(
+        messages,
+        strategy,
+        this.config.tokenBudget?.immediate || 1600
+      );
+      
+      logger.debug(`Context compression result for session ${sessionId}:`, result);
+      
+      return result;
+    } catch (error) {
+      logger.error(`Error compressing context for session ${sessionId}:`, error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Initialize context manager with existing session data
+   */
+  private async initializeContextManager(
+    contextManager: AdaptiveContextManager,
+    sessionId: string
+  ): Promise<void> {
+    try {
+      // Get recent messages for immediate layer
+      const recentMessages = await this.getBySession(sessionId, 20);
+      
+      // Add to immediate layer
+      recentMessages.forEach(message => {
+        contextManager.addToImmediate(message);
+      });
+      
+      // TODO: Load summarized and persistent data from database
+      // For now, we'll leave them empty and let them be populated over time
+      
+      logger.debug(`Context manager initialized for session ${sessionId} with ${recentMessages.length} messages`);
+    } catch (error) {
+      logger.error(`Error initializing context manager for session ${sessionId}:`, error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Update context layers for a session
+   */
+  private async updateContextLayersForSession(
+    sessionId: string,
+    newEntry: MemoryEntry
+  ): Promise<void> {
+    try {
+      let contextManager = this.contextManagers.get(sessionId);
+      
+      if (!contextManager) {
+        // Create new context manager if it doesn't exist
+        contextManager = new AdaptiveContextManager(
+          sessionId,
+          this.config.tokenBudget?.total || 4000,
+          this.config.tokenBudget,
+          this.config.priorityWeights
+        );
+        
+        await this.initializeContextManager(contextManager, sessionId);
+        this.contextManagers.set(sessionId, contextManager);
+      }
+      
+      // Add new entry to immediate layer
+      contextManager.addToImmediate(newEntry);
+      
+      // Optimize token distribution
+      contextManager.optimizeTokenDistribution();
+      
+      logger.debug(`Context layers updated for session ${sessionId}`);
+    } catch (error) {
+      logger.error(`Error updating context layers for session ${sessionId}:`, error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Get formatted context for a session
+   */
+  async getFormattedContext(sessionId: string, maxTokens: number = 4000): Promise<string> {
+    validateRequiredParam(sessionId, "sessionId", "getFormattedContext");
+    
+    try {
+      const _contextLayers = await this.getAdaptiveContext(sessionId, maxTokens);
+      const contextManager = this.contextManagers.get(sessionId);
+      
+      if (!contextManager) {
+        throw new Error(`No context manager found for session ${sessionId}`);
+      }
+      
+      return contextManager.getFormattedContext();
+    } catch (error) {
+      logger.error(`Error getting formatted context for session ${sessionId}:`, error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Clean up context managers for inactive sessions
+   */
+  cleanupContextManagers(maxAge: number = 3600000): void { // 1 hour default
+    const now = new Date();
+    const sessionsToRemove: string[] = [];
+    
+    for (const [sessionId, contextManager] of this.contextManagers.entries()) {
+      const lastActivity = contextManager.layers.immediate.lastUpdated;
+      const age = now.getTime() - lastActivity.getTime();
+      
+      if (age > maxAge) {
+        sessionsToRemove.push(sessionId);
+      }
+    }
+    
+    sessionsToRemove.forEach(sessionId => {
+      this.contextManagers.delete(sessionId);
+      logger.debug(`Cleaned up context manager for session ${sessionId}`);
+    });
+    
+    if (sessionsToRemove.length > 0) {
+      logger.debug(`Cleaned up ${sessionsToRemove.length} inactive context managers`);
+    }
+  }
+}

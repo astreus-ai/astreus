@@ -5,9 +5,9 @@ import {
   ProviderModel,
   CompletionOptions,
   StructuredCompletionResponse
-} from "../types/provider";
-import { DEFAULT_OLLAMA_BASE_URL } from "../constants";
-import { logger } from "../utils/logger";
+} from "../../types/provider";
+import { DEFAULT_OLLAMA_BASE_URL } from "../config";
+import { logger } from "../../utils/logger";
 
 /**
  * Create Ollama configuration helper
@@ -111,7 +111,7 @@ export class OllamaProvider implements ProviderModel {
     
     // Add tools if provided
     if (options?.tools && options.tools.length > 0 && options.toolCalling) {
-      requestOptions.tools = options.tools.map(tool => ({
+      requestOptions.tools = options.tools.map((tool: any) => ({
         type: "function",
         function: {
           name: tool.name,

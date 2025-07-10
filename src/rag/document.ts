@@ -12,7 +12,7 @@ import { validateRequiredParam, validateRequiredParams } from "../utils/validati
 import { 
   DEFAULT_MAX_RESULTS,
   DEFAULT_VECTOR_SIMILARITY_THRESHOLD
-} from "../constants";
+} from "./config";
 
 /**
  * Document-based RAG implementation
@@ -194,7 +194,7 @@ export class DocumentRAG implements DocumentRAGInstance {
         // Try memory fallback if available
         if (this.config.memory && this.config.memory.searchByEmbedding) {
           try {
-            const { Embedding } = await import("../providers");
+            const { Embedding } = await import("../provider/adapters");
             embedding = await Embedding.generateEmbedding(text.substring(0, 8000));
             
             // Cache the fallback result too
@@ -208,7 +208,7 @@ export class DocumentRAG implements DocumentRAGInstance {
       }
     } else if (this.config.memory && this.config.memory.searchByEmbedding) {
       try {
-        const { Embedding } = await import("../providers");
+        const { Embedding } = await import("../provider/adapters");
         embedding = await Embedding.generateEmbedding(text.substring(0, 8000));
         
         // Cache the result
@@ -561,15 +561,15 @@ export class DocumentRAG implements DocumentRAGInstance {
               const detectedLanguage = await this.detectLanguageWithLLM(metadata.language);
               return detectedLanguage;
             }
-          } catch (_parseError) {
+          } catch {
           }
         }
         
         return 'en';
-      } catch (_error) {
+      } catch {
         return 'en';
       }
-    } catch (_error) {
+    } catch {
       return 'en';
     }
   }
@@ -633,7 +633,7 @@ Return ONLY the 2-letter code, nothing else.`
       const finalLanguageCode = cleanLanguageCode.length === 2 ? cleanLanguageCode : 'en';
       
       return finalLanguageCode;
-    } catch (_error) {
+    } catch {
       return 'en';
     }
   }
@@ -707,7 +707,7 @@ LONG: [long version]`;
 
       return variations;
 
-    } catch (_error) {
+    } catch {
       return [query];
     }
   }
@@ -754,7 +754,7 @@ LONG: [long version]`;
       const cleanTranslation = translation.replace(/^["']|["']$/g, '').trim();
       
       return cleanTranslation;
-    } catch (_error) {
+    } catch {
       return query;
     }
   }

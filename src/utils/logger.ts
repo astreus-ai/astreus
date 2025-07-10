@@ -114,6 +114,7 @@ function log(
     formattedMessage = colorFn(toString(agentNameOrMessage));
   }
 
+  // eslint-disable-next-line no-console
   console.log(formattedMessage);
 }
 

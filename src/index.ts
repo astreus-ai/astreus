@@ -1,13 +1,13 @@
 // Astreus - AI Agent Framework
 
 import { logger } from './utils/logger';
-import { createAgent } from './agent';
-import { createProvider } from './provider';
-import { createMemory } from './memory';
-import { createDatabase } from './database';
-import { createRAG, parsePDF } from './rag';
+import { createAgent } from './agent/';
+import { createProvider } from './provider/';
+import { createMemory } from './memory/';
+import { createDatabase } from './database/';
+import { createRAG, parsePDF } from './rag/';
 import { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv } from './rag/vector-db';
-import { createChat } from './chat';
+import { createChat } from './chat/';
 
 export { createAgent };
 export { createProvider };
@@ -20,8 +20,17 @@ export { logger };
 export { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv };
 
 export * from './types';
-export * from "./constants";
+// Re-export configurations from each module
+export * from "./agent/config";
+export * from "./context/config";
+export * from "./database/config";
+export * from "./memory/config";
+export * from "./provider/config";
+export * from "./rag/config";
+export * from "./tasks/config";
+export * from "./utils/errors";
 export * from "./utils";
-export * from "./tasks";
+export * from "./tasks/";
+export * from "./context/";
 export { validateRequiredParam, validateRequiredParams } from "./utils/validation";
-export { PluginManager } from "./plugin";
+export { PluginRegistry } from "./plugin/";

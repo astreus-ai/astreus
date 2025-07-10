@@ -1,13 +1,13 @@
-import { PluginConfig, PluginInstance, Plugin } from "./types";
-import { logger } from "./utils";
-import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
+import { PluginConfig, PluginInstance, Plugin } from "../types";
+import { logger } from "../utils";
+import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
 
 /**
- * Comprehensive Plugin Manager that handles all plugin-related functionality
+ * Comprehensive Plugin Registry that handles all plugin-related functionality
  * This class provides both instance-level management for specific agents
  * and static global registry for framework-wide plugin management.
  */
-export class PluginManager implements PluginInstance {
+export class PluginRegistry implements PluginInstance {
   public config: PluginConfig;
   private tools: Map<string, Plugin>;
 
@@ -16,11 +16,11 @@ export class PluginManager implements PluginInstance {
 
   constructor(config: PluginConfig) {
     // Validate required parameters
-    validateRequiredParam(config, "config", "PluginManager constructor");
+    validateRequiredParam(config, "config", "PluginRegistry constructor");
     validateRequiredParams(
       config,
       ["name", "tools"],
-      "PluginManager constructor"
+      "PluginRegistry constructor"
     );
     
     // Apply defaults for optional fields
@@ -91,7 +91,7 @@ export class PluginManager implements PluginInstance {
       this.tools.set(tool.name, tool);
 
       // Also register with the global registry
-      PluginManager.register(tool);
+      PluginRegistry.register(tool);
       
       logger.debug(`Tool "${tool.name}" registered successfully`);
     } catch (error) {
@@ -114,7 +114,7 @@ export class PluginManager implements PluginInstance {
     
     // Also remove from global registry if it was removed from instance
     if (removed) {
-      PluginManager.unregister(name);
+      PluginRegistry.unregister(name);
       logger.debug(`Tool "${name}" removed`);
     }
 
@@ -150,7 +150,7 @@ export class PluginManager implements PluginInstance {
    */
   static register(plugin: Plugin): void {
     // Validate required parameters
-    validateRequiredParam(plugin, "plugin", "PluginManager.register");
+    validateRequiredParam(plugin, "plugin", "PluginRegistry.register");
     
     try {
       // Check that plugin has a name and execute method
@@ -179,7 +179,7 @@ export class PluginManager implements PluginInstance {
    */
   static unregister(name: string): boolean {
     // Validate required parameters
-    validateRequiredParam(name, "name", "PluginManager.unregister");
+    validateRequiredParam(name, "name", "PluginRegistry.unregister");
     
     const result = this.registry.delete(name);
     if (result) {
@@ -195,7 +195,7 @@ export class PluginManager implements PluginInstance {
    */
   static get(name: string): Plugin | undefined {
     // Validate required parameters
-    validateRequiredParam(name, "name", "PluginManager.get");
+    validateRequiredParam(name, "name", "PluginRegistry.get");
     
     return this.registry.get(name);
   }
@@ -257,7 +257,7 @@ export class PluginManager implements PluginInstance {
    */
   static has(name: string): boolean {
     // Validate required parameters
-    validateRequiredParam(name, "name", "PluginManager.has");
+    validateRequiredParam(name, "name", "PluginRegistry.has");
     
     return this.registry.has(name);
   }
@@ -278,7 +278,7 @@ export class PluginManager implements PluginInstance {
    */
   static async load(pluginOrPath: string | Plugin): Promise<void> {
     // Validate required parameters
-    validateRequiredParam(pluginOrPath, "pluginOrPath", "PluginManager.load");
+    validateRequiredParam(pluginOrPath, "pluginOrPath", "PluginRegistry.load");
     
     try {
       if (typeof pluginOrPath === "string") {
@@ -321,7 +321,7 @@ export class PluginManager implements PluginInstance {
    */
   static async loadMany(plugins: Array<string | Plugin>): Promise<void> {
     // Validate required parameters
-    validateRequiredParam(plugins, "plugins", "PluginManager.loadMany");
+    validateRequiredParam(plugins, "plugins", "PluginRegistry.loadMany");
     
     try {
       await Promise.all(plugins.map((plugin) => this.load(plugin)));
@@ -333,19 +333,19 @@ export class PluginManager implements PluginInstance {
   }
 
   /**
-   * Create a new PluginManager instance
+   * Create a new PluginRegistry instance
    * @param config Configuration for the plugin manager
-   * @returns New PluginManager instance
+   * @returns New PluginRegistry instance
    */
   static create(config: PluginConfig): PluginInstance {
     // Validate required parameters
-    validateRequiredParam(config, "config", "PluginManager.create");
+    validateRequiredParam(config, "config", "PluginRegistry.create");
     validateRequiredParams(
       config,
       ["name", "tools"],
-      "PluginManager.create"
+      "PluginRegistry.create"
     );
     
-    return new PluginManager(config);
+    return new PluginRegistry(config);
   }
 }

@@ -66,7 +66,7 @@ export interface ChatSummary {
   updatedAt: Date;
 }
 
-// Chat configuration
+// Chat configuration with adaptive context support
 export interface ChatConfig {
   /** Required: Database instance for storing chat data */
   database: DatabaseInstance;
@@ -78,6 +78,13 @@ export interface ChatConfig {
   maxChats?: number;
   /** Optional: Auto-generate titles for chats, defaults to true */
   autoGenerateTitles?: boolean;
+  
+  /** Optional: Enable adaptive context window management */
+  enableAdaptiveContext?: boolean;
+  /** Optional: Maximum tokens for context window */
+  maxContextTokens?: number;
+  /** Optional: Auto-compress context when token limit is reached */
+  autoCompressContext?: boolean;
 }
 
 // Chat instance interface
@@ -112,6 +119,11 @@ export interface ChatInstance {
     maxTokens?: number;
     stream?: boolean;
     onChunk?: (chunk: string) => void;
+    
+    // Adaptive context options
+    useAdaptiveContext?: boolean;
+    contextTokens?: number;
+    compressionStrategy?: string; // CompressionStrategy
   }): Promise<string>;
   
   getChat(chatId: string): Promise<ChatMetadata | null>;
@@ -179,7 +191,18 @@ export interface ChatInstance {
     maxTokens?: number;
     stream?: boolean;
     onChunk?: (chunk: string) => void;
+    
+    // Adaptive context options
+    useAdaptiveContext?: boolean;
+    contextTokens?: number;
+    compressionStrategy?: string; // CompressionStrategy
   }): Promise<string>;
+  
+  // Adaptive context methods
+  getAdaptiveContext?(chatId: string, maxTokens?: number): Promise<any>; // ContextLayers
+  updateContextLayers?(chatId: string, newMessage: ChatMessage): Promise<void>;
+  compressContext?(chatId: string, strategy?: string): Promise<any>; // CompressionResult
+  getFormattedContext?(chatId: string, maxTokens?: number): Promise<string>;
 }
 
 // Chat factory function type

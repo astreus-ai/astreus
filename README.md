@@ -2,29 +2,44 @@
 
 <h1 align="center">Astreus</h1>
 
-An AI Agent Framework designed to help you easily build, deploy, and manage intelligent conversational agents powered by large language models (LLMs).
+An AI Agent Framework designed to help you easily build, deploy, and manage intelligent conversational agents powered by large language models (LLMs) with advanced memory management, task orchestration, and plugin system.
 
 ## 🌟 Features
 
 - **Unified Agent API**: Create and manage AI agents with a consistent interface 
-- **Multi-Provider Support**: Works with OpenAI, Ollama, Claude (Anthropic), and Gemini (Google) models out of the box
-- **Memory Management**: Built-in conversation history with vector search capabilities
-- **Chat Management**: Advanced chat system with metadata, search, and organization
-- **Task Orchestration**: Break complex requests into manageable sub-tasks with dependency management
+- **Multi-Provider Client**: Works with OpenAI, Ollama, Claude (Anthropic), and Gemini (Google) models out of the box
+- **Memory Storage**: Built-in conversation history with hierarchical memory layers and vector search capabilities
+- **Chat Service**: Advanced chat system with metadata, search, and organization
+- **Task Execution**: Break complex requests into manageable sub-tasks with dependency management and intelligent orchestration
 - **Plugin System**: Extend agent capabilities with custom tools and integrations
 - **Persistence Layer**: Automatic storage using SQLite or PostgreSQL
 - **Advanced RAG Support**: Vector-based and document-based retrieval with external vector database support
 - **PDF Processing**: Built-in PDF parsing and document processing capabilities
-- **Media Analysis**: AI-powered image, document, and file analysis capabilities
-- **Intent Recognition**: Intelligent tool selection using LLM-powered intent detection
+- **Media Analysis**: AI-powered image, document, and file analysis capabilities with context processing
+- **Intent Recognition**: Intelligent tool selection using LLM-powered intent detection and context processing
 - **Embeddings Support**: Semantic search across conversations and documents
 - **Vector Database Integration**: Support for PostgreSQL with pgvector, Qdrant, Pinecone, and more
-- **Enhanced Database Management**: Flexible table naming, automatic schema creation, and migration support
+- **Enhanced Database Management**: Flexible table naming, automatic schema creation, and migration support with advanced memory storage
 - **Structured Responses**: Built-in support for structured completion responses
 - **Type Safety**: Fully typed with TypeScript for better development experience
 - **Professional Logging**: Structured logging system with color-coded output and consistent formatting
 - **Flexible Configuration**: Enhanced parameter validation, smart defaults, and environment-based setup
-- **Plugin Manager**: Advanced plugin management with automatic tool registration
+- **Plugin Registry**: Advanced plugin management with automatic tool registration and centralized registry
+- **Adaptive Context Management**: Hierarchical memory layers with intelligent token budgeting and compression
+- **Context Processor**: Advanced context window management with priority-based retention and automatic compression
+
+## 🏗️ Architecture
+
+Astreus follows a modern, semantic architecture with clearly defined components:
+
+- **Memory Storage**: Hierarchical memory system with immediate, summarized, and persistent layers
+- **Chat Service**: Dedicated chat session management with metadata and search capabilities  
+- **Task Executor**: Intelligent task orchestration with dependency management
+- **Plugin Registry**: Centralized plugin management with automatic tool registration
+- **Provider Client**: Unified interface for multiple AI model providers
+- **Context Processor**: Adaptive context window management with token budgeting
+
+Each component is designed with semantic naming to clearly indicate its purpose and responsibility within the framework.
 
 ## 🚀 Getting Started
 
@@ -267,15 +282,142 @@ The chat system provides:
 - **Statistics**: Get insights about chat usage
 - **Memory Integration**: Chat IDs are compatible with session IDs in memory
 
+### Adaptive Context Management
+
+Astreus includes an advanced adaptive context management system that intelligently manages conversation context across multiple hierarchical layers. The system automatically optimizes context retention based on importance, recency, and token budgets.
+
+#### Automatic Context Management (Recommended)
+
+The easiest way to use adaptive context is through the memory system:
+
+```typescript
+import { createMemory, createAgent } from '@astreus-ai/astreus';
+
+// Enable adaptive context management
+const memory = await createMemory({
+  database: db,
+  tableName: "memories",
+  enableAdaptiveContext: true,  // Enable adaptive context
+  maxEntries: 100,
+  // Optional: Custom token budget
+  tokenBudget: {
+    total: 4000,
+    immediate: 1600,    // 40% - recent messages
+    summarized: 1400,   // 35% - conversation summaries
+    persistent: 1000    // 25% - important facts
+  }
+});
+
+// Create agent with adaptive context
+const agent = await createAgent({
+  name: 'SmartAgent',
+  provider: provider,
+  memory: memory,  // Context management is automatic
+  database: db,
+  systemPrompt: 'You are an intelligent assistant with advanced memory.'
+});
+
+// Context is automatically managed during conversations
+const response = await agent.chat("Remember that I prefer concise answers");
+const response2 = await agent.chat("What did I just tell you about my preferences?");
+// The agent will remember preferences even in long conversations
+```
+
+#### Manual Context Control
+
+For advanced use cases, you can manually control the adaptive context:
+
+```typescript
+import { AdaptiveContextManager, DEFAULT_TOKEN_BUDGET, DEFAULT_PRIORITY_WEIGHTS, CompressionStrategy } from '@astreus-ai/astreus';
+
+// Get adaptive context for a session
+const contextLayers = await memory.getAdaptiveContext("session-1", 4000);
+console.log("Current context layers:", contextLayers);
+
+// Update context with new information
+await memory.updateContextLayers("session-1", {
+  role: "user",
+  content: "Important: I'm a software engineer",
+  timestamp: new Date()
+});
+
+// Compress context when needed
+const compressionResult = await memory.compressContext("session-1", CompressionStrategy.SUMMARIZE);
+console.log("Compression result:", compressionResult);
+
+// Get formatted context for display
+const formattedContext = await memory.getFormattedContext("session-1", 4000);
+console.log("Formatted context:", formattedContext);
+```
+
+#### Custom Configuration
+
+You can customize the adaptive context behavior:
+
+```typescript
+import { createMemory } from '@astreus-ai/astreus';
+
+const memory = await createMemory({
+  database: db,
+  enableAdaptiveContext: true,
+  // Custom token budget allocation
+  tokenBudget: {
+    total: 6000,
+    immediate: 3000,    // 50% for recent messages
+    summarized: 2000,   // 33% for summaries
+    persistent: 1000    // 17% for persistent data
+  },
+  // Custom priority weights
+  priorityWeights: {
+    recency: 0.4,       // Prioritize recent messages
+    frequency: 0.1,     // Less weight to frequency
+    importance: 0.4,    // High importance weight
+    userInteraction: 0.1,
+    sentiment: 0.0      // Ignore sentiment
+  }
+});
+```
+
+#### Through Chat Service
+
+The chat service provides convenient access to adaptive context:
+
+```typescript
+import { createChat } from '@astreus-ai/astreus';
+
+const chat = await createChat({
+  database: db,
+  memory: memory,
+  tableName: 'chats',
+  enableAdaptiveContext: true  // Enable for chat sessions
+});
+
+// Get adaptive context for a chat
+const adaptiveContext = await chat.getAdaptiveContext("chat-1");
+
+// Get formatted context for display
+const formattedContext = await chat.getFormattedContext("chat-1", 4000);
+```
+
+The adaptive context system provides:
+- **Hierarchical Memory**: Three-layer architecture (immediate, summarized, persistent)
+- **Token Budgeting**: Intelligent allocation of context window space
+- **Priority-Based Retention**: Important content stays longer based on multiple factors
+- **Automatic Compression**: Context is compressed when token limits are reached
+- **Compression Strategies**: SUMMARIZE, KEYWORD_EXTRACT, SEMANTIC_CLUSTER, TEMPORAL_COMPRESS
+- **Session Isolation**: Each session has its own context manager
+- **Seamless Integration**: Works transparently with all other components
+- **Cleanup Management**: Automatic cleanup of inactive context managers
+
 ### Using the Task System
 
-Creating and running tasks is straightforward:
+Creating and running tasks is straightforward with the new task executor:
 
 ```typescript
 import { createTaskManager } from '@astreus-ai/astreus';
 
-// Create a task manager
-const taskManager = createTaskManager();
+// Create a task executor (TaskManager is an alias for backward compatibility)
+const taskExecutor = createTaskManager();
 
 // Create a data processing task
 const analysisTask = agent.createTask({
@@ -360,24 +502,24 @@ The logging system features:
 
 ### Plugin Management
 
-Astreus includes an advanced plugin system with automatic tool registration:
+Astreus includes an advanced plugin system with automatic tool registration and centralized registry:
 
 ```typescript
-import { PluginManager } from '@astreus-ai/astreus';
+import { PluginRegistry } from '@astreus-ai/astreus';
 
-// Create plugin manager
-const pluginManager = new PluginManager();
+// Create plugin registry
+const pluginRegistry = new PluginRegistry();
 
 // Load plugins
-await pluginManager.loadPlugin(myCustomPlugin);
+await pluginRegistry.loadPlugin(myCustomPlugin);
 
-// Create agent with plugin manager
+// Create agent with plugin registry
 const agent = await createAgent({
   name: 'PluginAgent',
   provider: provider,
   memory: memory,
   database: db,
-  pluginManager: pluginManager,
+  pluginRegistry: pluginRegistry,
   systemPrompt: 'You are an assistant with extended capabilities.'
 });
 
@@ -515,16 +657,19 @@ import {
   createAgent, createProvider, createMemory, createDatabase, createRAG, createChat,
   
   // Task system
-  createTaskManager, createTask, createTaskSync, TaskManager, Task,
+  createTaskManager, createTask, createTaskSync, TaskExecutor, Task,
   
   // RAG utilities
   parsePDF, parseDirectoryOfPDFs, createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv,
   
   // Plugin system
-  PluginManager,
+  PluginRegistry,
   
-  // Media analysis
+  // Media analysis and context processing
   analyzeMedia, analyzeImage, analyzeDocument, analyzeWithContext,
+  
+  // Context management
+  AdaptiveContextManager, DEFAULT_TOKEN_BUDGET, DEFAULT_PRIORITY_WEIGHTS,
   
   // Intent recognition
   IntentRecognizer,

@@ -7,9 +7,9 @@ import {
   GeminiModelConfig,
   StructuredCompletionResponse,
   ProviderToolCall,
-} from "../types/provider";
-import { logger, validateRequiredParam } from "../utils";
-import { DEFAULT_GEMINI_BASE_URL } from "../constants";
+} from "../../types/provider";
+import { logger, validateRequiredParam } from "../../utils";
+import { DEFAULT_GEMINI_BASE_URL } from "../config";
 
 /**
  * Create Gemini configuration with defaults
