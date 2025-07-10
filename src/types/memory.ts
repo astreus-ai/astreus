@@ -237,14 +237,14 @@ export interface ContextWindowManager {
   // Token budgeting
   allocateTokens(layer: keyof ContextLayers, tokens: number): boolean;
   getAvailableTokens(): number;
-  optimizeTokenDistribution(): void;
+  optimizeTokenDistribution(): void | Promise<void>;
   
-  // Priority-based retention
-  prioritizeContent(entries: MemoryEntry[]): MemoryEntry[];
-  calculatePriority(entry: MemoryEntry): number;
+  // Priority-based retention (now supports async for LLM-based analysis)
+  prioritizeContent(entries: MemoryEntry[]): MemoryEntry[] | Promise<MemoryEntry[]>;
+  calculatePriority(entry: MemoryEntry, now?: Date): number | Promise<number>;
   
-  // Context compression
-  compressContext(layer: keyof ContextLayers): void;
+  // Context compression (now supports async for LLM-based compression)
+  compressContext(layer: keyof ContextLayers): void | Promise<void>;
   expandContext(layer: keyof ContextLayers): void;
 }
 

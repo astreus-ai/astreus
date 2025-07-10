@@ -794,10 +794,10 @@ export class MemoryStorage implements MemoryInstance {
       }
       
       // Add new entry to immediate layer
-      contextManager.addToImmediate(newEntry);
+      await contextManager.addToImmediate(newEntry);
       
       // Optimize token distribution
-      contextManager.optimizeTokenDistribution();
+      await contextManager.optimizeTokenDistribution();
       
       logger.debug(`Context layers updated for session ${sessionId}`);
     } catch (error) {
