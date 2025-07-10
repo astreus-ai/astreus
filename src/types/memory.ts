@@ -28,7 +28,7 @@ export interface SimilaritySearchResult extends MemoryEntry {
   similarity: number;
 }
 
-// Memory configuration interface
+// Enhanced memory configuration interface
 export interface MemoryConfig {
   /** Required: Database instance for storing memories */
   database: DatabaseInstance;
@@ -38,12 +38,24 @@ export interface MemoryConfig {
   maxEntries?: number;
   /** Optional: Whether to enable embedding functionality for semantic search, defaults to false */
   enableEmbeddings?: boolean;
+  
+  /** Optional: Enable adaptive context window management */
+  enableAdaptiveContext?: boolean;
+  /** Optional: Token budget configuration */
+  tokenBudget?: TokenBudgetConfig;
+  /** Optional: Priority weights for content retention */
+  priorityWeights?: PriorityWeights;
+  /** Optional: Default compression strategy */
+  defaultCompressionStrategy?: CompressionStrategy;
 }
 
-// Memory instance interface
+// Enhanced memory instance interface with hierarchical support
 export interface MemoryInstance {
   /** Memory configuration */
   config: MemoryConfig;
+  
+  /** Context window manager for adaptive memory */
+  contextManager?: ContextWindowManager;
   
   /**
    * Add a new memory entry
@@ -149,6 +161,125 @@ export interface MemoryInstance {
     lastActivity: Date;
     metadata?: Record<string, unknown>;
   }[]>;
+  
+  /**
+   * Get adaptive context for a session using hierarchical memory
+   * @param sessionId The session ID to get context for
+   * @param maxTokens Maximum tokens to use for context
+   * @returns Promise resolving to context layers
+   */
+  getAdaptiveContext?(sessionId: string, maxTokens: number): Promise<ContextLayers>;
+  
+  /**
+   * Update context layers based on new interaction
+   * @param sessionId The session ID
+   * @param newEntry The new memory entry
+   * @returns Promise that resolves when context is updated
+   */
+  updateContextLayers?(sessionId: string, newEntry: MemoryEntry): Promise<void>;
+  
+  /**
+   * Compress context layers to optimize token usage
+   * @param sessionId The session ID
+   * @param strategy The compression strategy to use
+   * @returns Promise resolving to compression result
+   */
+  compressContext?(sessionId: string, strategy: CompressionStrategy): Promise<CompressionResult>;
+  
+  /**
+   * Get formatted context for a session
+   * @param sessionId The session ID
+   * @param maxTokens Maximum tokens to use
+   * @returns Promise resolving to formatted context string
+   */
+  getFormattedContext?(sessionId: string, maxTokens?: number): Promise<string>;
+}
+
+// Context layers for hierarchical memory system
+export interface ContextLayers {
+  immediate: RecentMessages;    // Last 5-10 messages
+  summarized: ConversationSummary;  // Intelligent summarization
+  persistent: LongTermMemory;   // Persistent knowledge store
+}
+
+// Recent messages context
+export interface RecentMessages {
+  messages: MemoryEntry[];
+  tokenCount: number;
+  lastUpdated: Date;
+}
+
+// Conversation summary context
+export interface ConversationSummary {
+  summary: string;
+  keyPoints: string[];
+  entities: Record<string, any>;
+  tokenCount: number;
+  lastUpdated: Date;
+  sourceMessageIds: string[];
+}
+
+// Long-term memory context
+export interface LongTermMemory {
+  importantFacts: string[];
+  userPreferences: Record<string, any>;
+  conversationHistory: string[];
+  tokenCount: number;
+  lastUpdated: Date;
+}
+
+// Adaptive context window management
+export interface ContextWindowManager {
+  maxTokens: number;
+  currentTokens: number;
+  layers: ContextLayers;
+  
+  // Token budgeting
+  allocateTokens(layer: keyof ContextLayers, tokens: number): boolean;
+  getAvailableTokens(): number;
+  optimizeTokenDistribution(): void;
+  
+  // Priority-based retention
+  prioritizeContent(entries: MemoryEntry[]): MemoryEntry[];
+  calculatePriority(entry: MemoryEntry): number;
+  
+  // Context compression
+  compressContext(layer: keyof ContextLayers): void;
+  expandContext(layer: keyof ContextLayers): void;
+}
+
+// Token budget configuration
+export interface TokenBudgetConfig {
+  total: number;
+  immediate: number;    // 40% - recent messages
+  summarized: number;   // 35% - summarized conversations
+  persistent: number;   // 25% - persistent information
+}
+
+// Priority weights for content retention
+export interface PriorityWeights {
+  recency: number;      // Recent messages
+  frequency: number;    // Frequently repeated topics
+  importance: number;   // Important information (names, preferences, etc.)
+  userInteraction: number; // User interaction level
+  sentiment: number;    // Emotional intensity
+}
+
+// Context compression strategies
+export enum CompressionStrategy {
+  SUMMARIZE = 'summarize',
+  KEYWORD_EXTRACT = 'keyword_extract',
+  SEMANTIC_CLUSTER = 'semantic_cluster',
+  TEMPORAL_COMPRESS = 'temporal_compress'
+}
+
+// Compression result
+export interface CompressionResult {
+  originalTokens: number;
+  compressedTokens: number;
+  compressionRatio: number;
+  strategy: CompressionStrategy;
+  lossEstimate: number; // 0-1 scale
 }
 
 // Memory factory function type

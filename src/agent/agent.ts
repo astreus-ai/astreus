@@ -2,7 +2,6 @@ import { v4 as uuidv4 } from "uuid";
 import {
   AgentConfig,
   AgentInstance,
-  AgentFactory,
   ProviderModel,
   ProviderInstance,
   MemoryInstance,
@@ -13,18 +12,17 @@ import {
   ChatInstance,
   ChatMetadata,
   ChatSummary,
-} from "./types";
-import { logger } from "./utils";
-import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
+} from "../types";
+import { logger } from "../utils";
+import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
 import { 
   DEFAULT_AGENT_NAME
-} from "./constants";
-import { createDatabase } from "./database";
-import { PluginManager } from "./plugin";
-import { analyzeMedia, analyzeImage, analyzeDocument, analyzeWithContext } from "./utils/analyze";
+} from "./config";
+import { PluginRegistry } from "../plugin/";
+import { analyzeMedia, analyzeImage, analyzeDocument, analyzeWithContext } from "../utils/analyze";
 
 // Agent implementation
-class Agent implements AgentInstance {
+export class Agent implements AgentInstance {
   public id: string;
   public config: AgentConfig & { name: string };
   private memory: MemoryInstance;
@@ -126,7 +124,7 @@ class Agent implements AgentInstance {
               if (tool && tool.name) {
                 this.tools.set(tool.name, tool);
                 // Also register with the global registry
-                PluginManager.register(tool);
+                PluginRegistry.register(tool);
                 logger.debug(this.config.name, "Plugin", `Added tool: ${tool.name}`);
               }
             });
@@ -138,7 +136,7 @@ class Agent implements AgentInstance {
           // This is already a tool/plugin, register it directly
           const toolPlugin = plugin as Plugin;
           this.tools.set(toolPlugin.name, toolPlugin);
-          PluginManager.register(toolPlugin);
+          PluginRegistry.register(toolPlugin);
           logger.debug(this.config.name, "Plugin", `Added direct tool: ${toolPlugin.name}`);
         }
       }
@@ -147,8 +145,6 @@ class Agent implements AgentInstance {
     // Log final tool count
     logger.success(this.config.name, "Agent", `Initialized with ${this.tools.size} tools total`);
   }
-
-
 
   // Instance access methods
   getModel(): ProviderModel {
@@ -553,93 +549,4 @@ class Agent implements AgentInstance {
       chat: this.chat.bind(this)
     });
   }
-
-
 }
-
-// Agent factory function
-export const createAgent: AgentFactory = async (config: AgentConfig) => {
-  // Validate required parameters
-  validateRequiredParam(config, "config", "createAgent");
-  validateRequiredParams(
-    config,
-    ["memory"],
-    "createAgent"
-  );
-  
-  logger.info("System", "AgentFactory", `Creating new agent: ${config.name || DEFAULT_AGENT_NAME}`);
-  
-  // Ensure either model or provider is specified
-  if (!config.model && !config.provider) {
-    logger.error("System", "AgentFactory", "Either 'model' or 'provider' must be specified in agent config");
-    throw new Error("Either 'model' or 'provider' must be specified in agent config");
-  }
-  
-  // Create a new agent instance
-  const agent = new Agent(config);
-
-  // Save agent to database
-  try {
-    logger.debug(agent.config.name, "Database", "Saving agent to database");
-    // Use database from config if provided, otherwise create a new one
-    const db = config.database || await createDatabase();
-    const tableNames = db.getTableNames();
-    
-    // Ensure agents table exists
-    await db.ensureTable(tableNames.agents, (table) => {
-      table.string("id").primary();
-      table.string("name").notNullable();
-      table.text("description").nullable();
-      table.text("systemPrompt").nullable();
-      table.string("modelName").notNullable();
-      table.timestamp("createdAt").defaultTo(db.knex.fn.now());
-      table.timestamp("updatedAt").defaultTo(db.knex.fn.now());
-      table.json("configuration").nullable();
-    });
-
-    const agentsTable = db.getTable(tableNames.agents);
-
-    // Check if agent already exists
-    const existingAgent = await agentsTable.findOne({ id: agent.id });
-
-    if (!existingAgent) {
-      // Save new agent
-      await agentsTable.insert({
-        id: agent.id,
-        name: agent.config.name,
-        description: agent.config.description || null,
-        systemPrompt: agent.config.systemPrompt || null,
-        modelName: agent.config.model?.name || "unknown",
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        configuration: JSON.stringify({
-          hasTools: agent.getAvailableTools().length > 0,
-          supportsTaskSystem: true,
-        }),
-      });
-      logger.success(agent.config.name, "Database", `Saved with ID: ${agent.id}`);
-    } else {
-      // Update existing agent
-      await agentsTable.update(
-        { id: agent.id },
-        {
-          name: agent.config.name,
-          description: agent.config.description || null,
-          systemPrompt: agent.config.systemPrompt || null,
-          modelName: agent.config.model?.name || "unknown",
-          updatedAt: new Date(),
-          configuration: JSON.stringify({
-            hasTools: agent.getAvailableTools().length > 0,
-            supportsTaskSystem: true,
-          }),
-        }
-      );
-      logger.success(agent.config.name, "Database", `Updated with ID: ${agent.id}`);
-    }
-  } catch (error) {
-    logger.error(agent.config.name, "Database", `Save failed: ${error}`);
-  }
-
-  logger.success("System", "AgentFactory", `Agent created successfully: ${agent.config.name} (${agent.id})`);
-  return agent;
-}; 

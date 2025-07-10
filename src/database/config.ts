@@ -9,4 +9,4 @@ export const VECTOR_DATABASE_TYPES = {
   PINECONE: 'pinecone',
   MILVUS: 'milvus',
   WEAVIATE: 'weaviate',
-}; 
+};

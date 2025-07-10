@@ -1,45 +1,21 @@
 import { Knex } from "knex";
-import fs from "fs";
-import path from "path";
-import dotenv from "dotenv";
+import { v4 as uuidv4 } from "uuid";
 import {
   DatabaseConfig,
   DatabaseInstance,
-  DatabaseFactory,
   TableOperations,
   TableNamesConfig,
-} from "./types";
-import { createSqliteDatabase } from "./database/sqlite";
-import { createPostgresqlDatabase } from "./database/postgresql";
-import { v4 as uuidv4 } from "uuid";
-import { logger } from "./utils";
-import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
-import { DEFAULT_DB_PATH } from "./constants";
-
-// Load environment variables
-dotenv.config();
-
-// Re-export configuration helpers
-export { createSqliteConfig } from "./database/sqlite";
-export { createPostgresqlConfig } from "./database/postgresql";
-
-// Re-export database modules
-export { 
-  createUser, 
-  getUserById, 
-  getUserByUsername, 
-  updateUser, 
-  deleteUser 
-} from "./database/modules/user";
-
-// Re-export types
-export { DatabaseInstance, DatabaseConfig } from "./types/database";
+} from "../types";
+import { createSqliteDatabase } from "./sqlite";
+import { createPostgresqlDatabase } from "./postgresql";
+import { logger } from "../utils";
+import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
 
 /**
  * Core database implementation that provides storage functionality
  * for the Astreus framework. Supports multiple database backends.
  */
-class Database implements DatabaseInstance {
+export class Database implements DatabaseInstance {
   public knex: Knex;
   public config: DatabaseConfig;
   private initialized: boolean = false;
@@ -410,86 +386,3 @@ class Database implements DatabaseInstance {
     return this.tableNames;
   }
 }
-
-// Database factory function
-export const createDatabase: DatabaseFactory = async (
-  config?: DatabaseConfig
-) => {
-  logger.info("System", "DatabaseFactory", "Creating database instance");
-  
-  // If no config is provided, create a default one
-  if (!config) {
-    logger.debug("System", "DatabaseFactory", "No config provided, creating default configuration");
-    // Determine which database to use based on environment variables
-    const dbType = process.env.DATABASE_TYPE || "sqlite";
-
-    if (dbType === "sqlite") {
-      // For SQLite, create a default file-based database
-      const dbPath = process.env.DATABASE_PATH || DEFAULT_DB_PATH;
-      
-      // Create database directory if it doesn't exist (for file-based SQLite)
-      const dir = path.dirname(dbPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-        logger.debug("System", "DatabaseFactory", `Created directory: ${dir}`);
-      }
-      
-      config = {
-        type: "sqlite",
-        connection: dbPath,
-      };
-      
-      logger.debug("System", "DatabaseFactory", `Using SQLite: ${dbPath}`);
-    } else if (dbType === "postgresql") {
-      // For PostgreSQL, use connection URL
-      if (process.env.DATABASE_URL) {
-        // Parse connection string
-        const url = new URL(process.env.DATABASE_URL);
-        const host = url.hostname;
-        const port = parseInt(url.port || "5432");
-        const user = url.username;
-        const password = url.password;
-        const database = url.pathname.substring(1); // Remove leading slash
-        
-        config = {
-          type: "postgresql",
-          connection: {
-            host,
-            port,
-            user,
-            password,
-            database,
-          },
-        };
-        
-        logger.debug("System", "DatabaseFactory", `Using PostgreSQL: ${host}:${port}/${database}`);
-      } else {
-        logger.error("System", "DatabaseFactory", "PostgreSQL connection requires DATABASE_URL environment variable");
-        throw new Error("PostgreSQL connection requires DATABASE_URL environment variable");
-      }
-    } else {
-      logger.error("System", "DatabaseFactory", `Unsupported database type: ${dbType}`);
-      throw new Error(`Unsupported database type: ${dbType}`);
-    }
-  } else {
-    logger.debug("System", "DatabaseFactory", `Using provided config: ${config.type}`);
-    // Validate the provided config
-    validateRequiredParams(
-      config,
-      ["type"],
-      "createDatabase"
-    );
-  }
-
-  // Create a new database instance
-  const db = new Database(config);
-
-  // Connect to the database
-  await db.connect();
-
-  // Only run legacy migrations, no auto table creation
-  await db.initializeSchema();
-
-  logger.success("System", "DatabaseFactory", `Database instance created and connected: ${config.type}`);
-  return db;
-};

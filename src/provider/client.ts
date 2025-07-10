@@ -8,17 +8,16 @@ import {
   OllamaModelConfig,
   ClaudeModelConfig,
   GeminiModelConfig,
-  ProviderFactory,
-} from "./types/provider";
+} from "../types/provider";
 import dotenv from "dotenv";
-import { OpenAIProvider, OllamaProvider, ClaudeProvider, GeminiProvider, Embedding } from "./providers";
-import { validateRequiredParam, validateRequiredParams } from "./utils/validation";
-import { logger } from "./utils/logger";
+import { OpenAIProvider, OllamaProvider, ClaudeProvider, GeminiProvider, Embedding } from "./adapters";
+import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
+import { logger } from "../utils/logger";
 import { 
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_MODEL_CONFIGS,
   AVAILABLE_MODELS
-} from './constants';
+} from './config';
 
 // Load environment variables
 dotenv.config();
@@ -44,8 +43,8 @@ type _GeminiDefaultConfigs = {
 
 // Using DEFAULT_MODEL_CONFIGS imported from constants
 
-// Provider factory
-class Provider implements ProviderInstance {
+// Provider client
+export class ProviderClient implements ProviderInstance {
   public type: ProviderType;
   private models: Map<string, ProviderModel>;
   private embeddingModel: string | null = null;
@@ -241,7 +240,7 @@ class Provider implements ProviderInstance {
    * Get all available models for this provider type
    */
   getAvailableModels(): string[] {
-    return AVAILABLE_MODELS[this.type] || [];
+    return [...(AVAILABLE_MODELS[this.type] || [])];
   }
 
   getEmbeddingModel(): string | null {
@@ -298,13 +297,3 @@ class Provider implements ProviderInstance {
     }
   }
 }
-
-// Create provider factory
-export const createProvider: ProviderFactory = (config: ProviderConfig) => {
-  logger.info("System", "ProviderFactory", `Creating ${config.type} provider`);
-  
-  const provider = new Provider(config);
-  
-  logger.success("System", "ProviderFactory", `${config.type} provider created with ${provider.listModels().length} models`);
-  return provider;
-};

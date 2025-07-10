@@ -42,4 +42,7 @@ export const createRAG: RAGFactory = async (config: RAGFactoryConfig) => {
 export { parsePDF };
 
 // Re-export types
-export * from "../types/rag"; 
+export * from "../types/rag";
+
+// Re-export configuration
+export * from "./config"; 

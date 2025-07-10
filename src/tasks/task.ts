@@ -6,8 +6,8 @@ import {
   TaskResult,
 } from "../types/task";
 import { Plugin } from "../types/plugin";
-import { PluginManager } from "../plugin";
-import { createDatabase, DatabaseInstance } from "../database";
+import { PluginRegistry } from "../plugin";
+import { createDatabase as _createDatabase, DatabaseInstance } from "../database";
 import { MemoryInstance, MemoryEntry, ProviderModel, ProviderMessage, CompletionOptions } from "../types";
 import { logger } from "../utils";
 import { IntentRecognizer } from "../utils/intent";
@@ -73,7 +73,7 @@ export class Task implements TaskInstance {
    */
   public async loadPlugins(model?: ProviderModel): Promise<void> {
     // Get all available tools
-    const allTools = PluginManager.getAll();
+    const allTools = PluginRegistry.getAll();
     
     // Method 1: Get plugins from config first (explicitly provided in task config)
     if (this.config.plugins && this.config.plugins.length > 0) {
@@ -84,7 +84,7 @@ export class Task implements TaskInstance {
             return pluginName as Plugin;
           }
           // Otherwise look it up by name
-          return PluginManager.get(pluginName as string);
+          return PluginRegistry.get(pluginName as string);
         })
         .filter(Boolean) as Plugin[];
       

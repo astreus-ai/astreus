@@ -227,7 +227,7 @@ class PostgresVectorDatabaseConnector extends BaseVectorDatabaseConnector {
       
       // Check total vectors for debugging
       const countResult = await this.knex.raw(`SELECT COUNT(*) as total FROM ${this.tableName}`);
-      const totalVectors = countResult.rows[0]?.total || 0;
+      const _totalVectors = countResult.rows[0]?.total || 0;
       
       // Query using cosine distance operator for better semantic similarity
       const results = await this.knex.raw(`
@@ -354,7 +354,7 @@ class MainDatabaseVectorConnector extends BaseVectorDatabaseConnector {
     this.database = database;
     
     // Use custom table name from database configuration or provided config
-    const dbTableNames = database.getTableNames();
+    const _dbTableNames = database.getTableNames();
     this.tableName = config.options?.tableName || 
                     database.getCustomTableName('vector_embeddings') || 
                     'vector_embeddings';

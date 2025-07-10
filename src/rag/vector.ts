@@ -7,7 +7,7 @@ import {
   RAGResult,
   VectorRAGFactory,
   VectorDatabaseType,
-  VectorDatabaseConfig,
+  VectorDatabaseConfig as _VectorDatabaseConfig,
 } from "../types";
 import { logger } from "../utils";
 import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
@@ -17,7 +17,7 @@ import {
   DEFAULT_CHUNK_OVERLAP, 
   DEFAULT_VECTOR_SIMILARITY_THRESHOLD,
   DEFAULT_MAX_RESULTS
-} from "../constants";
+} from "./config";
 import { Plugin } from "../types";
 
 /**
@@ -318,7 +318,7 @@ export class VectorRAG implements VectorRAGInstance {
         // Try memory fallback if available
         if (this.config.memory && this.config.memory.searchByEmbedding) {
           try {
-            const { Embedding } = await import("../providers");
+            const { Embedding } = await import("../provider/adapters");
             embedding = await Embedding.generateEmbedding(text.substring(0, 8000));
             
             // Cache the fallback result too
@@ -332,7 +332,7 @@ export class VectorRAG implements VectorRAGInstance {
       }
     } else if (this.config.memory && this.config.memory.searchByEmbedding) {
       try {
-        const { Embedding } = await import("../providers");
+        const { Embedding } = await import("../provider/adapters");
         embedding = await Embedding.generateEmbedding(text.substring(0, 8000));
         
         // Cache the result
@@ -390,7 +390,7 @@ export class VectorRAG implements VectorRAGInstance {
     validateRequiredParam(id, "id", "deleteDocument");
     
     try {
-      const { database, tableName } = this.config;
+      const { database, tableName: _tableName } = this.config;
       
       if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
         const chunks = await database.knex(this.chunksTableName)
@@ -532,7 +532,7 @@ export class VectorRAG implements VectorRAGInstance {
             .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
             .slice(0, maxContextResults);
             
-        } catch (expansionError) {
+        } catch {
         }
       }
 
@@ -588,7 +588,7 @@ export class VectorRAG implements VectorRAGInstance {
             });
           }
         }
-      } catch (error) {
+      } catch {
       }
     }
 
@@ -648,7 +648,7 @@ export class VectorRAG implements VectorRAGInstance {
             });
           }
         }
-      } catch (error) {
+      } catch {
       }
     }
 
@@ -888,7 +888,7 @@ export class VectorRAG implements VectorRAGInstance {
       } else {
         // For external vector databases, we need to map the results 
         // from the vector IDs to the actual content
-        const { database } = this.config;
+        const { database: _database } = this.config;
         
         // If we have no results, return empty array
         if (similarVectors.length === 0) {
@@ -1021,7 +1021,7 @@ Return only the formatted metadata summary, nothing else.`;
       }
 
       return formattedMetadata;
-    } catch (error) {
+    } catch {
       // Fallback to simple formatting
       return this.formatMetadataSimple(metadata);
     }
@@ -1073,7 +1073,7 @@ Return only the formatted metadata summary, nothing else.`;
     // Process each document group
     const enhancedResults: RAGResult[] = [];
     
-    for (const [documentId, groupResults] of documentGroups) {
+    for (const [_documentId, groupResults] of documentGroups) {
       
       // Sort group results to ensure original chunks come first, then adjacent chunks
       const sortedGroupResults = groupResults.sort((a, b) => {
@@ -1268,18 +1268,18 @@ Return only the formatted metadata summary, nothing else.`;
               const detectedLanguage = await this.detectLanguageWithLLM(metadata.language);
               return detectedLanguage;
             }
-          } catch (parseError) {
+          } catch {
           }
         }
         
         // If no language found in metadata, default to English
         return 'en';
-      } catch (error) {
+      } catch {
         
         // Default to English if any error occurs
         return 'en';
       }
-    } catch (error) {
+    } catch {
       return 'en';
     }
   }
@@ -1346,7 +1346,7 @@ Return ONLY the 2-letter code, nothing else.`
       const finalLanguageCode = cleanLanguageCode.length === 2 ? cleanLanguageCode : 'en';
       
       return finalLanguageCode;
-    } catch (error) {
+    } catch {
       return 'en'; // Fall back to English if LLM detection fails
     }
   }
@@ -1358,7 +1358,7 @@ Return ONLY the 2-letter code, nothing else.`
    * @param language The language of the query
    * @returns Promise resolving to array of query variations [short, medium, long]
    */
-  private async generateQueryVariations(query: string, language: string): Promise<string[]> {
+  private async generateQueryVariations(query: string, _language: string): Promise<string[]> {
     try {
       if (!this.config.provider) {
         return [query]; // Return original query if no LLM
@@ -1423,7 +1423,7 @@ LONG: [long version]`;
 
       return variations;
 
-    } catch (error) {
+    } catch {
       return [query]; // Fallback to original query
     }
   }
@@ -1475,7 +1475,7 @@ LONG: [long version]`;
       const cleanTranslation = translation.replace(/^["']|["']$/g, '').trim();
       
       return cleanTranslation;
-    } catch (error) {
+    } catch {
       return query; // Fall back to original query rather than throwing
     }
   }

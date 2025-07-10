@@ -6,4 +6,4 @@ export const TASK_STATUS = {
   RUNNING: 'running',
   COMPLETED: 'completed',
   FAILED: 'failed',
-}; 
+};

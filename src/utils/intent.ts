@@ -65,7 +65,7 @@ Select the most appropriate tools for this task and respond with a JSON array co
       try {
         // Find the JSON array in the response
         const responseText = typeof response === 'string' ? response : response.content;
-        const match = responseText.match(/\[.*\]/s);
+        const match = responseText.match(/\[.*\]/gs);
         if (match) {
           toolNames = JSON.parse(match[0]);
         } else {
