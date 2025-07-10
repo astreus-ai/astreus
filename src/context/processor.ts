@@ -10,8 +10,10 @@ import {
   ConversationSummary as _ConversationSummary,
   LongTermMemory
 } from "../types/memory";
+import { ProviderModel } from "../types/provider";
 import { logger } from "../utils";
 import { DEFAULT_TOKEN_BUDGET, DEFAULT_PRIORITY_WEIGHTS } from "./config";
+import { ContextCompressor } from "./compression";
 
 /**
  * Adaptive Context Window Manager Implementation
@@ -25,6 +27,16 @@ export class AdaptiveContextManager implements ContextWindowManager {
   private tokenBudget: TokenBudgetConfig;
   private priorityWeights: PriorityWeights;
   private sessionId: string;
+  private provider?: ProviderModel;
+  
+  /**
+   * Set the LLM provider for AI-powered context management
+   */
+  setProvider(provider: ProviderModel): void {
+    this.provider = provider;
+    // Also set provider for compression utilities
+    ContextCompressor.setProvider(provider);
+  }
 
   constructor(
     sessionId: string,
@@ -92,41 +104,43 @@ export class AdaptiveContextManager implements ContextWindowManager {
   /**
    * Optimize token distribution across layers
    */
-  optimizeTokenDistribution(): void {
-    logger.debug("Optimizing token distribution across layers");
+  async optimizeTokenDistribution(): Promise<void> {
+    logger.debug(`Optimizing token distribution across layers for session ${this.sessionId}`);
     
     // Calculate total used tokens
     const totalUsed = Object.values(this.layers).reduce((sum, layer) => sum + layer.tokenCount, 0);
     
     if (totalUsed > this.maxTokens) {
       // Need to compress - start with least important layer
-      this.compressContext('persistent');
+      await this.compressContext('persistent');
       
       if (this.currentTokens > this.maxTokens) {
-        this.compressContext('summarized');
+        await this.compressContext('summarized');
       }
       
       if (this.currentTokens > this.maxTokens) {
-        this.compressContext('immediate');
+        await this.compressContext('immediate');
       }
     }
     
     // Recalculate current tokens
     this.currentTokens = Object.values(this.layers).reduce((sum, layer) => sum + layer.tokenCount, 0);
     
-    logger.debug(`Token optimization complete: ${this.currentTokens}/${this.maxTokens} tokens used`);
+    logger.debug(`Token optimization complete for session ${this.sessionId}: ${this.currentTokens}/${this.maxTokens} tokens used`);
   }
 
   /**
    * Prioritize content based on multiple factors
    */
-  prioritizeContent(entries: MemoryEntry[]): MemoryEntry[] {
+  async prioritizeContent(entries: MemoryEntry[]): Promise<MemoryEntry[]> {
     const now = new Date();
     
-    const entriesWithPriority = entries.map(entry => ({
-      entry,
-      priority: this.calculatePriority(entry, now)
-    }));
+    const entriesWithPriority = await Promise.all(
+      entries.map(async entry => ({
+        entry,
+        priority: await this.calculatePriority(entry, now)
+      }))
+    );
     
     // Sort by priority (highest first)
     entriesWithPriority.sort((a, b) => b.priority - a.priority);
@@ -135,9 +149,9 @@ export class AdaptiveContextManager implements ContextWindowManager {
   }
 
   /**
-   * Calculate priority score for a memory entry
+   * Calculate priority score for a memory entry with enhanced LLM-based analysis
    */
-  calculatePriority(entry: MemoryEntry, now: Date = new Date()): number {
+  async calculatePriority(entry: MemoryEntry, now: Date = new Date()): Promise<number> {
     const weights = this.priorityWeights;
     
     // Recency score (0-1, higher for more recent)
@@ -148,28 +162,142 @@ export class AdaptiveContextManager implements ContextWindowManager {
     // Frequency score (placeholder - would need frequency tracking)
     const frequencyScore = 0.5;
     
-    // Importance score based on content analysis
-    const importanceScore = this.analyzeImportance(entry);
+    // Importance score based on content analysis (now async)
+    const importanceScore = await this.analyzeImportance(entry);
     
     // User interaction score based on role
     const userInteractionScore = entry.role === 'user' ? 1 : 0.5;
     
-    // Sentiment score (placeholder - would need sentiment analysis)
-    const sentimentScore = 0.5;
+    // Enhanced sentiment and context score
+    const sentimentScore = await this.analyzeSentimentAndContext(entry);
     
-    return (
+    const finalScore = (
       weights.recency * recencyScore +
       weights.frequency * frequencyScore +
       weights.importance * importanceScore +
       weights.userInteraction * userInteractionScore +
       weights.sentiment * sentimentScore
     );
+    
+    logger.debug(`Priority calculated for session ${this.sessionId}: "${entry.content.substring(0, 50)}...": ${finalScore.toFixed(3)}`);
+    return finalScore;
+  }
+  
+  /**
+   * Analyze sentiment and contextual importance using LLM
+   */
+  private async analyzeSentimentAndContext(entry: MemoryEntry): Promise<number> {
+    if (!this.provider) {
+      return 0.5; // Neutral fallback
+    }
+    
+    try {
+      const prompt = `Analyze the sentiment and contextual importance of this message in a conversation. Consider:
+- Emotional tone (positive, negative, neutral)
+- Urgency or immediacy
+- Future reference value
+- Relationship building aspects
+
+Rate the overall contextual value on a scale of 0.0 to 1.0 where:
+- 0.0-0.3: Low contextual value (negative sentiment, low future relevance)
+- 0.4-0.6: Medium contextual value (neutral sentiment, some future relevance)
+- 0.7-1.0: High contextual value (positive sentiment, high future relevance)
+
+Message: "${entry.content}"
+
+Respond with just a number between 0.0 and 1.0.`;
+      
+      const response = await this.provider.complete([
+        {
+          role: "system",
+          content: "You are an expert at analyzing message sentiment and contextual importance. Provide accurate numerical scores."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ], {
+        temperature: 0.1,
+        maxTokens: 10
+      });
+      
+      const scoreText = typeof response === 'string' ? response : response.content;
+      const score = parseFloat(scoreText.trim());
+      
+      if (isNaN(score) || score < 0 || score > 1) {
+        logger.warn(`Invalid sentiment score '${scoreText}' for message, using neutral`);
+        return 0.5;
+      }
+      
+      return score;
+    } catch (error) {
+      logger.warn('LLM sentiment analysis failed, using neutral score:', error);
+      return 0.5;
+    }
   }
 
   /**
-   * Analyze importance of content (simplified)
+   * Analyze importance of content using LLM-based semantic analysis
    */
-  private analyzeImportance(entry: MemoryEntry): number {
+  private async analyzeImportance(entry: MemoryEntry): Promise<number> {
+    // If no provider, fall back to keyword-based analysis
+    if (!this.provider) {
+      return this.keywordBasedImportance(entry);
+    }
+    
+    try {
+      const prompt = `Analyze the importance of this message in a conversation context. Consider factors like:
+- Information relevance and value
+- User preferences and stated needs
+- Factual content and key details
+- Emotional significance
+- Future reference value
+
+Rate importance on a scale of 0.0 to 1.0 where:
+- 0.0-0.3: Low importance (casual remarks, pleasantries)
+- 0.4-0.6: Medium importance (general information, questions)
+- 0.7-0.9: High importance (preferences, facts, key decisions)
+- 0.9-1.0: Critical importance (personal data, goals, explicit requests to remember)
+
+Message: "${entry.content}"
+
+Respond with just a number between 0.0 and 1.0.`;
+      
+      const response = await this.provider.complete([
+        {
+          role: "system",
+          content: "You are an expert at analyzing message importance for conversation memory. Provide accurate numerical importance scores."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ], {
+        temperature: 0.1,
+        maxTokens: 10
+      });
+      
+      const scoreText = typeof response === 'string' ? response : response.content;
+      const score = parseFloat(scoreText.trim());
+      
+      // Validate score
+      if (isNaN(score) || score < 0 || score > 1) {
+        logger.warn(`Invalid importance score '${scoreText}' for message, falling back to keyword analysis`);
+        return this.keywordBasedImportance(entry);
+      }
+      
+      logger.debug(`LLM importance analysis: ${entry.content.substring(0, 50)}... -> ${score}`);
+      return score;
+    } catch (error) {
+      logger.warn('LLM importance analysis failed, falling back to keyword analysis:', error);
+      return this.keywordBasedImportance(entry);
+    }
+  }
+  
+  /**
+   * Fallback keyword-based importance analysis
+   */
+  private keywordBasedImportance(entry: MemoryEntry): number {
     const content = entry.content.toLowerCase();
     
     // High importance indicators
@@ -198,12 +326,12 @@ export class AdaptiveContextManager implements ContextWindowManager {
   /**
    * Compress context in a specific layer
    */
-  compressContext(layer: keyof ContextLayers): void {
+  async compressContext(layer: keyof ContextLayers): Promise<void> {
     logger.debug(`Compressing context layer: ${layer}`);
     
     switch (layer) {
       case 'immediate':
-        this.compressImmediateLayer();
+        await this.compressImmediateLayer();
         break;
       case 'summarized':
         this.compressSummarizedLayer();
@@ -231,14 +359,14 @@ export class AdaptiveContextManager implements ContextWindowManager {
   /**
    * Compress immediate layer by removing oldest messages
    */
-  private compressImmediateLayer(): void {
+  private async compressImmediateLayer(): Promise<void> {
     const layer = this.layers.immediate;
     const targetTokens = this.tokenBudget.immediate;
     
     if (layer.tokenCount <= targetTokens) return;
     
     // Sort by priority and keep the most important messages
-    const prioritizedMessages = this.prioritizeContent(layer.messages);
+    const prioritizedMessages = await this.prioritizeContent(layer.messages);
     
     let tokenCount = 0;
     const compressedMessages: MemoryEntry[] = [];
@@ -320,7 +448,7 @@ export class AdaptiveContextManager implements ContextWindowManager {
   /**
    * Add a new message to the immediate layer
    */
-  addToImmediate(entry: MemoryEntry): void {
+  async addToImmediate(entry: MemoryEntry): Promise<void> {
     const tokens = this.estimateTokens(entry.content);
     
     if (this.allocateTokens('immediate', tokens)) {
@@ -328,7 +456,7 @@ export class AdaptiveContextManager implements ContextWindowManager {
       this.layers.immediate.lastUpdated = new Date();
     } else {
       // Need to compress first
-      this.compressContext('immediate');
+      await this.compressContext('immediate');
       
       // Try again after compression
       if (this.allocateTokens('immediate', tokens)) {
@@ -339,9 +467,102 @@ export class AdaptiveContextManager implements ContextWindowManager {
   }
 
   /**
+   * Extract entities from content using LLM-based analysis
+   */
+  async extractEntities(content: string): Promise<Record<string, any>> {
+    if (!this.provider) {
+      return this.simpleEntityExtraction(content);
+    }
+    
+    try {
+      const prompt = `Extract important entities from this text. Focus on:
+- People (names, relationships)
+- Places (locations, addresses)
+- Organizations (companies, institutions)
+- Products/Services
+- Dates and Times
+- Preferences and Opinions
+- Facts and Important Information
+
+Return as JSON object with categories as keys and arrays of entities as values.
+
+Text: "${content}"
+
+Example format:
+{
+  "people": ["John Doe", "Sarah"],
+  "places": ["New York", "Central Park"],
+  "preferences": ["likes coffee", "prefers morning meetings"],
+  "facts": ["works at Google", "has 5 years experience"]
+}`;
+      
+      const response = await this.provider.complete([
+        {
+          role: "system",
+          content: "You are an expert at extracting structured information from text. Always return valid JSON."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ], {
+        temperature: 0.1,
+        maxTokens: 300
+      });
+      
+      const entityText = typeof response === 'string' ? response : response.content;
+      
+      try {
+        const entities = JSON.parse(entityText.trim());
+        logger.debug(`LLM entity extraction successful: ${Object.keys(entities).length} categories`);
+        return entities;
+      } catch (parseError) {
+        logger.warn('Failed to parse LLM entity extraction response, falling back to simple extraction');
+        return this.simpleEntityExtraction(content);
+      }
+    } catch (error) {
+      logger.warn('LLM entity extraction failed, falling back to simple extraction:', error);
+      return this.simpleEntityExtraction(content);
+    }
+  }
+  
+  /**
+   * Simple entity extraction fallback
+   */
+  private simpleEntityExtraction(content: string): Record<string, any> {
+    const entities: Record<string, any> = {
+      keywords: [],
+      potential_names: [],
+      preferences: []
+    };
+    
+    // Extract potential names (capitalized words)
+    const namePattern = /\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b/g;
+    const potentialNames = content.match(namePattern) || [];
+    entities.potential_names = [...new Set(potentialNames)];
+    
+    // Extract preference indicators
+    const preferencePatterns = [
+      /\bi like\s+([^.!?]+)/gi,
+      /\bi prefer\s+([^.!?]+)/gi,
+      /\bi want\s+([^.!?]+)/gi,
+      /\bi need\s+([^.!?]+)/gi
+    ];
+    
+    for (const pattern of preferencePatterns) {
+      const matches = content.match(pattern);
+      if (matches) {
+        entities.preferences.push(...matches);
+      }
+    }
+    
+    return entities;
+  }
+  
+  /**
    * Update summarized layer with new information
    */
-  updateSummarized(summary: string, keyPoints: string[], entities: Record<string, any>, sourceIds: string[]): void {
+  async updateSummarized(summary: string, keyPoints: string[], entities: Record<string, any>, sourceIds: string[]): Promise<void> {
     const layer = this.layers.summarized;
     
     layer.summary = summary;
@@ -352,6 +573,94 @@ export class AdaptiveContextManager implements ContextWindowManager {
     layer.lastUpdated = new Date();
     
     logger.debug(`Summarized layer updated: ${layer.tokenCount} tokens`);
+  }
+  
+  /**
+   * Generate comprehensive summary with entity extraction
+   */
+  async generateIntelligentSummary(messages: MemoryEntry[]): Promise<{
+    summary: string;
+    keyPoints: string[];
+    entities: Record<string, any>;
+  }> {
+    if (!this.provider) {
+      // Fallback to simple summarization
+      const text = messages.map(m => m.content).join(' ');
+      const entities = await this.extractEntities(text);
+      return {
+        summary: text.substring(0, 500) + '...',
+        keyPoints: ["Simple summary generated"],
+        entities
+      };
+    }
+    
+    try {
+      const conversationText = messages.map(m => `${m.role}: ${m.content}`).join('\n');
+      
+      const prompt = `Analyze this conversation and provide:
+1. A concise summary preserving key information
+2. A list of important key points
+3. Extracted entities (people, places, preferences, facts)
+
+Return as JSON with structure:
+{
+  "summary": "...",
+  "keyPoints": ["...", "..."],
+  "entities": {
+    "people": [...],
+    "places": [...],
+    "preferences": [...],
+    "facts": [...]
+  }
+}
+
+Conversation:
+${conversationText}`;
+      
+      const response = await this.provider.complete([
+        {
+          role: "system",
+          content: "You are an expert at analyzing conversations and extracting structured information. Always return valid JSON."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ], {
+        temperature: 0.2,
+        maxTokens: 600
+      });
+      
+      const responseText = typeof response === 'string' ? response : response.content;
+      
+      try {
+        const result = JSON.parse(responseText.trim());
+        logger.debug(`Intelligent summary generated: ${result.keyPoints?.length || 0} key points, ${Object.keys(result.entities || {}).length} entity categories`);
+        return {
+          summary: result.summary || '',
+          keyPoints: result.keyPoints || [],
+          entities: result.entities || {}
+        };
+      } catch (parseError) {
+        logger.warn('Failed to parse intelligent summary response, falling back');
+        const text = messages.map(m => m.content).join(' ');
+        const entities = await this.extractEntities(text);
+        return {
+          summary: text.substring(0, 500) + '...',
+          keyPoints: ["Fallback summary generated"],
+          entities
+        };
+      }
+    } catch (error) {
+      logger.warn('Intelligent summary generation failed:', error);
+      const text = messages.map(m => m.content).join(' ');
+      const entities = await this.extractEntities(text);
+      return {
+        summary: text.substring(0, 500) + '...',
+        keyPoints: ["Fallback summary generated"],
+        entities
+      };
+    }
   }
 
   /**
