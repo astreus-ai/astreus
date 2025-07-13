@@ -43,7 +43,7 @@ export class Embedding {
    */
   static async generateEmbedding(
     text: string,
-    model: string = process.env.OPENAI_EMBEDDING_MODEL ||
+    model: string = process.env.EMBEDDING_MODEL || process.env.OPENAI_EMBEDDING_MODEL ||
       DEFAULT_OPENAI_EMBEDDING_MODEL
   ): Promise<number[]> {
     try {

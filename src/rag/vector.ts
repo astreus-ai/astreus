@@ -19,6 +19,7 @@ import {
   DEFAULT_MAX_RESULTS
 } from "./config";
 import { Plugin } from "../types";
+import { DEFAULT_MODEL } from "../agent/config";
 
 /**
  * Vector-based RAG implementation
@@ -1329,7 +1330,7 @@ Return ONLY the 2-letter code, nothing else.`
         }
       ];
       
-      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const defaultModel = this.config.provider.getDefaultModel?.() || DEFAULT_MODEL;
       const model = this.config.provider.getModel(defaultModel);
       const response = await model.complete(messages, {
         temperature: 0.1,
@@ -1387,7 +1388,7 @@ LONG: [long version]`;
         }
       ];
       
-      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const defaultModel = this.config.provider.getDefaultModel?.() || DEFAULT_MODEL;
       const model = this.config.provider.getModel(defaultModel);
       const response = await model.complete(messages, {
         temperature: 0.3, // Low temperature for consistent results
@@ -1459,7 +1460,7 @@ LONG: [long version]`;
         }
       ];
       
-      const defaultModel = this.config.provider.getDefaultModel?.() || 'gpt-4o-mini';
+      const defaultModel = this.config.provider.getDefaultModel?.() || DEFAULT_MODEL;
       const model = this.config.provider.getModel(defaultModel);
       const response = await model.complete(messages, {
         temperature: 0.1,

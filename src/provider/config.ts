@@ -15,11 +15,21 @@ export const PROVIDER_TYPES = {
 
 // Default Provider configuration
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
-export const DEFAULT_OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';
+export const DEFAULT_OPENAI_EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
 export const DEFAULT_CLAUDE_BASE_URL = 'https://api.anthropic.com';
 export const DEFAULT_CLAUDE_API_VERSION = '2023-06-01';
 export const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1';
+
+/**
+ * Get default temperature from environment or fallback
+ */
+const getDefaultTemperature = () => parseFloat(process.env.TEMPERATURE || '0.7');
+
+/**
+ * Get default max tokens from environment or fallback  
+ */
+const getDefaultMaxTokens = () => parseInt(process.env.MAX_TOKENS || '4096');
 
 /**
  * Default model configurations for each provider type
@@ -27,61 +37,61 @@ export const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.co
 export const DEFAULT_MODEL_CONFIGS = {
   openai: {
     "gpt-4o": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<OpenAIModelConfig, 'name'>,
     "gpt-4o-mini": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<OpenAIModelConfig, 'name'>,
     "gpt-4-turbo": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<OpenAIModelConfig, 'name'>,
     "gpt-3.5-turbo": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<OpenAIModelConfig, 'name'>,
   },
   ollama: {
     "llama3.1:8b": {
-      temperature: 0.7,
-      maxTokens: 2048,
+      temperature: getDefaultTemperature(),
+      maxTokens: parseInt(process.env.MAX_TOKENS || '2048'),
       baseUrl: DEFAULT_OLLAMA_BASE_URL,
     } as Omit<OllamaModelConfig, 'name'>,
     "llama3.1:70b": {
-      temperature: 0.7,
-      maxTokens: 2048,
+      temperature: getDefaultTemperature(),
+      maxTokens: parseInt(process.env.MAX_TOKENS || '2048'),
       baseUrl: DEFAULT_OLLAMA_BASE_URL,
     } as Omit<OllamaModelConfig, 'name'>,
     "mistral:7b": {
-      temperature: 0.7,
-      maxTokens: 2048,
+      temperature: getDefaultTemperature(),
+      maxTokens: parseInt(process.env.MAX_TOKENS || '2048'),
       baseUrl: DEFAULT_OLLAMA_BASE_URL,
     } as Omit<OllamaModelConfig, 'name'>,
   },
   claude: {
     "claude-3-5-sonnet-20241022": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<ClaudeModelConfig, 'name'>,
     "claude-3-opus-20240229": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<ClaudeModelConfig, 'name'>,
     "claude-3-haiku-20240307": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<ClaudeModelConfig, 'name'>,
   },
   gemini: {
     "gemini-1.5-pro": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<GeminiModelConfig, 'name'>,
     "gemini-1.5-flash": {
-      temperature: 0.7,
-      maxTokens: 4096,
+      temperature: getDefaultTemperature(),
+      maxTokens: getDefaultMaxTokens(),
     } as Omit<GeminiModelConfig, 'name'>,
   },
 } as const;
@@ -124,8 +134,8 @@ export const AVAILABLE_MODELS = getAvailableModels();
  * Default embedding models for each provider
  */
 export const DEFAULT_EMBEDDING_MODELS = {
-  openai: "text-embedding-3-small",
-  ollama: "nomic-embed-text",
+  openai: process.env.EMBEDDING_MODEL || "text-embedding-3-small",
+  ollama: process.env.EMBEDDING_MODEL || "nomic-embed-text",
   // Claude and Gemini don't have dedicated embedding endpoints in this config
 } as const;
 
@@ -134,23 +144,23 @@ export const DEFAULT_EMBEDDING_MODELS = {
  */
 export const PROVIDER_DEFAULTS = {
   openai: {
-    temperature: 0.7,
-    maxTokens: 4096,
+    temperature: getDefaultTemperature(),
+    maxTokens: getDefaultMaxTokens(),
     baseUrl: "https://api.openai.com/v1",
   },
   ollama: {
-    temperature: 0.7,
-    maxTokens: 2048,
+    temperature: getDefaultTemperature(),
+    maxTokens: parseInt(process.env.MAX_TOKENS || '2048'),
     baseUrl: DEFAULT_OLLAMA_BASE_URL,
   },
   claude: {
-    temperature: 0.7,
-    maxTokens: 4096,
+    temperature: getDefaultTemperature(),
+    maxTokens: getDefaultMaxTokens(),
     baseUrl: "https://api.anthropic.com",
   },
   gemini: {
-    temperature: 0.7,
-    maxTokens: 4096,
+    temperature: getDefaultTemperature(),
+    maxTokens: getDefaultMaxTokens(),
     baseUrl: "https://generativelanguage.googleapis.com/v1beta",
   },
 } as const;
