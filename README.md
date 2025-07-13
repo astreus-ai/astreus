@@ -165,6 +165,12 @@ const agent = await createAgent({
 ### Environment Variables
 
 ```bash
+# Global Model Configuration (applies to all providers)
+MODEL_NAME=gpt-4o-mini           # Main model name
+TEMPERATURE=0.7                  # Model temperature (0.0 - 1.0)
+MAX_TOKENS=2048                 # Maximum tokens per response
+EMBEDDING_MODEL=text-embedding-3-small  # Embedding model for RAG
+
 # Provider API Keys
 OPENAI_API_KEY=your-key
 ANTHROPIC_API_KEY=your-key
@@ -176,35 +182,6 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/db
 
 # Logging
 LOG_LEVEL=info  # debug, info, warn, error
-```
-
-### Provider Configuration
-
-```typescript
-// OpenAI
-const openai = createProvider({
-  type: 'openai',
-  model: 'gpt-4o-mini'
-});
-
-// Claude
-const claude = createProvider({
-  type: 'claude',
-  model: 'claude-3-5-sonnet-20241022'
-});
-
-// Gemini
-const gemini = createProvider({
-  type: 'gemini',
-  model: 'gemini-1.5-pro'
-});
-
-// Ollama (local)
-const ollama = createProvider({
-  type: 'ollama',
-  model: 'llama3.1',
-  baseUrl: 'http://localhost:11434'
-});
 ```
 
 ## 📖 Documentation
