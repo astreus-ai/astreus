@@ -66,19 +66,62 @@ export async function analyzeMedia(
   try {
     logger.info(context.agentName, "Analyze", "Starting media analysis");
     
-    // Get the provider (assuming it's OpenAI for now)
+    // Check if the model supports media analysis
     const model = context.model;
-    if (!model || typeof (model as any).analyzeMedia !== 'function') {
-      throw new Error("Media analysis not supported by current model provider");
+    if (!model) {
+      throw new Error("No model available for media analysis");
     }
 
-    const result = await (model as any).analyzeMedia(
-      params.filePath,
-      params.url,
-      params.base64Data,
-      params.prompt,
-      { detail: params.analysisType === 'detailed' ? 'high' : 'auto' }
-    );
+    // Check for different provider capabilities
+    const hasAnalyzeMedia = typeof (model as any).analyzeMedia === 'function';
+    const hasVisionCapability = typeof (model as any).complete === 'function' && 
+      (model as any).modelName && 
+      ((model as any).modelName.includes('vision') || 
+       (model as any).modelName.includes('4o') ||
+       (model as any).modelName.includes('claude-3'));
+
+    if (!hasAnalyzeMedia && !hasVisionCapability) {
+      throw new Error(`Media analysis not supported by current model provider (${(model as any).modelName || 'unknown'}). Please use a vision-capable model like GPT-4 Vision, Claude-3, or a provider with analyzeMedia support.`);
+    }
+
+    let result;
+    
+    if (hasAnalyzeMedia) {
+      // Use dedicated analyzeMedia method if available
+      result = await (model as any).analyzeMedia(
+        params.filePath,
+        params.url,
+        params.base64Data,
+        params.prompt,
+        { detail: params.analysisType === 'detailed' ? 'high' : 'auto' }
+      );
+    } else if (hasVisionCapability) {
+      // Use generic vision capability through complete method
+      const imageContent = params.base64Data || params.url || params.filePath;
+      if (!imageContent) {
+        throw new Error("No image data provided for analysis");
+      }
+      
+      const messages = [
+        {
+          role: "user" as const,
+          content: `Please analyze this image. ${params.prompt || 'Provide a detailed description of what you see.'}`
+        }
+      ];
+      
+      result = await (model as any).complete(messages, {
+        temperature: 0.1,
+        maxTokens: 1000
+      });
+      
+      // Format result to match expected structure
+      result = {
+        description: typeof result === 'string' ? result : result.content || result.message,
+        analysis: typeof result === 'string' ? result : result.content || result.message
+      };
+    } else {
+      throw new Error("Media analysis method not available");
+    }
 
     // Store in memory if session ID provided and addToMemory is true (default true)
     if (params.sessionId && context.memory && (params.addToMemory !== false)) {

@@ -289,9 +289,9 @@ function splitBySections(
   const avgCharsPerPage = text.length / numPages;
   let charCount = 0;
   
-  // Heuristics for detecting headers
-  const headerRegex = /^(?:\d+[.):]|[A-Z][.):]|[IVXLCDM]+[.):]|APPENDIX|Chapter|Section|CHAPTER|SECTION)/;
-  const allCapsRegex = /^[A-Z0-9\s.,;:()\\-–—]+$/;
+  // Heuristics for detecting headers (Unicode-aware)
+  const headerRegex = /^(?:\d+[.):]|\p{Lu}[.):]|[IVXLCDM]+[.):])/u;
+  const allCapsRegex = /^[\p{Lu}\p{N}\s.,;:()\\-–—]+$/u;
   
   let currentSection = '';
   let currentTitle = '';

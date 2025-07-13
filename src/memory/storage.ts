@@ -573,8 +573,8 @@ export class MemoryStorage implements MemoryInstance {
         return "No conversation history available.";
       }
 
-      // Just a simple summary for now - could be enhanced with AI summarization
-      const summary = `Conversation with ${memories.length} messages starting at ${memories[0].timestamp.toISOString()}.`;
+      // AI-powered summarization
+      const summary = await this.generateIntelligentSummary(memories);
       
       logger.debug(`Generated summary for session ${sessionId}`);
       return summary;
@@ -760,8 +760,8 @@ export class MemoryStorage implements MemoryInstance {
         contextManager.addToImmediate(message);
       });
       
-      // TODO: Load summarized and persistent data from database
-      // For now, we'll leave them empty and let them be populated over time
+      // Load summarized and persistent data from database
+      await this.loadContextLayersFromDatabase(contextManager, sessionId);
       
       logger.debug(`Context manager initialized for session ${sessionId} with ${recentMessages.length} messages`);
     } catch (error) {
@@ -851,5 +851,171 @@ export class MemoryStorage implements MemoryInstance {
     if (sessionsToRemove.length > 0) {
       logger.debug(`Cleaned up ${sessionsToRemove.length} inactive context managers`);
     }
+  }
+
+  /**
+   * Generate intelligent summary using AI if provider is available
+   */
+  private async generateIntelligentSummary(memories: MemoryEntry[]): Promise<string> {
+    // Get context manager for AI features
+    const firstMemory = memories[0];
+    const contextManager = this.contextManagers.get(firstMemory.sessionId || 'default');
+    
+    // If no AI provider available, use simple fallback
+    if (!contextManager) {
+      return this.generateSimpleSummary(memories);
+    }
+    
+    // Try to get provider from context manager
+    const provider = (contextManager as any).provider;
+    if (!provider) {
+      return this.generateSimpleSummary(memories);
+    }
+
+    try {
+      // Prepare conversation text
+      const conversationText = memories
+        .map(m => `${m.role}: ${m.content}`)
+        .join('\n');
+
+      const prompt = `Summarize this conversation, focusing on:
+1. Key topics discussed
+2. Important decisions or conclusions
+3. User preferences or requirements
+4. Main outcomes or action items
+
+Keep the summary concise but informative (2-4 sentences).
+
+Conversation:
+${conversationText}`;
+
+      const response = await provider.complete([
+        {
+          role: "system",
+          content: "You are an expert at summarizing conversations. Provide concise, informative summaries that capture the essence of the discussion."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ], {
+        temperature: 0.3,
+        maxTokens: 200
+      });
+
+      const summaryText = typeof response === 'string' ? response : response.content || response.message;
+      
+      if (summaryText && summaryText.length > 20) {
+        logger.debug(`AI-powered summary generated: ${summaryText.length} characters`);
+        return summaryText.trim();
+      } else {
+        logger.warn('AI summary was too short or empty, falling back to simple summary');
+        return this.generateSimpleSummary(memories);
+      }
+    } catch (error) {
+      logger.warn('AI summarization failed, falling back to simple summary:', error);
+      return this.generateSimpleSummary(memories);
+    }
+  }
+
+  /**
+   * Generate simple summary as fallback
+   */
+  private generateSimpleSummary(memories: MemoryEntry[]): string {
+    const messageCount = memories.length;
+    const userMessages = memories.filter(m => m.role === 'user').length;
+    const assistantMessages = memories.filter(m => m.role === 'assistant').length;
+    const startTime = memories[0]?.timestamp?.toISOString() || 'unknown';
+    const endTime = memories[memories.length - 1]?.timestamp?.toISOString() || 'unknown';
+    
+    return `Conversation summary: ${messageCount} total messages (${userMessages} user, ${assistantMessages} assistant) from ${startTime} to ${endTime}.`;
+  }
+
+  /**
+   * Load context layers data from database storage
+   */
+  private async loadContextLayersFromDatabase(
+    contextManager: AdaptiveContextManager,
+    sessionId: string
+  ): Promise<void> {
+    try {
+      // Load session metadata that might contain summarized/persistent context
+      const sessionMetadata = await this.getSessionMetadata(sessionId);
+      
+      if (sessionMetadata) {
+        // Load summarized layer data
+        if (sessionMetadata.summary) {
+          contextManager.layers.summarized.summary = sessionMetadata.summary;
+          contextManager.layers.summarized.tokenCount = this.estimateTokens(sessionMetadata.summary);
+          contextManager.layers.summarized.lastUpdated = sessionMetadata.updatedAt || new Date();
+        }
+        
+        if (sessionMetadata.keyPoints && Array.isArray(sessionMetadata.keyPoints)) {
+          contextManager.layers.summarized.keyPoints = sessionMetadata.keyPoints;
+        }
+        
+        // Load persistent layer data
+        if (sessionMetadata.importantFacts && Array.isArray(sessionMetadata.importantFacts)) {
+          contextManager.layers.persistent.importantFacts = sessionMetadata.importantFacts;
+        }
+        
+        if (sessionMetadata.userPreferences && typeof sessionMetadata.userPreferences === 'object') {
+          contextManager.layers.persistent.userPreferences = sessionMetadata.userPreferences;
+        }
+        
+        if (sessionMetadata.conversationHistory && Array.isArray(sessionMetadata.conversationHistory)) {
+          contextManager.layers.persistent.conversationHistory = sessionMetadata.conversationHistory;
+        }
+        
+        // Update token counts for persistent layer
+        contextManager.layers.persistent.tokenCount = this.estimateLayerTokens(contextManager.layers.persistent);
+        contextManager.layers.persistent.lastUpdated = sessionMetadata.updatedAt || new Date();
+        
+        logger.debug(`Loaded context layers from database for session ${sessionId}`);
+      }
+    } catch (error) {
+      logger.warn(`Could not load context layers from database for session ${sessionId}:`, error);
+      // Continue without error - the layers will be built from scratch
+    }
+  }
+
+  /**
+   * Get session metadata from database
+   */
+  private async getSessionMetadata(sessionId: string): Promise<any> {
+    try {
+      const result = await this.config.database.knex('session_metadata')
+        .where({ session_id: sessionId })
+        .first();
+      
+      if (result && result.metadata) {
+        return typeof result.metadata === 'string' 
+          ? JSON.parse(result.metadata) 
+          : result.metadata;
+      }
+      
+      return null;
+    } catch (error) {
+      logger.debug(`Session metadata not found for ${sessionId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Estimate token count for text (rough approximation)
+   */
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
+  }
+
+  /**
+   * Estimate token count for persistent layer
+   */
+  private estimateLayerTokens(layer: any): number {
+    const factsText = (layer.importantFacts || []).join(' ');
+    const preferencesText = JSON.stringify(layer.userPreferences || {});
+    const historyText = (layer.conversationHistory || []).join(' ');
+    
+    return this.estimateTokens(factsText + preferencesText + historyText);
   }
 }
