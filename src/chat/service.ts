@@ -185,12 +185,139 @@ export class ChatService implements ChatInstance {
 
     const response = await params.model.complete(messages, completionOptions);
     
-    // Handle both string and structured response
-    const responseContent = typeof response === 'string' 
-      ? response 
-      : response.content || response.message || response.text || 
-        (response.choices && response.choices[0]?.message?.content) ||
-        JSON.stringify(response);
+    let responseContent: string;
+    
+    // Handle tool calls if present
+    if (typeof response === 'object' && response.tool_calls && Array.isArray(response.tool_calls) && params.tools && params.canUseTools) {
+      logger.debug(`Chat ${params.chatId} received structured tool calls response`);
+      
+      const toolCalls = response.tool_calls;
+      logger.info(`Chat ${params.chatId} response includes ${toolCalls.length} tool calls`);
+      
+      // Execute tool calls
+      const toolResults = [];
+      for (let i = 0; i < toolCalls.length; i++) {
+        const call = toolCalls[i];
+        if (call.type === 'function' && call.name) {
+          logger.info(`Tool call ${i + 1}: ${call.name} with arguments: ${JSON.stringify(call.arguments)}`);
+          
+          // Record tool call in memory (separate from chat messages)
+          await this.config.memory.add({
+            agentId: params.agentId,
+            sessionId: `${params.chatId}_toolCall`,
+            userId: params.userId,
+            role: 'assistant',
+            content: `Tool call: ${call.name} with arguments: ${JSON.stringify(call.arguments)}`,
+            metadata: { type: 'tool_call', toolName: call.name, originalChatId: params.chatId }
+          });
+          
+          // Find the tool to execute
+          const tool = params.tools.find(t => t.name === call.name);
+          if (tool && typeof tool.execute === 'function') {
+            try {
+              logger.info(`Executing tool ${call.name}...`);
+              const result = await tool.execute({
+                ...call.arguments
+              });
+              toolResults.push({
+                name: call.name,
+                arguments: call.arguments,
+                result
+              });
+              logger.info(`Tool ${call.name} executed successfully`);
+              
+              // Record successful tool execution in memory (separate from chat messages)
+              await this.config.memory.add({
+                agentId: params.agentId,
+                sessionId: `${params.chatId}_toolCall`,
+                userId: params.userId,
+                role: 'assistant',
+                content: `Tool ${call.name} executed successfully with result: ${JSON.stringify(result)}`,
+                metadata: { type: 'tool_result', toolName: call.name, success: true, originalChatId: params.chatId }
+              });
+            } catch (error) {
+              logger.error(`Error executing tool ${call.name}:`, error);
+              toolResults.push({
+                name: call.name,
+                arguments: call.arguments,
+                error: error instanceof Error ? error.message : `Error: ${error}`
+              });
+              
+              // Record tool execution error in memory (separate from chat messages)
+              await this.config.memory.add({
+                agentId: params.agentId,
+                sessionId: `${params.chatId}_toolCall`,
+                userId: params.userId,
+                role: 'assistant',
+                content: `Tool ${call.name} execution failed: ${error instanceof Error ? error.message : error}`,
+                metadata: { type: 'tool_result', toolName: call.name, success: false, originalChatId: params.chatId }
+              });
+            }
+          } else {
+            logger.warn(`Tool ${call.name} not found or has no execute method`);
+            toolResults.push({
+              name: call.name,
+              arguments: call.arguments,
+              error: `Tool ${call.name} not found or has no execute method`
+            });
+            
+            // Record tool not found in memory (separate from chat messages)
+            await this.config.memory.add({
+              agentId: params.agentId,
+              sessionId: `${params.chatId}_toolCall`,
+              userId: params.userId,
+              role: 'assistant',
+              content: `Tool ${call.name} not found or has no execute method`,
+              metadata: { type: 'tool_result', toolName: call.name, success: false, originalChatId: params.chatId }
+            });
+          }
+        }
+      }
+      
+      // Generate a response based on tool results
+      if (toolResults.length > 0) {
+        try {
+          logger.info(`Generating response based on ${toolResults.length} tool results`);
+          const resultsMessage = {
+            role: "system" as const,
+            content: `The following tools were called based on the user's request:
+${toolResults.map(tr => `Tool: ${tr.name}
+Arguments: ${JSON.stringify(tr.arguments)}
+Result: ${tr.error ? 'ERROR: ' + tr.error : JSON.stringify(tr.result)}`).join('\n\n')}
+
+Please analyze these results and generate a helpful, coherent response to the user that summarizes what was done and the outcome.
+Do not mention the technical details of the tool calls - just provide a natural, conversational response about what was accomplished.`
+          };
+          
+          // Call the model again with the results
+          const summaryResponse = await params.model.complete([
+            ...messages,
+            resultsMessage
+          ]);
+          
+          // Use the summary response as content
+          responseContent = typeof summaryResponse === 'string' 
+            ? summaryResponse 
+            : summaryResponse.content || summaryResponse.message || summaryResponse.text || 
+              (summaryResponse.choices && summaryResponse.choices[0]?.message?.content) ||
+              JSON.stringify(summaryResponse);
+        } catch (error) {
+          logger.error(`Error generating summary from tool results:`, error);
+          // Fall back to original response content
+          responseContent = response.content || JSON.stringify(toolResults);
+        }
+      } else {
+        // No tools were successfully executed
+        responseContent = response.content || 'Tool calls were made but no results were obtained.';
+      }
+    } else {
+      // Handle both string and structured response (no tool calls)
+      responseContent = typeof response === 'string' 
+        ? response 
+        : response.content || response.message || response.text || 
+          (response.choices && response.choices[0]?.message?.content) ||
+          JSON.stringify(response);
+    }
     
     // Add assistant response to memory
     await this.config.memory.add({
