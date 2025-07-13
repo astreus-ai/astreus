@@ -119,6 +119,7 @@ export interface ChatInstance {
     maxTokens?: number;
     stream?: boolean;
     onChunk?: (chunk: string) => void;
+    canUseTools?: boolean; // Controls whether tools should be included in the chat
     
     // Adaptive context options
     useAdaptiveContext?: boolean;
@@ -191,6 +192,7 @@ export interface ChatInstance {
     maxTokens?: number;
     stream?: boolean;
     onChunk?: (chunk: string) => void;
+    canUseTools?: boolean; // Controls whether tools should be included in the chat
     
     // Adaptive context options
     useAdaptiveContext?: boolean;

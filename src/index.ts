@@ -8,6 +8,10 @@ import { createDatabase } from './database/';
 import { createRAG, parsePDF } from './rag/';
 import { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv } from './rag/vector-db';
 import { createChat } from './chat/';
+import { PersonalityFactory } from './personality/';
+
+// Convenience function to create personality manager
+export const createPersonalityManager = PersonalityFactory.create;
 
 export { createAgent };
 export { createProvider };
@@ -18,6 +22,8 @@ export { createChat };
 export { parsePDF };
 export { logger };
 export { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv };
+export { PersonalityFactory };
+export { createPersonalityManager };
 
 export * from './types';
 // Re-export configurations from each module
@@ -28,9 +34,11 @@ export * from "./memory/config";
 export * from "./provider/config";
 export * from "./rag/config";
 export * from "./tasks/config";
+export * from "./personality/config";
 export * from "./utils/errors";
 export * from "./utils";
 export * from "./tasks/";
 export * from "./context/";
+export * from "./personality/";
 export { validateRequiredParam, validateRequiredParams } from "./utils/validation";
 export { PluginRegistry } from "./plugin/";

@@ -7,3 +7,6 @@ export * from "./plugin";
 export * from "./provider";
 export * from "./rag";
 export * from "./task";
+
+// Re-export personality types
+export * from "../personality/types";

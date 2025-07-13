@@ -4,6 +4,7 @@ import { MemoryInstance } from "./memory";
 import { DatabaseInstance } from "./database";
 import { RAGInstance } from "./rag";
 import { ChatInstance, ChatMetadata, ChatSummary } from "./chat";
+import { PersonalityInstance } from "../personality/types";
 
 // Plugin instance interface for objects with getTools method
 export interface PluginWithTools {
@@ -39,6 +40,8 @@ export interface AgentConfig {
   chat?: ChatInstance;
   /** Optional: Task manager instance for task-based operations */
   taskManager?: TaskManagerInstance;
+  /** Optional: Personality instance that defines agent's character and behavior */
+  personality?: PersonalityInstance;
 }
 
 // Agent instance interface
@@ -140,6 +143,15 @@ export interface AgentInstance {
   getDatabase(): DatabaseInstance | undefined;
   getTaskManager(): TaskManagerInstance | undefined;
   getRAG(): RAGInstance | undefined;
+  
+  // Personality management methods
+  getPersonality(): PersonalityInstance | undefined;
+  setPersonality(personality: PersonalityInstance): void;
+  removePersonality(): void;
+  
+  // Task management methods (requires taskManager to be configured)
+  createTask(config: Omit<import("./task").TaskConfig, 'agentId'>, model?: ProviderModel): Promise<import("./task").TaskInstance>;
+  executeTask(taskId: string, input?: any): Promise<import("./task").TaskResult>;
 }
 
 // Agent factory function type

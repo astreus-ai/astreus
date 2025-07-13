@@ -8,6 +8,7 @@ import {
   TaskStatus,
 } from "../types";
 import { MemoryInstance, DatabaseInstance, ProviderModel } from "../types";
+import { PersonalityInstance } from "../personality/types";
 import { createDatabase } from "../database";
 import { logger } from "../utils";
 import { Task } from "./task";
@@ -32,6 +33,7 @@ export class TaskExecutor implements TaskManagerInstance {
   private memory?: MemoryInstance;
   private database?: DatabaseInstance;
   private providerModel?: ProviderModel;
+  private personality?: PersonalityInstance;
 
   /**
    * Create a new TaskExecutor instance
@@ -46,6 +48,7 @@ export class TaskExecutor implements TaskManagerInstance {
     this.memory = config?.memory;
     this.database = config?.database;
     this.providerModel = config?.providerModel;
+    this.personality = config?.personality;
     
     logger.debug("System", "TaskExecutor", `Configuration: agent=${this.agentId || 'none'}, session=${this.sessionId || 'none'}`);;
 
@@ -207,11 +210,13 @@ export class TaskExecutor implements TaskManagerInstance {
           ...config,
           agentId: config.agentId || this.agentId,
           sessionId: config.sessionId || this.sessionId,
-          model: taskModel
+          model: taskModel,
+          personality: config.personality || this.personality
         },
         this.memory,
         taskModel,
-        this.database
+        this.database,
+        config.personality || this.personality
       );
 
       // Add the task to our manager
