@@ -9,6 +9,7 @@ import { Plugin } from "../types/plugin";
 import { PluginRegistry } from "../plugin";
 import { createDatabase as _createDatabase, DatabaseInstance } from "../database";
 import { MemoryInstance, MemoryEntry, ProviderModel, ProviderMessage, CompletionOptions } from "../types";
+import { PersonalityInstance } from "../personality/types";
 import { logger } from "../utils";
 import { IntentRecognizer } from "../utils/intent";
 
@@ -30,13 +31,14 @@ export class Task implements TaskInstance {
   public contextId?: string;
   public memory?: MemoryInstance;
   public database?: DatabaseInstance;
+  public personality?: PersonalityInstance;
 
   public isCancelled: boolean = false;
   
   // Add a tracking variable to prevent duplicate logging
   private toolSelectionLogged: boolean = false;
 
-  constructor(config: TaskConfig, memory?: MemoryInstance, model?: ProviderModel, database?: DatabaseInstance) {
+  constructor(config: TaskConfig, memory?: MemoryInstance, model?: ProviderModel, database?: DatabaseInstance, personality?: PersonalityInstance) {
     this.id = config.id || uuidv4();
     this.config = {
       ...config,
@@ -50,6 +52,7 @@ export class Task implements TaskInstance {
     this.sessionId = config.sessionId;
     this.memory = memory;
     this.database = database;
+    this.personality = config.personality || personality;
 
     // Set context ID based on session ID
     if (this.sessionId) {
@@ -62,6 +65,23 @@ export class Task implements TaskInstance {
     });
 
 
+  }
+
+  /**
+   * Get the combined system prompt with personality
+   */
+  private getCombinedSystemPrompt(baseSystemPrompt?: string): string {
+    const systemPrompt = baseSystemPrompt || '';
+    
+    if (this.personality) {
+      const personalityPrompt = this.personality.getPrompt();
+      // Add personality prompt at the beginning if it exists
+      if (personalityPrompt) {
+        return personalityPrompt + (systemPrompt ? '\n\n' + systemPrompt : '');
+      }
+    }
+    
+    return systemPrompt;
   }
 
   /**
@@ -277,8 +297,8 @@ Input: ${JSON.stringify(enrichedInput)}`
         
         // Let the model generate a response using the tools
         try {
-          // Create the system message
-          const systemMessage = `You are an AI assistant that can use tools to complete tasks.
+          // Create the base system message
+          const baseSystemMessage = `You are an AI assistant that can use tools to complete tasks.
 Complete this task: ${this.config.name}
 ${this.config.description ? `Description: ${this.config.description}` : ''}
 
@@ -286,6 +306,9 @@ Available tools:
 ${prioritizedPlugins.map(tool => `- ${tool.name}: ${tool.description || 'No description provided'}`).join('\n')}
 
 Use the available tools to fulfill this task effectively. When a tool should be used, call it with appropriate parameters.`;
+
+          // Get the combined system message with personality
+          const systemMessage = this.getCombinedSystemPrompt(baseSystemMessage);
 
           // Log formatted tools for debugging
           logger.debug(`Task ${this.id} using ${formattedTools.length} tools with model ${model.name}`, {
@@ -901,10 +924,11 @@ Do not mention the technical details of the tool calls - just provide a natural,
     config: TaskConfig,
     memory?: MemoryInstance,
     model?: ProviderModel,
-    database?: DatabaseInstance
+    database?: DatabaseInstance,
+    personality?: PersonalityInstance
   ): Promise<TaskInstance> {
     // Create a new task instance
-    const task = new Task(config, memory, model, database);
+    const task = new Task(config, memory, model, database, personality);
 
     // Save task to database if database is available
     if (task.database) {
@@ -980,9 +1004,10 @@ Do not mention the technical details of the tool calls - just provide a natural,
     config: TaskConfig,
     memory?: MemoryInstance,
     model?: ProviderModel,
-    database?: DatabaseInstance
+    database?: DatabaseInstance,
+    personality?: PersonalityInstance
   ): TaskInstance {
     // Create and return a new task instance without waiting for save
-    return new Task(config, memory, model, database);
+    return new Task(config, memory, model, database, personality);
   }
 } 

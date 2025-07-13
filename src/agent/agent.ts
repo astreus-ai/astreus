@@ -13,6 +13,7 @@ import {
   ChatMetadata,
   ChatSummary,
 } from "../types";
+import { PersonalityInstance } from "../personality/types";
 import { logger } from "../utils";
 import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
 import { 
@@ -31,6 +32,7 @@ export class Agent implements AgentInstance {
   private database?: DatabaseInstance;
   private taskManager?: TaskManagerInstance;
   private rag?: RAGInstance;
+  private personality?: PersonalityInstance;
 
   constructor(config: AgentConfig) {
     // Validate required parameters
@@ -82,6 +84,7 @@ export class Agent implements AgentInstance {
     this.database = config.database;
     this.taskManager = config.taskManager;
     this.rag = config.rag;
+    this.personality = config.personality;
 
     logger.info(this.config.name, "Agent", `Initialized with ID: ${this.id}`);
     logger.debug(this.config.name, "Agent", `Model: ${config.model.name}, Memory: ${!!this.memory}, Database: ${!!this.database}`);
@@ -174,6 +177,41 @@ export class Agent implements AgentInstance {
     return this.rag;
   }
 
+  // Personality management methods
+  getPersonality(): PersonalityInstance | undefined {
+    return this.personality;
+  }
+
+  setPersonality(personality: PersonalityInstance): void {
+    validateRequiredParam(personality, "personality", "setPersonality");
+    
+    this.personality = personality;
+    logger.info(this.config.name, "Agent", `Personality set: ${personality.config.name} (${personality.id})`);
+  }
+
+  removePersonality(): void {
+    if (this.personality) {
+      const removedName = this.personality.config.name;
+      this.personality = undefined;
+      logger.info(this.config.name, "Agent", `Personality removed: ${removedName}`);
+    }
+  }
+
+  // Get the combined system prompt with personality
+  private getCombinedSystemPrompt(baseSystemPrompt?: string): string {
+    const systemPrompt = baseSystemPrompt || this.config.systemPrompt || '';
+    
+    if (this.personality) {
+      const personalityPrompt = this.personality.getPrompt();
+      // Add personality prompt at the beginning if it exists
+      if (personalityPrompt) {
+        return personalityPrompt + (systemPrompt ? '\n\n' + systemPrompt : '');
+      }
+    }
+    
+    return systemPrompt;
+  }
+
   // Memory access methods
   async getHistory(sessionId: string, limit?: number): Promise<any[]> {
     validateRequiredParam(sessionId, "sessionId", "getHistory");
@@ -247,19 +285,24 @@ export class Agent implements AgentInstance {
     metadata?: Record<string, unknown>;
     stream?: boolean;
     onChunk?: (chunk: string) => void;
+    canUseTools?: boolean;
   }): Promise<string> {
     validateRequiredParam(params.message, "params.message", "chat");
 
     const {
       message,
       sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      systemPrompt = this.config.systemPrompt,
+      systemPrompt,
       temperature = 0.7,
       maxTokens = 2000,
       metadata = {},
       stream = false,
-      onChunk
+      onChunk,
+      canUseTools = true
     } = params;
+
+    // Use combined system prompt that includes personality
+    const finalSystemPrompt = this.getCombinedSystemPrompt(systemPrompt);
 
     logger.info(this.config.name, "Chat", `Processing message in session: ${sessionId}`);
     logger.debug(this.config.name, "Chat", `Message length: ${message.length}, Tools: ${this.tools.size}, Stream: ${stream}`);
@@ -275,13 +318,14 @@ export class Agent implements AgentInstance {
       chatId: sessionId,
       agentId: this.id,
       model: this.getModel(),
-      systemPrompt,
-      tools: Array.from(this.tools.values()),
+      systemPrompt: finalSystemPrompt,
+      tools: canUseTools ? Array.from(this.tools.values()) : [],
       metadata,
       temperature,
       maxTokens,
       stream,
-      onChunk
+      onChunk,
+      canUseTools
     });
 
     logger.success(this.config.name, "Chat", `Response generated (${response.length} chars) for session: ${sessionId}`);
@@ -435,6 +479,30 @@ export class Agent implements AgentInstance {
     });
   }
 
+  // Task creation methods
+  async createTask(config: Omit<TaskConfig, 'agentId'>, model?: ProviderModel): Promise<TaskInstance> {
+    if (!this.taskManager) {
+      throw new Error("Task manager not configured for this agent");
+    }
+
+    // Create task with agent's personality automatically included
+    const taskConfig = {
+      ...config,
+      agentId: this.id,
+      personality: config.personality || this.personality // Use task's personality or fall back to agent's
+    };
+
+    return await this.taskManager.createTask(taskConfig, model);
+  }
+
+  async executeTask(taskId: string, input?: any): Promise<TaskResult> {
+    if (!this.taskManager) {
+      throw new Error("Task manager not configured for this agent");
+    }
+
+    return await this.taskManager.executeTask(taskId, input);
+  }
+
   // Enhanced chat methods with chat ID support
   async chatWithId(params: {
     message: string;
@@ -444,6 +512,7 @@ export class Agent implements AgentInstance {
     temperature?: number;
     maxTokens?: number;
     metadata?: Record<string, unknown>;
+    canUseTools?: boolean;
   }): Promise<string> {
     validateRequiredParam(params.message, "params.message", "chatWithId");
     validateRequiredParam(params.chatId, "params.chatId", "chatWithId");
@@ -469,11 +538,12 @@ export class Agent implements AgentInstance {
       agentId: this.id,
       userId: params.userId,
       model: this.getModel(),
-      systemPrompt: params.systemPrompt || this.config.systemPrompt,
-      tools: Array.from(this.tools.values()),
+      systemPrompt: this.getCombinedSystemPrompt(params.systemPrompt),
+      tools: (params.canUseTools !== false) ? Array.from(this.tools.values()) : [],
       metadata: params.metadata,
       temperature: params.temperature,
-      maxTokens: params.maxTokens
+      maxTokens: params.maxTokens,
+      canUseTools: params.canUseTools !== false
     });
   }
 

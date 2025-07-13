@@ -121,6 +121,7 @@ export class ChatService implements ChatInstance {
     maxTokens?: number;
     stream?: boolean;
     onChunk?: (chunk: string) => void;
+    canUseTools?: boolean;
     useAdaptiveContext?: boolean;
     contextTokens?: number;
     compressionStrategy?: string;
@@ -192,6 +193,7 @@ export class ChatService implements ChatInstance {
     maxTokens?: number;
     stream?: boolean;
     onChunk?: (chunk: string) => void;
+    canUseTools?: boolean;
     useAdaptiveContext?: boolean;
     contextTokens?: number;
     compressionStrategy?: string;
@@ -223,6 +225,7 @@ export class ChatService implements ChatInstance {
       maxTokens: params.maxTokens,
       stream: params.stream,
       onChunk: params.onChunk,
+      canUseTools: params.canUseTools,
       useAdaptiveContext: params.useAdaptiveContext,
       contextTokens: params.contextTokens,
       compressionStrategy: params.compressionStrategy

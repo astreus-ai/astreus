@@ -2,6 +2,7 @@ import { Plugin } from "./plugin";
 import { MemoryInstance } from "./memory";
 import { ProviderModel } from "./provider";
 import { DatabaseInstance } from "./database";
+import { PersonalityInstance } from "../personality/types";
 
 // Task status types
 export type TaskStatus = "pending" | "running" | "completed" | "failed";
@@ -19,6 +20,7 @@ export interface TaskConfig {
   agentId?: string; // ID of the agent that created this task
   sessionId?: string; // ID of the session this task belongs to
   model?: ProviderModel; // Model to use for executing the task with tools
+  personality?: PersonalityInstance; // Personality to use for task execution
 }
 
 // Task result
@@ -45,6 +47,7 @@ export interface TaskInstance {
   contextId?: string;
   memory?: MemoryInstance;
   model?: ProviderModel; // Provider model to use
+  personality?: PersonalityInstance; // Personality instance for task execution
 
   // Methods
   execute(input?: any): Promise<TaskResult>;
@@ -61,6 +64,7 @@ export interface TaskManagerConfig {
   memory?: MemoryInstance; // Memory instance for storing task contexts
   database?: DatabaseInstance; // Database instance for storage
   providerModel?: ProviderModel; // Provider model to use for tasks
+  personality?: PersonalityInstance; // Default personality for all tasks created by this manager
 }
 
 export interface TaskManagerInstance {
