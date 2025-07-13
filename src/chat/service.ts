@@ -155,8 +155,38 @@ export class ChatService implements ChatInstance {
       });
     }
 
-    // For now, return a simple implementation that matches the interface
-    const response = `Response to: ${params.message || 'No message provided'}`;
+    // Get conversation history
+    const messages = [];
+    
+    // Add system prompt if provided
+    if (params.systemPrompt) {
+      messages.push({ role: 'system', content: params.systemPrompt });
+    }
+    
+    // Get previous messages from memory
+    const previousMessages = await this.config.memory.getBySession(params.chatId);
+    for (const memory of previousMessages) {
+      messages.push({
+        role: memory.role === 'user' ? 'user' : 'assistant',
+        content: memory.content
+      });
+    }
+
+    // Generate response using the model
+    const completionOptions: any = {
+      temperature: params.temperature || 0.7,
+      maxTokens: params.maxTokens || 2000,
+      stream: params.stream || false
+    };
+
+    if (params.tools && params.canUseTools) {
+      completionOptions.tools = params.tools;
+    }
+
+    const response = await params.model.complete(messages, completionOptions);
+    
+    // Handle both string and structured response
+    const responseContent = typeof response === 'string' ? response : response.content || response.message || String(response);
     
     // Add assistant response to memory
     await this.config.memory.add({
@@ -164,7 +194,7 @@ export class ChatService implements ChatInstance {
       sessionId: params.chatId,
       userId: params.userId,
       role: 'assistant',
-      content: response,
+      content: responseContent,
       metadata: {}
     });
 
@@ -173,7 +203,7 @@ export class ChatService implements ChatInstance {
       await this.updateChatAfterMessage(params.chatId, params.message);
     }
 
-    return response;
+    return responseContent;
   }
 
   async createChatWithMessage(params: {

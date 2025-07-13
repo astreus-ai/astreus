@@ -28,6 +28,8 @@ export class AdaptiveContextManager implements ContextWindowManager {
   private priorityWeights: PriorityWeights;
   private sessionId: string;
   private provider?: ProviderModel;
+  private topicFrequencyMap: Map<string, number> = new Map();
+  private keywordFrequencyMap: Map<string, number> = new Map();
   
   /**
    * Set the LLM provider for AI-powered context management
@@ -159,8 +161,8 @@ export class AdaptiveContextManager implements ContextWindowManager {
     const ageHours = ageMs / (1000 * 60 * 60);
     const recencyScore = Math.max(0, 1 - (ageHours / 24)); // Decay over 24 hours
     
-    // Frequency score (placeholder - would need frequency tracking)
-    const frequencyScore = 0.5;
+    // Frequency score based on content frequency tracking
+    const frequencyScore = this.calculateFrequencyScore(entry);
     
     // Importance score based on content analysis (now async)
     const importanceScore = await this.analyzeImportance(entry);
@@ -188,7 +190,7 @@ export class AdaptiveContextManager implements ContextWindowManager {
    */
   private async analyzeSentimentAndContext(entry: MemoryEntry): Promise<number> {
     if (!this.provider) {
-      return 0.5; // Neutral fallback
+      return this.calculateHeuristicSentimentScore(entry);
     }
     
     try {
@@ -225,14 +227,14 @@ Respond with just a number between 0.0 and 1.0.`;
       const score = parseFloat(scoreText.trim());
       
       if (isNaN(score) || score < 0 || score > 1) {
-        logger.warn(`Invalid sentiment score '${scoreText}' for message, using neutral`);
-        return 0.5;
+        logger.warn(`Invalid sentiment score '${scoreText}' for message, using heuristic fallback`);
+        return this.calculateHeuristicSentimentScore(entry);
       }
       
       return score;
     } catch (error) {
-      logger.warn('LLM sentiment analysis failed, using neutral score:', error);
-      return 0.5;
+      logger.warn('LLM sentiment analysis failed, using heuristic fallback:', error);
+      return this.calculateHeuristicSentimentScore(entry);
     }
   }
 
@@ -240,9 +242,9 @@ Respond with just a number between 0.0 and 1.0.`;
    * Analyze importance of content using LLM-based semantic analysis
    */
   private async analyzeImportance(entry: MemoryEntry): Promise<number> {
-    // If no provider, fall back to keyword-based analysis
+    // If no provider, fall back to heuristic analysis
     if (!this.provider) {
-      return this.keywordBasedImportance(entry);
+      return this.calculateHeuristicImportanceScore(entry);
     }
     
     try {
@@ -282,46 +284,18 @@ Respond with just a number between 0.0 and 1.0.`;
       
       // Validate score
       if (isNaN(score) || score < 0 || score > 1) {
-        logger.warn(`Invalid importance score '${scoreText}' for message, falling back to keyword analysis`);
-        return this.keywordBasedImportance(entry);
+        logger.warn(`Invalid importance score '${scoreText}' for message, falling back to heuristic analysis`);
+        return this.calculateHeuristicImportanceScore(entry);
       }
       
       logger.debug(`LLM importance analysis: ${entry.content.substring(0, 50)}... -> ${score}`);
       return score;
     } catch (error) {
-      logger.warn('LLM importance analysis failed, falling back to keyword analysis:', error);
-      return this.keywordBasedImportance(entry);
+      logger.warn('LLM importance analysis failed, falling back to heuristic analysis:', error);
+      return this.calculateHeuristicImportanceScore(entry);
     }
   }
   
-  /**
-   * Fallback keyword-based importance analysis
-   */
-  private keywordBasedImportance(entry: MemoryEntry): number {
-    const content = entry.content.toLowerCase();
-    
-    // High importance indicators
-    const highImportanceKeywords = ['important', 'remember', 'preference', 'name', 'goal', 'objective'];
-    const mediumImportanceKeywords = ['like', 'want', 'need', 'should', 'must'];
-    
-    let score = 0.3; // Base score
-    
-    // Check for high importance keywords
-    for (const keyword of highImportanceKeywords) {
-      if (content.includes(keyword)) {
-        score += 0.2;
-      }
-    }
-    
-    // Check for medium importance keywords
-    for (const keyword of mediumImportanceKeywords) {
-      if (content.includes(keyword)) {
-        score += 0.1;
-      }
-    }
-    
-    return Math.min(score, 1);
-  }
 
   /**
    * Compress context in a specific layer
@@ -451,6 +425,9 @@ Respond with just a number between 0.0 and 1.0.`;
   async addToImmediate(entry: MemoryEntry): Promise<void> {
     const tokens = this.estimateTokens(entry.content);
     
+    // Update frequency tracking
+    this.updateFrequencyTracking(entry);
+    
     if (this.allocateTokens('immediate', tokens)) {
       this.layers.immediate.messages.push(entry);
       this.layers.immediate.lastUpdated = new Date();
@@ -536,25 +513,27 @@ Example format:
       preferences: []
     };
     
-    // Extract potential names (capitalized words)
-    const namePattern = /\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b/g;
+    // Extract potential names (Unicode-aware, title case patterns)
+    const namePattern = /\b\p{Lu}\p{L}*(?:\s+\p{Lu}\p{L}*)*\b/gu;
     const potentialNames = content.match(namePattern) || [];
     entities.potential_names = [...new Set(potentialNames)];
     
-    // Extract preference indicators
-    const preferencePatterns = [
-      /\bi like\s+([^.!?]+)/gi,
-      /\bi prefer\s+([^.!?]+)/gi,
-      /\bi want\s+([^.!?]+)/gi,
-      /\bi need\s+([^.!?]+)/gi
-    ];
+    // Extract preference-like statements (language-agnostic patterns)
+    const sentences = content.split(/[.!?。！？]/).filter(s => s.trim().length > 5);
     
-    for (const pattern of preferencePatterns) {
-      const matches = content.match(pattern);
-      if (matches) {
-        entities.preferences.push(...matches);
+    sentences.forEach(sentence => {
+      const trimmed = sentence.trim();
+      
+      // Look for preference expressions in multiple languages
+      if (trimmed.length > 10 && trimmed.length < 100) {
+        const hasPersonalIndicator = /\b(I|me|my|ich|je|yo|я|我|私|나)\b/i.test(trimmed);
+        const hasPreferenceIndicator = /\b(like|love|prefer|want|need|enjoy|hate|dislike|mag|möchte|aime|préfère|veux|quiero|prefiero|necesito|люблю|предпочитаю|хочу|喜欢|想要|需要|好き|欲しい|필요|좋아|원해)\b/i.test(trimmed);
+        
+        if (hasPersonalIndicator && hasPreferenceIndicator) {
+          entities.preferences.push(trimmed);
+        }
       }
-    }
+    });
     
     return entities;
   }
@@ -740,5 +719,269 @@ ${conversationText}`;
     }
     
     return parts.join('\n');
+  }
+
+  /**
+   * Track frequency of topics and keywords in the conversation
+   */
+  private updateFrequencyTracking(entry: MemoryEntry): void {
+    // Track topics and keywords using AI if provider is available
+    if (this.provider) {
+      this.extractAndTrackKeywordsAndTopics(entry.content).catch(error => {
+        logger.warn('Keyword and topic extraction failed:', error);
+      });
+    } else {
+      // Fallback: simple word extraction without stop word filtering
+      this.extractKeywordsFallback(entry.content);
+    }
+  }
+
+  /**
+   * Extract keywords and topics using AI and track their frequency
+   */
+  private async extractAndTrackKeywordsAndTopics(content: string): Promise<void> {
+    if (!this.provider) return;
+    
+    try {
+      const prompt = `Analyze this text and extract:
+1. Important keywords (nouns, verbs, adjectives that carry meaning)
+2. Main topics/themes
+3. Skip common stop words in any language
+
+Return as JSON:
+{
+  "keywords": ["keyword1", "keyword2", ...],
+  "topics": ["topic1", "topic2", ...]
+}
+
+Text: ${content}`;
+      
+      const response = await this.provider.complete([
+        {
+          role: "system", 
+          content: "You are an expert at extracting meaningful keywords and topics from text in any language. Skip stop words and common words. Return valid JSON."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ], {
+        temperature: 0.1,
+        maxTokens: 200
+      });
+      
+      const responseText = typeof response === 'string' ? response : response.content;
+      
+      try {
+        const result = JSON.parse(responseText.trim());
+        
+        // Track keywords
+        if (result.keywords && Array.isArray(result.keywords)) {
+          result.keywords.forEach((keyword: string) => {
+            if (keyword && keyword.length > 2) {
+              const normalizedKeyword = keyword.toLowerCase().trim();
+              const current = this.keywordFrequencyMap.get(normalizedKeyword) || 0;
+              this.keywordFrequencyMap.set(normalizedKeyword, current + 1);
+            }
+          });
+        }
+        
+        // Track topics
+        if (result.topics && Array.isArray(result.topics)) {
+          result.topics.forEach((topic: string) => {
+            if (topic && topic.length > 2) {
+              const normalizedTopic = topic.toLowerCase().trim();
+              const current = this.topicFrequencyMap.get(normalizedTopic) || 0;
+              this.topicFrequencyMap.set(normalizedTopic, current + 1);
+            }
+          });
+        }
+        
+        logger.debug(`AI keyword/topic extraction: ${result.keywords?.length || 0} keywords, ${result.topics?.length || 0} topics`);
+      } catch {
+        logger.warn('Failed to parse AI keyword extraction response, using fallback');
+        this.extractKeywordsFallback(content);
+      }
+    } catch (error) {
+      logger.debug('AI keyword/topic extraction failed:', error);
+      this.extractKeywordsFallback(content);
+    }
+  }
+
+  /**
+   * Fallback keyword extraction without AI
+   */
+  private extractKeywordsFallback(content: string): void {
+    // Simple word extraction without stop word filtering (Unicode-aware)
+    const words = content.toLowerCase()
+      .split(/\s+/)
+      .filter(word => 
+        word.length > 3 && 
+        /\p{L}+/u.test(word) // Contains Unicode letter characters
+      );
+    
+    words.forEach(word => {
+      const current = this.keywordFrequencyMap.get(word) || 0;
+      this.keywordFrequencyMap.set(word, current + 1);
+    });
+  }
+
+  /**
+   * Calculate frequency score for a memory entry
+   */
+  private calculateFrequencyScore(entry: MemoryEntry): number {
+    const content = entry.content.toLowerCase();
+    let totalScore = 0;
+    let scoreCount = 0;
+    
+    // Check keyword frequencies (Unicode-aware word splitting for fallback)
+    const words = content.split(/\s+/).filter(word => 
+      word.length > 3 && 
+      /\p{L}+/u.test(word)
+    );
+    
+    words.forEach(word => {
+      const frequency = this.keywordFrequencyMap.get(word) || 0;
+      if (frequency > 0) {
+        // Normalize frequency to 0-1 scale (max frequency gets score 1)
+        const maxFreq = this.keywordFrequencyMap.size > 0 ? Math.max(...this.keywordFrequencyMap.values()) : 1;
+        totalScore += maxFreq > 0 ? frequency / maxFreq : 0;
+        scoreCount++;
+      }
+    });
+    
+    // Check topic frequencies
+    this.topicFrequencyMap.forEach((frequency, topic) => {
+      if (content.includes(topic)) {
+        const maxFreq = this.topicFrequencyMap.size > 0 ? Math.max(...this.topicFrequencyMap.values()) : 1;
+        totalScore += maxFreq > 0 ? frequency / maxFreq : 0;
+        scoreCount++;
+      }
+    });
+    
+    // Return average score, or 0.1 for completely new content
+    return scoreCount > 0 ? totalScore / scoreCount : 0.1;
+  }
+
+
+  /**
+   * Calculate sentiment score using heuristic analysis when AI is not available
+   */
+  private calculateHeuristicSentimentScore(entry: MemoryEntry): number {
+    const content = entry.content;
+    let score = 0.5; // Start with neutral
+    
+    // Language-agnostic indicators
+    const hasQuestion = /[?¿？]/.test(content);
+    const hasExclamation = /[!¡！]/.test(content);
+    const hasEmoticons = /[:;=][-o^]?[)\](|\\pPdD]|<3|♥|❤/.test(content);
+    const hasCapitals = /[A-Z]{2,}/.test(content);
+    
+    // Message characteristics (language independent)
+    if (hasQuestion && entry.role === 'user') {
+      score += 0.1; // Questions suggest engagement
+    }
+    
+    if (hasExclamation) {
+      score += 0.1; // Exclamation suggests emphasis/emotion
+    }
+    
+    if (hasEmoticons) {
+      score += 0.1; // Emoticons suggest engagement
+    }
+    
+    if (hasCapitals) {
+      score += 0.05; // CAPS might indicate emphasis
+    }
+    
+    // Length-based scoring
+    if (content.length > 100) {
+      score += 0.1; // Longer messages often more thoughtful
+    } else if (content.length < 20) {
+      score -= 0.05; // Very short messages often less informative
+    }
+    
+    // Role-based adjustments
+    if (entry.role === 'user') {
+      score += 0.1; // User messages generally important
+    }
+    
+    // Clamp to valid range
+    return Math.max(0.1, Math.min(0.9, score));
+  }
+
+  /**
+   * Calculate importance score using heuristic analysis when AI is not available
+   */
+  private calculateHeuristicImportanceScore(entry: MemoryEntry): number {
+    const content = entry.content;
+    let score = 0.3; // Start lower than neutral for importance
+    
+    // Language-agnostic importance indicators
+    const hasNumbers = /\d/.test(content);
+    const hasUrls = /https?:\/\/|www\.|\.com|\.org|\.net/.test(content);
+    const hasEmails = /@.*\.(com|org|net|edu)/.test(content);
+    const hasSpecialChars = /[#@$%&*+=<>{}[\]|\\]/.test(content);
+    const hasQuestion = /[?¿？]/.test(content);
+    const hasExclamation = /[!¡！]/.test(content);
+    const hasCapitals = /[A-Z]{2,}/.test(content);
+    const hasParentheses = /[()（）]/.test(content);
+    const hasQuotes = /["'"""''„"«»]/.test(content);
+    
+    // Numbers often indicate specific data/facts
+    if (hasNumbers) {
+      score += 0.15;
+    }
+    
+    // URLs/emails indicate references/contacts
+    if (hasUrls || hasEmails) {
+      score += 0.2;
+    }
+    
+    // Special characters might indicate technical content or emphasis
+    if (hasSpecialChars) {
+      score += 0.1;
+    }
+    
+    // Questions often important for understanding user needs
+    if (hasQuestion && entry.role === 'user') {
+      score += 0.15;
+    }
+    
+    // Exclamations suggest emphasis
+    if (hasExclamation) {
+      score += 0.1;
+    }
+    
+    // CAPS might indicate emphasis
+    if (hasCapitals) {
+      score += 0.05;
+    }
+    
+    // Parentheses/quotes often contain important clarifications
+    if (hasParentheses || hasQuotes) {
+      score += 0.1;
+    }
+    
+    // Message length consideration
+    if (content.length > 200) {
+      score += 0.2; // Longer messages often more informative
+    } else if (content.length < 20) {
+      score -= 0.1; // Very short messages often less important
+    }
+    
+    // Role considerations
+    if (entry.role === 'user') {
+      score += 0.1; // User input generally important
+    }
+    
+    // Multiple sentences suggest more developed thought
+    const sentenceCount = content.split(/[.!?。！？]/).filter(s => s.trim().length > 0).length;
+    if (sentenceCount > 2) {
+      score += 0.1;
+    }
+    
+    // Clamp to valid range
+    return Math.max(0.1, Math.min(0.9, score));
   }
 }
