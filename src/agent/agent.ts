@@ -12,6 +12,9 @@ import {
   ChatInstance,
   ChatMetadata,
   ChatSummary,
+  TaskConfig,
+  TaskInstance,
+  TaskResult,
 } from "../types";
 import { PersonalityInstance } from "../personality/types";
 import { logger } from "../utils";
@@ -486,7 +489,7 @@ export class Agent implements AgentInstance {
     }
 
     // Create task with agent's personality automatically included
-    const taskConfig = {
+    const taskConfig: TaskConfig = {
       ...config,
       agentId: this.id,
       personality: config.personality || this.personality // Use task's personality or fall back to agent's

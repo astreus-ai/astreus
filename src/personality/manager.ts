@@ -134,7 +134,6 @@ export class PersonalityManager implements PersonalityManagerInstance {
 
   async list(limit?: number): Promise<PersonalityInstance[]> {
     try {
-      const personalitiesTable = this.database.getTable('personalities');
       // Use knex directly for ordering and limiting
       let query = this.database.knex('personalities').orderBy('created_at', 'desc');
       
