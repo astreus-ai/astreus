@@ -186,7 +186,11 @@ export class ChatService implements ChatInstance {
     const response = await params.model.complete(messages, completionOptions);
     
     // Handle both string and structured response
-    const responseContent = typeof response === 'string' ? response : response.content || response.message || String(response);
+    const responseContent = typeof response === 'string' 
+      ? response 
+      : response.content || response.message || response.text || 
+        (response.choices && response.choices[0]?.message?.content) ||
+        JSON.stringify(response);
     
     // Add assistant response to memory
     await this.config.memory.add({
