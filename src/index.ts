@@ -23,7 +23,6 @@ export { parsePDF };
 export { logger };
 export { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv };
 export { PersonalityFactory };
-export { createPersonalityManager };
 
 export * from './types';
 // Re-export configurations from each module
