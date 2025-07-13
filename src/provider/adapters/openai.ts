@@ -844,7 +844,7 @@ export class OpenAIProvider implements ProviderModel {
       const embeddingClient = this.createServiceClient('embedding');
       logger.debug("Unknown", "OpenAI", "Using embedding API key for embedding generation");
 
-      const embeddingModel = model || process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
+      const embeddingModel = model || process.env.EMBEDDING_MODEL || process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
 
       const response = await embeddingClient.embeddings.create({
         model: embeddingModel,

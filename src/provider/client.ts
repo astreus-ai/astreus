@@ -229,7 +229,7 @@ export class ProviderClient implements ProviderInstance {
 
   // Get the default model name
   getDefaultModel(): string | null {
-    return this.config.defaultModel || null;
+    return this.config.defaultModel || process.env.MODEL_NAME || process.env.DEFAULT_MODEL || null;
   }
 
   listModels(): string[] {
@@ -268,7 +268,7 @@ export class ProviderClient implements ProviderInstance {
   async testEmbeddingModel(name?: string): Promise<boolean> {
     try {
       const modelToUse = name || this.embeddingModel || this.config.embeddingModel || 
-        process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+        process.env.EMBEDDING_MODEL || process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
       
       logger.info("System", "Provider", `Testing embedding model: ${modelToUse}`);
       
