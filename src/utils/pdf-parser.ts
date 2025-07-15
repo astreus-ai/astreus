@@ -111,7 +111,7 @@ export async function parsePDF(
     // Split content into chunks
     const documents = splitByCharacterCount(allText, numPages, opts, baseMetadata);
     
-    logger.debug(`PDF parsed successfully: ${documents.length} chunks created for document ${documentId}`);
+    logger.debug(`PDF parsed successfully: 1 document created with ${documents.length} entries (should be 1) for document ${documentId}`);
     
     return {
       documents,
@@ -127,6 +127,8 @@ export async function parsePDF(
 
 /**
  * Split PDF content into fixed-size chunks by character count
+ * Returns a single document with the full content for DocumentRAG,
+ * chunks will be created by the RAG system itself
  */
 function splitByCharacterCount(
   text: string,
@@ -134,39 +136,20 @@ function splitByCharacterCount(
   options: Required<PDFParseOptions>,
   baseMetadata: Record<string, any>
 ): Omit<Document, 'id'>[] {
-  const { chunkSize, chunkOverlap } = options;
-  const chunks: Omit<Document, 'id'>[] = [];
-  
-  // Estimate content per page to track page numbers
-  const avgCharsPerPage = text.length / numPages;
-  
-  for (let i = 0; i < text.length; i += (chunkSize - chunkOverlap)) {
-    // Stop if we've reached the end of the text
-    if (i >= text.length) break;
-    
-    // Extract chunk content with overlap
-    const content = text.substring(i, i + chunkSize);
-    
-    // Skip empty chunks
-    if (!content.trim()) continue;
-    
-    // Estimate page number based on character position
-    const estimatedPage = Math.min(
-      Math.ceil((i + chunkSize / 2) / avgCharsPerPage),
-      numPages
-    );
-    
-    // Create document chunk
-    chunks.push({
-      content,
-      metadata: {
-        ...baseMetadata,
-        chunk_index: chunks.length,
-        ...(options.includePageNumbers ? { page: estimatedPage } : {}),
-      },
-    });
-  }
-  
-  return chunks;
+  // Return a single document that contains the full PDF content
+  // The RAG system (DocumentRAG or VectorRAG) will handle chunking internally
+  return [{
+    content: text,
+    metadata: {
+      ...baseMetadata,
+      numPages,
+      totalCharacters: text.length,
+      averageCharsPerPage: Math.round(text.length / numPages),
+      // Keep chunk configuration for VectorRAG to use
+      chunkSize: options.chunkSize,
+      chunkOverlap: options.chunkOverlap,
+      includePageNumbers: options.includePageNumbers,
+    },
+  }];
 }
 

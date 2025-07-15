@@ -11,7 +11,9 @@ import { logger } from "../utils";
 import { validateRequiredParam, validateRequiredParams } from "../utils/validation";
 import { 
   DEFAULT_MAX_RESULTS,
-  DEFAULT_VECTOR_SIMILARITY_THRESHOLD
+  DEFAULT_VECTOR_SIMILARITY_THRESHOLD,
+  DEFAULT_CHUNK_SIZE,
+  DEFAULT_CHUNK_OVERLAP
 } from "./config";
 import { DEFAULT_MODEL } from "../agent/config";
 
@@ -22,6 +24,7 @@ import { DEFAULT_MODEL } from "../agent/config";
 export class DocumentRAG implements DocumentRAGInstance {
   public config: DocumentRAGConfig;
   private documentsTableName: string;
+  private chunksTableName: string;
   private embeddingCache: Map<string, { embedding: number[], timestamp: number }> = new Map();
   private readonly CACHE_TTL = 15 * 60 * 1000; // 15 minutes cache TTL
 
@@ -36,10 +39,13 @@ export class DocumentRAG implements DocumentRAGInstance {
       tableName: config.tableName || "rag",
       maxResults: config.maxResults || DEFAULT_MAX_RESULTS,
       storeEmbeddings: config.storeEmbeddings || false,
+      chunkSize: config.chunkSize || DEFAULT_CHUNK_SIZE,
+      chunkOverlap: config.chunkOverlap || DEFAULT_CHUNK_OVERLAP,
     };
     
     const baseTableName = this.config.tableName;
     this.documentsTableName = `${baseTableName}_documents`;
+    this.chunksTableName = `${baseTableName}_chunks`;
     
     logger.debug("System", "DocumentRAG", `Configuration: storeEmbeddings=${this.config.storeEmbeddings}, threshold=${DEFAULT_VECTOR_SIMILARITY_THRESHOLD}`);
     logger.success("System", "DocumentRAG", "Document RAG initialized successfully");
@@ -79,23 +85,33 @@ export class DocumentRAG implements DocumentRAGInstance {
         table.string("id").primary();
         table.text("content").notNullable();
         table.json("metadata").notNullable();
+        table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+      });
+      
+      await database.ensureTable(this.chunksTableName, (table) => {
+        table.string("id").primary();
+        table.string("documentId").notNullable().index();
+        table.text("content").notNullable();
+        table.json("metadata").notNullable();
         if (storeEmbeddings) {
           table.json("embedding");
         }
         table.timestamp("createdAt").defaultTo(database.knex.fn.now());
+        
+        table.foreign("documentId").references("id").inTable(this.documentsTableName).onDelete("CASCADE");
       });
       
       if (storeEmbeddings) {
-        const hasEmbeddingColumn = await database.knex.schema.hasColumn(
-          this.documentsTableName,
+        const hasChunksEmbeddingColumn = await database.knex.schema.hasColumn(
+          this.chunksTableName,
           "embedding"
         );
         
-        if (!hasEmbeddingColumn) {
-          await database.knex.schema.table(this.documentsTableName, (table) => {
+        if (!hasChunksEmbeddingColumn) {
+          await database.knex.schema.table(this.chunksTableName, (table) => {
             table.json("embedding");
           });
-          logger.debug("System", "DocumentRAG", `Added embedding column to ${this.documentsTableName} table`);
+          logger.debug("System", "DocumentRAG", `Added embedding column to ${this.chunksTableName} table`);
         }
       }
       
@@ -124,6 +140,7 @@ export class DocumentRAG implements DocumentRAGInstance {
       const { database, storeEmbeddings } = this.config;
       const documentId = uuidv4();
       
+      // Store the document metadata
       const docToInsert: any = {
         id: documentId,
         content: document.content,
@@ -131,26 +148,114 @@ export class DocumentRAG implements DocumentRAGInstance {
         createdAt: new Date(),
       };
       
-      if (storeEmbeddings) {
-        try {
-          const embedding = await this.generateEmbeddingWithCache(document.content);
-          if (embedding && embedding.length > 0) {
-            docToInsert.embedding = JSON.stringify(embedding);
-            logger.debug("System", "DocumentRAG", `Generated embedding for document ${documentId} (${embedding.length} dimensions)`);
-          }
-        } catch (embeddingError) {
-          logger.warn("System", "DocumentRAG", `Error generating embedding for document: ${embeddingError}`);
-        }
-      }
-      
       await database.knex(this.documentsTableName).insert(docToInsert);
       
-      logger.debug("System", "DocumentRAG", `Added document ${documentId} to RAG system`);
+      // Create chunks from the document
+      const chunks = this.chunkDocument(documentId, document);
+      
+      // Store chunks with embeddings
+      if (storeEmbeddings) {
+        // Process chunks in batches for better performance
+        const batchSize = 20;
+        
+        for (let i = 0; i < chunks.length; i += batchSize) {
+          const batch = chunks.slice(i, i + batchSize);
+          
+          // Generate embeddings in parallel
+          const embeddingPromises = batch.map(chunk => 
+            this.generateEmbeddingWithCache(chunk.content)
+          );
+          
+          const embeddings = await Promise.all(embeddingPromises);
+          
+          // Store chunks with embeddings
+          const chunkInserts = batch.map((chunk, index) => ({
+            id: uuidv4(),
+            documentId: chunk.documentId,
+            content: chunk.content,
+            metadata: JSON.stringify(chunk.metadata),
+            embedding: JSON.stringify(embeddings[index]),
+            createdAt: new Date(),
+          }));
+          
+          await database.knex(this.chunksTableName).insert(chunkInserts);
+          
+          logger.debug("System", "DocumentRAG", `Processed batch of ${batch.length} chunks with embeddings`);
+        }
+        
+        logger.debug("System", "DocumentRAG", `Document ${documentId}: Created ${chunks.length} chunks with embeddings`);
+      } else {
+        // Store chunks without embeddings
+        const chunkInserts = chunks.map(chunk => ({
+          id: uuidv4(),
+          documentId: chunk.documentId,
+          content: chunk.content,
+          metadata: JSON.stringify(chunk.metadata),
+          createdAt: new Date(),
+        }));
+        
+        await database.knex(this.chunksTableName).insert(chunkInserts);
+        
+        logger.debug("System", "DocumentRAG", `Document ${documentId}: Created ${chunks.length} chunks without embeddings`);
+      }
+      
+      logger.debug("System", "DocumentRAG", `Added document ${documentId} to DocumentRAG system`);
       return documentId;
     } catch (error) {
-      logger.error("System", "DocumentRAG", `Error adding document to RAG system: ${error}`);
+      logger.error("System", "DocumentRAG", `Error adding document to DocumentRAG system: ${error}`);
       throw error;
     }
+  }
+
+  /**
+   * Split a document into chunks for DocumentRAG
+   * @param documentId The ID of the document
+   * @param document The document to chunk
+   * @returns Array of chunks
+   */
+  private chunkDocument(
+    documentId: string,
+    document: Omit<Document, "id" | "embedding">
+  ): { documentId: string, content: string, metadata: Record<string, any> }[] {
+    const { chunkSize, chunkOverlap } = this.config;
+    const text = document.content;
+    const chunks: { documentId: string, content: string, metadata: Record<string, any> }[] = [];
+    
+    // Extract page info from metadata if available (from PDF parser)
+    const numPages = document.metadata?.numPages;
+    const includePageNumbers = document.metadata?.includePageNumbers;
+    const avgCharsPerPage = numPages ? text.length / numPages : 0;
+    
+    for (let i = 0; i < text.length; i += (chunkSize! - chunkOverlap!)) {
+      if (i >= text.length) break;
+      
+      const chunkContent = text.substring(i, i + chunkSize!);
+      
+      if (!chunkContent.trim()) continue;
+      
+      // Estimate page number if available
+      let pageEstimate = undefined;
+      if (numPages && includePageNumbers && avgCharsPerPage > 0) {
+        pageEstimate = Math.min(
+          Math.ceil((i + chunkSize! / 2) / avgCharsPerPage),
+          numPages
+        );
+      }
+      
+      chunks.push({
+        documentId,
+        content: chunkContent,
+        metadata: {
+          ...document.metadata,
+          chunk_index: chunks.length,
+          start_char: i,
+          end_char: Math.min(i + chunkSize!, text.length),
+          ...(pageEstimate ? { page: pageEstimate } : {}),
+        },
+      });
+    }
+    
+    return chunks;
   }
 
   /**
@@ -265,11 +370,17 @@ export class DocumentRAG implements DocumentRAGInstance {
     try {
       const { database } = this.config;
       
+      // Delete chunks first (foreign key constraint will handle this automatically with CASCADE)
+      const chunkCount = await database.knex(this.chunksTableName)
+        .where("documentId", id)
+        .count("* as count");
+      
+      // Delete the document (chunks will be deleted automatically due to CASCADE)
       await database.knex(this.documentsTableName)
         .where("id", id)
         .delete();
       
-      logger.debug("System", "DocumentRAG", `Successfully deleted document ${id}`);
+      logger.debug("System", "DocumentRAG", `Successfully deleted document ${id} and ${chunkCount[0].count} chunks`);
     } catch (error) {
       logger.error("System", "DocumentRAG", `Error deleting document: ${error}`);
       throw error;
@@ -403,28 +514,47 @@ export class DocumentRAG implements DocumentRAGInstance {
     try {
       const { database, maxResults } = this.config;
       
-      // Simple keyword search using database LIKE queries
-      const documents = await database.knex(this.documentsTableName)
+      // Search in chunks instead of full documents
+      const chunks = await database.knex(this.chunksTableName)
         .whereRaw("LOWER(content) LIKE ?", [`%${query.toLowerCase()}%`])
         .limit(limit || maxResults!);
       
+      // Get document metadata for each chunk
+      const documentIds = [...new Set(chunks.map((chunk: any) => chunk.documentId))];
+      const documents = await database.knex(this.documentsTableName)
+        .whereIn("id", documentIds)
+        .select("*");
+      
+      const documentsMap = documents.reduce((map: any, doc: any) => {
+        map[doc.id] = doc;
+        return map;
+      }, {});
+      
       // Process results with enhanced metadata
-      return documents.map(doc => {
-        const parsedMetadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
+      return chunks.map((chunk: any) => {
+        const chunkMetadata = typeof chunk.metadata === 'string' ? JSON.parse(chunk.metadata) : chunk.metadata;
+        const parentDocument = documentsMap[chunk.documentId];
+        const documentMetadata = parentDocument 
+          ? (typeof parentDocument.metadata === 'string' ? JSON.parse(parentDocument.metadata) : parentDocument.metadata)
+          : {};
         
         return {
-          content: doc.content,
+          content: chunk.content,
           metadata: {
-            // Include original document metadata
-            ...parsedMetadata,
-            // Add document-level information for LLM context
-            documentId: doc.id,
-            documentType: 'full_document',
+            ...chunkMetadata,
+            chunkId: chunk.id,
+            documentId: chunk.documentId,
+            chunkType: 'text_chunk',
             searchMethod: 'keyword',
-            contentLength: doc.content.length,
-            createdAt: doc.createdAt
+            contentLength: chunk.content.length,
+            createdAt: chunk.createdAt,
+            document: {
+              ...documentMetadata,
+              documentLength: parentDocument ? parentDocument.content.length : null,
+              documentCreatedAt: parentDocument ? parentDocument.createdAt : null
+            }
           },
-          sourceId: doc.id,
+          sourceId: chunk.id,
         };
       });
     } catch (error) {
@@ -450,47 +580,78 @@ export class DocumentRAG implements DocumentRAGInstance {
       
       logger.debug("System", "DocumentRAG", `Searching by embedding with ${embedding.length} dimensions, limit: ${limit || maxResults}`);
       
-      const documents = await database.knex(this.documentsTableName)
+      // Search in chunks instead of full documents
+      const chunks = await database.knex(this.chunksTableName)
         .select("*")
         .whereNotNull("embedding");
       
-      logger.debug("System", "DocumentRAG", `Found ${documents.length} documents with embeddings`);
+      logger.debug("System", "DocumentRAG", `Found ${chunks.length} chunks with embeddings`);
       
       const results: RAGResult[] = [];
       
-      for (const doc of documents) {
+      for (const chunk of chunks) {
         try {
-          const docEmbedding = typeof doc.embedding === 'string' ? JSON.parse(doc.embedding) : doc.embedding;
+          const chunkEmbedding = typeof chunk.embedding === 'string' ? JSON.parse(chunk.embedding) : chunk.embedding;
           
-          if (!Array.isArray(docEmbedding) || docEmbedding.length === 0) {
+          if (!Array.isArray(chunkEmbedding) || chunkEmbedding.length === 0) {
             continue;
           }
           
-          const similarity = this.calculateCosineSimilarity(embedding, docEmbedding);
+          const similarity = this.calculateCosineSimilarity(embedding, chunkEmbedding);
           
           if (similarity >= threshold) {
-            const parsedMetadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata;
+            const chunkMetadata = typeof chunk.metadata === 'string' ? JSON.parse(chunk.metadata) : chunk.metadata;
             
             results.push({
-              content: doc.content,
+              content: chunk.content,
               metadata: {
-                ...parsedMetadata,
-                documentId: doc.id,
-                documentType: 'full_document',
+                ...chunkMetadata,
+                chunkId: chunk.id,
+                documentId: chunk.documentId,
+                chunkType: 'text_chunk',
                 searchMethod: 'embedding',
                 similarity: similarity,
-                contentLength: doc.content.length,
-                createdAt: doc.createdAt,
-                embeddingDimensions: docEmbedding.length
+                contentLength: chunk.content.length,
+                createdAt: chunk.createdAt,
+                embeddingDimensions: chunkEmbedding.length
               },
               similarity,
-              sourceId: doc.id,
+              sourceId: chunk.id,
             });
           }
         } catch (error) {
-          logger.warn("System", "DocumentRAG", `Error processing document ${doc.id}, skipping: ${error}`);
+          logger.warn("System", "DocumentRAG", `Error processing chunk ${chunk.id}, skipping: ${error}`);
           continue;
         }
+      }
+      
+      // Get document metadata for chunks with high similarity
+      if (results.length > 0) {
+        const documentIds = [...new Set(results.map(r => r.metadata.documentId))];
+        const documents = await database.knex(this.documentsTableName)
+          .whereIn("id", documentIds)
+          .select("*");
+        
+        const documentsMap = documents.reduce((map: any, doc: any) => {
+          map[doc.id] = doc;
+          return map;
+        }, {});
+        
+        // Enhance results with document metadata
+        results.forEach(result => {
+          const parentDocument = documentsMap[result.metadata.documentId];
+          if (parentDocument) {
+            const documentMetadata = typeof parentDocument.metadata === 'string' 
+              ? JSON.parse(parentDocument.metadata) 
+              : parentDocument.metadata;
+            
+            result.metadata.document = {
+              ...documentMetadata,
+              documentLength: parentDocument.content.length,
+              documentCreatedAt: parentDocument.createdAt
+            };
+          }
+        });
       }
       
       return results
@@ -547,16 +708,37 @@ export class DocumentRAG implements DocumentRAGInstance {
       }
       
       try {
-        const result = await database.knex(this.documentsTableName)
+        // Try chunks table first (has more detailed metadata)
+        const chunkResult = await database.knex(this.chunksTableName)
           .select('metadata')
           .whereNotNull('metadata')
           .limit(1);
         
-        if (result && result.length > 0 && result[0].metadata) {
+        if (chunkResult && chunkResult.length > 0 && chunkResult[0].metadata) {
           try {
-            const metadata = typeof result[0].metadata === 'string' 
-              ? JSON.parse(result[0].metadata) 
-              : result[0].metadata;
+            const metadata = typeof chunkResult[0].metadata === 'string' 
+              ? JSON.parse(chunkResult[0].metadata) 
+              : chunkResult[0].metadata;
+            
+            if (metadata && metadata.language) {
+              const detectedLanguage = await this.detectLanguageWithLLM(metadata.language);
+              return detectedLanguage;
+            }
+          } catch {
+          }
+        }
+        
+        // Fallback to documents table
+        const docResult = await database.knex(this.documentsTableName)
+          .select('metadata')
+          .whereNotNull('metadata')
+          .limit(1);
+        
+        if (docResult && docResult.length > 0 && docResult[0].metadata) {
+          try {
+            const metadata = typeof docResult[0].metadata === 'string' 
+              ? JSON.parse(docResult[0].metadata) 
+              : docResult[0].metadata;
             
             if (metadata && metadata.language) {
               const detectedLanguage = await this.detectLanguageWithLLM(metadata.language);

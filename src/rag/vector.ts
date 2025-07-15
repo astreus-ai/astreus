@@ -214,7 +214,7 @@ export class VectorRAG implements VectorRAGInstance {
           logger.debug("System", "VectorRAG", `Processed batch of ${batch.length} chunks`);
         }
         
-        logger.debug("System", "VectorRAG", `Added ${chunks.length} chunks with embeddings for document ${documentId}`);
+        logger.debug("System", "VectorRAG", `Document ${documentId}: Created ${chunks.length} chunks from 1 document with embeddings`);
       } else {
         logger.warn("System", "VectorRAG", "No provider or memory with embedding support provided, chunks stored without embeddings");
         if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
@@ -255,12 +255,26 @@ export class VectorRAG implements VectorRAGInstance {
     const text = document.content;
     const chunks: Omit<Chunk, "id" | "embedding">[] = [];
     
+    // Extract page info from metadata if available (from PDF parser)
+    const numPages = document.metadata?.numPages;
+    const includePageNumbers = document.metadata?.includePageNumbers;
+    const avgCharsPerPage = numPages ? text.length / numPages : 0;
+    
     for (let i = 0; i < text.length; i += (chunkSize! - chunkOverlap!)) {
       if (i >= text.length) break;
       
       const chunkContent = text.substring(i, i + chunkSize!);
       
       if (!chunkContent.trim()) continue;
+      
+      // Estimate page number if available
+      let pageEstimate = undefined;
+      if (numPages && includePageNumbers && avgCharsPerPage > 0) {
+        pageEstimate = Math.min(
+          Math.ceil((i + chunkSize! / 2) / avgCharsPerPage),
+          numPages
+        );
+      }
       
       chunks.push({
         documentId,
@@ -270,6 +284,7 @@ export class VectorRAG implements VectorRAGInstance {
           chunk_index: chunks.length,
           start_char: i,
           end_char: Math.min(i + chunkSize!, text.length),
+          ...(pageEstimate ? { page: pageEstimate } : {}),
         },
       });
     }
