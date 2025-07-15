@@ -81,8 +81,12 @@ export interface VectorRAGConfig extends RAGConfig {
 
 // Document-based RAG configuration
 export interface DocumentRAGConfig extends RAGConfig {
-  /** Optional: Whether to store document embeddings */
+  /** Optional: Whether to store chunk embeddings */
   storeEmbeddings?: boolean;
+  /** Optional: Size of each chunk in characters (default: 1000) */
+  chunkSize?: number;
+  /** Optional: Overlap between chunks in characters (default: 200) */
+  chunkOverlap?: number;
 }
 
 // Base RAG instance
