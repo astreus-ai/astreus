@@ -26,11 +26,30 @@ export { PersonalityFactory };
 
 export * from './types';
 // Re-export configurations from each module
-export * from "./agent/config";
+export { 
+  DEFAULT_AGENT_NAME, 
+  DEFAULT_MODEL,
+  DEFAULT_TEMPERATURE as AGENT_DEFAULT_TEMPERATURE,
+  DEFAULT_MAX_TOKENS as AGENT_DEFAULT_MAX_TOKENS
+} from "./agent/config";
+
 export * from "./context/config";
 export * from "./database/config";
 export * from "./memory/config";
-export * from "./provider/config";
+
+export { 
+  PROVIDER_TYPES,
+  DEFAULT_OPENAI_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
+  DEFAULT_CLAUDE_BASE_URL,
+  DEFAULT_CLAUDE_API_VERSION,
+  DEFAULT_GEMINI_BASE_URL,
+  DEFAULT_TEMPERATURE as PROVIDER_DEFAULT_TEMPERATURE,
+  DEFAULT_MAX_TOKENS as PROVIDER_DEFAULT_MAX_TOKENS,
+  DEFAULT_OPENAI_EMBEDDING_MODEL,
+  DEFAULT_OLLAMA_EMBEDDING_MODEL
+} from "./provider/config";
+
 export * from "./rag/config";
 export * from "./tasks/config";
 export * from "./personality/config";
