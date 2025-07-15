@@ -15,8 +15,11 @@ import { validateRequiredParam, validateRequiredParams } from "../utils/validati
 import { logger } from "../utils/logger";
 import { 
   DEFAULT_OLLAMA_BASE_URL,
-  DEFAULT_MODEL_CONFIGS,
-  AVAILABLE_MODELS
+  DEFAULT_TEMPERATURE,
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_OPENAI_BASE_URL,
+  DEFAULT_CLAUDE_BASE_URL,
+  DEFAULT_GEMINI_BASE_URL
 } from './config';
 
 // Load environment variables
@@ -110,38 +113,28 @@ export class ProviderClient implements ProviderInstance {
       let modelConfig: ProviderModelConfig;
       
       if (typeof modelItem === 'string') {
-        // String format - use defaults from constants
-        const defaultConfigs = DEFAULT_MODEL_CONFIGS[type] as any;
-        const defaultConfig = defaultConfigs?.[modelItem];
+        // String format - create config with environment defaults
+        logger.debug("System", "Provider", `Creating config for model: ${modelItem}`);
         
-        if (defaultConfig) {
-          logger.debug("System", "Provider", `Using default config for model: ${modelItem}`);
-          modelConfig = {
-            ...defaultConfig,
-            name: modelItem
-          };
-        } else {
-          logger.warn("System", "Provider", `No default config found for model: ${modelItem}, using basic config`);
-          // Fallback configuration
-          modelConfig = {
-            name: modelItem,
-            temperature: 0.7,
-            maxTokens: 2048
-          };
-          
-          // Add provider-specific defaults
-          if (type === 'openai') {
-            (modelConfig as OpenAIModelConfig).apiKey = this.config.apiKey || process.env.OPENAI_API_KEY || '';
-            (modelConfig as OpenAIModelConfig).baseUrl = this.config.baseUrl || process.env.OPENAI_BASE_URL;
-          } else if (type === 'ollama') {
-            (modelConfig as OllamaModelConfig).baseUrl = this.config.baseUrl || process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL;
-          } else if (type === 'claude') {
-            (modelConfig as ClaudeModelConfig).apiKey = this.config.apiKey || process.env.ANTHROPIC_API_KEY || '';
-            (modelConfig as ClaudeModelConfig).baseUrl = this.config.baseUrl || process.env.ANTHROPIC_BASE_URL;
-          } else if (type === 'gemini') {
-            (modelConfig as GeminiModelConfig).apiKey = this.config.apiKey || process.env.GOOGLE_API_KEY || '';
-            (modelConfig as GeminiModelConfig).baseUrl = this.config.baseUrl || process.env.GOOGLE_BASE_URL;
-          }
+        // Base config from environment
+        modelConfig = {
+          name: modelItem,
+          temperature: parseFloat(process.env.TEMPERATURE || DEFAULT_TEMPERATURE.toString()),
+          maxTokens: parseInt(process.env.MAX_TOKENS || DEFAULT_MAX_TOKENS.toString())
+        };
+        
+        // Add provider-specific defaults
+        if (type === 'openai') {
+          (modelConfig as OpenAIModelConfig).apiKey = this.config.apiKey || process.env.OPENAI_API_KEY || '';
+          (modelConfig as OpenAIModelConfig).baseUrl = this.config.baseUrl || process.env.OPENAI_BASE_URL || DEFAULT_OPENAI_BASE_URL;
+        } else if (type === 'ollama') {
+          (modelConfig as OllamaModelConfig).baseUrl = this.config.baseUrl || process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL;
+        } else if (type === 'claude') {
+          (modelConfig as ClaudeModelConfig).apiKey = this.config.apiKey || process.env.ANTHROPIC_API_KEY || '';
+          (modelConfig as ClaudeModelConfig).baseUrl = this.config.baseUrl || process.env.ANTHROPIC_BASE_URL || DEFAULT_CLAUDE_BASE_URL;
+        } else if (type === 'gemini') {
+          (modelConfig as GeminiModelConfig).apiKey = this.config.apiKey || process.env.GOOGLE_API_KEY || '';
+          (modelConfig as GeminiModelConfig).baseUrl = this.config.baseUrl || process.env.GOOGLE_BASE_URL || DEFAULT_GEMINI_BASE_URL;
         }
       } else {
         // Object format - use as provided
@@ -240,7 +233,7 @@ export class ProviderClient implements ProviderInstance {
    * Get all available models for this provider type
    */
   getAvailableModels(): string[] {
-    return [...(AVAILABLE_MODELS[this.type] || [])];
+    return Object.keys(this.models);
   }
 
   getEmbeddingModel(): string | null {

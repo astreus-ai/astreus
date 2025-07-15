@@ -1,6 +1,6 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "description": "An AI Agent Framework designed to help you easily build, deploy, and manage intelligent conversational agents powered by large language models (LLMs).",
   "author": "Astreus Team",
   "license": "MIT",
