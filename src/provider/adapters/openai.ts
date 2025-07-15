@@ -648,7 +648,6 @@ export class OpenAIProvider implements ProviderModel {
       // Use our PDF parser with chunk system for RAG compatibility
       const { parsePDF } = await import("../../utils/pdf-parser");
       const parseResult = await parsePDF(filePath, {
-        splitStrategy: 'simple',
         chunkSize: 2000,
         chunkOverlap: 200
       });
