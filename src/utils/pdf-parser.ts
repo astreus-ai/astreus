@@ -6,20 +6,12 @@ import { Document } from '../types';
 
 export interface PDFParseOptions {
   /**
-   * The strategy for splitting the PDF
-   * - 'simple': Split by character count
-   * - 'paragraph': Split by paragraphs
-   * - 'section': Split by detected sections/headers (most intelligent)
-   */
-  splitStrategy: 'simple' | 'paragraph' | 'section';
-  
-  /**
-   * Size of chunks when using 'simple' strategy
+   * Size of chunks
    */
   chunkSize?: number;
   
   /**
-   * Overlap between chunks when using 'simple' or 'paragraph' strategy
+   * Overlap between chunks
    */
   chunkOverlap?: number;
   
@@ -75,7 +67,6 @@ export async function parsePDF(
     
     // Set default options
     const opts: Required<PDFParseOptions> = {
-      splitStrategy: options.splitStrategy || 'section',
       chunkSize: options.chunkSize || 1000,
       chunkOverlap: options.chunkOverlap || 200,
       includePageNumbers: options.includePageNumbers !== undefined ? options.includePageNumbers : true,
@@ -117,8 +108,8 @@ export async function parsePDF(
       creationDate: data.info?.CreationDate ? new Date(data.info.CreationDate) : undefined,
     };
     
-    // Get documents based on splitting strategy
-    const documents = await splitPDFContent(allText, numPages, opts, baseMetadata);
+    // Split content into chunks
+    const documents = splitByCharacterCount(allText, numPages, opts, baseMetadata);
     
     logger.debug(`PDF parsed successfully: ${documents.length} chunks created for document ${documentId}`);
     
@@ -133,34 +124,11 @@ export async function parsePDF(
   }
 }
 
-/**
- * Split PDF content based on the specified strategy
- */
-async function splitPDFContent(
-  text: string,
-  numPages: number,
-  options: Required<PDFParseOptions>,
-  baseMetadata: Record<string, any>
-): Promise<Omit<Document, 'id'>[]> {
-  const { splitStrategy } = options;
-  
-  switch (splitStrategy) {
-    case 'simple':
-      return splitBySimpleChunks(text, numPages, options, baseMetadata);
-    case 'paragraph':
-      return splitByParagraphs(text, numPages, options, baseMetadata);
-    case 'section':
-      return splitBySections(text, numPages, options, baseMetadata);
-    default:
-      logger.warn(`Unknown split strategy: ${splitStrategy}, falling back to 'section'`);
-      return splitBySections(text, numPages, options, baseMetadata);
-  }
-}
 
 /**
- * Split PDF content into simple fixed-size chunks
+ * Split PDF content into fixed-size chunks by character count
  */
-function splitBySimpleChunks(
+function splitByCharacterCount(
   text: string,
   numPages: number,
   options: Required<PDFParseOptions>,
@@ -202,182 +170,3 @@ function splitBySimpleChunks(
   return chunks;
 }
 
-/**
- * Split PDF content by paragraphs
- */
-function splitByParagraphs(
-  text: string,
-  numPages: number,
-  options: Required<PDFParseOptions>,
-  baseMetadata: Record<string, any>
-): Omit<Document, 'id'>[] {
-  // Split by double newlines (common paragraph separator)
-  const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-  const chunks: Omit<Document, 'id'>[] = [];
-  
-  // Estimate content per page to track page numbers
-  const avgCharsPerPage = text.length / numPages;
-  
-  let currentChunk = '';
-  let chunkStart = 0;
-  
-  for (const paragraph of paragraphs) {
-    // If adding this paragraph would exceed chunk size, save current chunk
-    if (currentChunk.length > 0 && 
-        (currentChunk.length + paragraph.length) > options.chunkSize) {
-      
-      // Estimate page based on position in text
-      const estimatedPage = Math.min(
-        Math.ceil((chunkStart + currentChunk.length / 2) / avgCharsPerPage),
-        numPages
-      );
-      
-      chunks.push({
-        content: currentChunk,
-        metadata: {
-          ...baseMetadata,
-          chunk_index: chunks.length,
-          ...(options.includePageNumbers ? { page: estimatedPage } : {}),
-        },
-      });
-      
-      // Start a new chunk with overlap
-      const overlapPoint = Math.max(0, currentChunk.length - options.chunkOverlap);
-      currentChunk = currentChunk.substring(overlapPoint);
-      chunkStart += overlapPoint;
-    }
-    
-    // Add paragraph to current chunk
-    currentChunk += (currentChunk.length > 0 ? '\n\n' : '') + paragraph;
-  }
-  
-  // Add the final chunk if it's not empty
-  if (currentChunk.trim().length > 0) {
-    const estimatedPage = Math.min(
-      Math.ceil((chunkStart + currentChunk.length / 2) / avgCharsPerPage),
-      numPages
-    );
-    
-    chunks.push({
-      content: currentChunk,
-      metadata: {
-        ...baseMetadata,
-        chunk_index: chunks.length,
-        ...(options.includePageNumbers ? { page: estimatedPage } : {}),
-      },
-    });
-  }
-  
-  return chunks;
-}
-
-/**
- * Split PDF content by detected sections/headers (most intelligent option)
- * This uses heuristics to detect section headers and create coherent sections
- */
-function splitBySections(
-  text: string,
-  numPages: number,
-  options: Required<PDFParseOptions>,
-  baseMetadata: Record<string, any>
-): Omit<Document, 'id'>[] {
-  // First split into paragraphs
-  const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-  const chunks: Omit<Document, 'id'>[] = [];
-  
-  // Estimate content per page to track page numbers
-  const avgCharsPerPage = text.length / numPages;
-  let charCount = 0;
-  
-  // Heuristics for detecting headers (Unicode-aware)
-  const headerRegex = /^(?:\d+[.):]|\p{Lu}[.):]|[IVXLCDM]+[.):])/u;
-  const allCapsRegex = /^[\p{Lu}\p{N}\s.,;:()\\-–—]+$/u;
-  
-  let currentSection = '';
-  let currentTitle = '';
-  let sectionStart = 0;
-  
-  for (let i = 0; i < paragraphs.length; i++) {
-    const paragraph = paragraphs[i];
-    const isLikelyHeader = 
-      (paragraph.length < 200 && headerRegex.test(paragraph)) ||
-      (paragraph.length < 150 && allCapsRegex.test(paragraph)) ||
-      (paragraph.length < 100 && !paragraph.endsWith('.') && paragraph.split(' ').length < 10);
-    
-    // If we found a header and have existing content, save the current section
-    if (isLikelyHeader && currentSection.length > 0) {
-      // Estimate page based on position
-      const estimatedPage = Math.min(
-        Math.ceil((sectionStart + currentSection.length / 2) / avgCharsPerPage),
-        numPages
-      );
-      
-      chunks.push({
-        content: currentSection,
-        metadata: {
-          ...baseMetadata,
-          section_title: currentTitle,
-          chunk_index: chunks.length,
-          ...(options.includePageNumbers ? { page: estimatedPage } : {}),
-        },
-      });
-      
-      // Reset for new section
-      sectionStart = charCount;
-      currentSection = '';
-    }
-    
-    // If it's a header, set as current title, otherwise add to current section
-    if (isLikelyHeader) {
-      currentTitle = paragraph.trim();
-      // Add header to section content as well
-      currentSection = paragraph;
-    } else {
-      // Add paragraph to current section
-      currentSection += (currentSection.length > 0 ? '\n\n' : '') + paragraph;
-    }
-    
-    charCount += paragraph.length + 2; // +2 for newlines
-    
-    // If current section exceeds max chunk size, break it up
-    if (currentSection.length > options.chunkSize * 1.5) {
-      // Recursively chunk this large section using the paragraph method
-      const subChunks = splitByParagraphs(
-        currentSection,
-        numPages,
-        options,
-        {
-          ...baseMetadata,
-          section_title: currentTitle,
-        }
-      );
-      
-      // Add all sub-chunks to our output
-      chunks.push(...subChunks);
-      
-      // Reset current section
-      sectionStart = charCount;
-      currentSection = '';
-    }
-  }
-  
-  // Add the final section if not empty
-  if (currentSection.trim().length > 0) {
-    const estimatedPage = Math.min(
-      Math.ceil((sectionStart + currentSection.length / 2) / avgCharsPerPage),
-      numPages
-    );
-    
-    chunks.push({
-      content: currentSection,
-      metadata: {
-        ...baseMetadata,
-        section_title: currentTitle,
-        chunk_index: chunks.length,
-        ...(options.includePageNumbers ? { page: estimatedPage } : {}),
-      },
-    });
-  }
-  
-  return chunks;
-}
