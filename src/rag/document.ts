@@ -83,7 +83,6 @@ export class DocumentRAG implements DocumentRAGInstance {
       
       await database.ensureTable(this.documentsTableName, (table) => {
         table.string("id").primary();
-        table.text("content").notNullable();
         table.json("metadata").notNullable();
         table.timestamp("createdAt").defaultTo(database.knex.fn.now());
       });
@@ -140,10 +139,9 @@ export class DocumentRAG implements DocumentRAGInstance {
       const { database, storeEmbeddings } = this.config;
       const documentId = uuidv4();
       
-      // Store the document metadata
+      // Store only the document metadata (content is in chunks)
       const docToInsert: any = {
         id: documentId,
-        content: document.content,
         metadata: JSON.stringify(document.metadata),
         createdAt: new Date(),
       };
@@ -348,9 +346,17 @@ export class DocumentRAG implements DocumentRAGInstance {
         return null;
       }
       
+      // Reconstruct content from chunks
+      const chunks = await database.knex(this.chunksTableName)
+        .where("documentId", id)
+        .orderBy("metadata->>'chunk_index'")
+        .select("content");
+      
+      const reconstructedContent = chunks.map(chunk => chunk.content).join('');
+      
       return {
         id: document.id,
-        content: document.content,
+        content: reconstructedContent,
         metadata: typeof document.metadata === 'string' ? JSON.parse(document.metadata) : document.metadata,
       };
     } catch (error) {
@@ -550,7 +556,6 @@ export class DocumentRAG implements DocumentRAGInstance {
             createdAt: chunk.createdAt,
             document: {
               ...documentMetadata,
-              documentLength: parentDocument ? parentDocument.content.length : null,
               documentCreatedAt: parentDocument ? parentDocument.createdAt : null
             }
           },
