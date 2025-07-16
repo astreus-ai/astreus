@@ -105,7 +105,6 @@ export class VectorRAG implements VectorRAGInstance {
       } else {
         await database.ensureTable(this.documentsTableName, (table) => {
           table.string("id").primary();
-          table.text("content").notNullable();
           table.json("metadata").notNullable();
           table.timestamp("createdAt").defaultTo(database.knex.fn.now());
         });
@@ -152,8 +151,6 @@ export class VectorRAG implements VectorRAGInstance {
       if (this.config.vectorDatabase?.type === VectorDatabaseType.SAME_AS_MAIN) {
         await database.knex(this.documentsTableName).insert({
           id: documentId,
-          name: document.metadata?.name || document.metadata?.documentId || `Document ${documentId}`,
-          content: document.content,
           metadata: JSON.stringify(document.metadata),
           createdAt: new Date(),
         });
@@ -165,7 +162,6 @@ export class VectorRAG implements VectorRAGInstance {
           await (this.vectorDatabaseConnector as any).addDocument({
             id: documentId,
             name: documentName,
-            content: document.content,
             metadata: document.metadata
           });
           logger.debug("System", "VectorRAG", `Stored document ${documentId} metadata in external vector database`);
@@ -383,9 +379,17 @@ export class VectorRAG implements VectorRAGInstance {
           return null;
         }
         
+        // Reconstruct content from chunks
+        const chunks = await database.knex(this.chunksTableName)
+          .where("documentId", id)
+          .orderBy("metadata->>'chunk_index'")
+          .select("content");
+        
+        const reconstructedContent = chunks.map(chunk => chunk.content).join('');
+        
         return {
           id: document.id,
-          content: document.content,
+          content: reconstructedContent,
           metadata: typeof document.metadata === 'string' ? JSON.parse(document.metadata) : document.metadata,
         };
       } else {
