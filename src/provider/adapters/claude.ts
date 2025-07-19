@@ -102,7 +102,28 @@ export class ClaudeProvider implements ProviderModel {
 
       // Handle streaming
       if (options?.stream && options?.onChunk) {
-        return await this.streamComplete(messages, options);
+        // If tools are available, do tool calling first (no streaming for tool calls)
+        if (options?.tools && options.tools.length > 0 && options?.toolCalling) {
+          logger.debug("Unknown", "Claude", "Tool calling enabled - no streaming for tool calls");
+          
+          // Do regular completion with tools (no streaming)
+          const regularResponse = await this.regularComplete(messages, options);
+          
+          // For tool calls, return the structured response immediately 
+          if (typeof regularResponse === 'object' && regularResponse.tool_calls) {
+            return regularResponse;
+          }
+          
+          // If no tool calls but streaming requested, do artificial streaming
+          if (typeof regularResponse === 'string' && regularResponse.length > 0) {
+            return await this.artificialStream(regularResponse, options.onChunk);
+          }
+          
+          return regularResponse;
+        } else {
+          // No tools - do normal streaming
+          return await this.streamComplete(messages, options);
+        }
       }
 
       // Regular completion
@@ -253,6 +274,112 @@ export class ClaudeProvider implements ProviderModel {
     }));
   }
   
+  // Regular completion without streaming (for tool calling)
+  private async regularComplete(messages: ProviderMessage[], options?: CompletionOptions): Promise<string | StructuredCompletionResponse> {
+    try {
+      // Convert messages to Claude format
+      const claudeMessages = this.convertMessages(messages);
+      
+      // Extract system message
+      const systemMessage = options?.systemMessage || messages.find(m => m.role === 'system')?.content || undefined;
+      
+      // Build request parameters
+      const params: any = {
+        model: this.name,
+        messages: claudeMessages.filter(m => m.role !== 'system'),
+        max_tokens: options?.maxTokens || this.config.maxTokens,
+        temperature: options?.temperature ?? this.config.temperature,
+      };
+
+      if (systemMessage) {
+        params.system = typeof systemMessage === 'string' ? systemMessage : JSON.stringify(systemMessage);
+      }
+
+      // Handle tool calling
+      if (options?.tools && options.tools.length > 0 && options?.toolCalling) {
+        params.tools = this.convertToolsToClaudeFormat(options.tools);
+        params.tool_choice = { type: "auto" };
+      }
+
+      // Make API request
+      const response = await this.client.messages.create(params);
+      
+      // Handle tool calls
+      if (response.content.some((c: any) => c.type === 'tool_use')) {
+        const toolCalls: ProviderToolCall[] = response.content
+          .filter((c: any) => c.type === 'tool_use')
+          .map((toolUse: any) => ({
+            type: 'function',
+            id: toolUse.id,
+            name: toolUse.name,
+            arguments: toolUse.input,
+          }));
+        
+        const textContent = response.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('\n');
+        
+        return {
+          content: textContent,
+          tool_calls: toolCalls,
+        };
+      }
+      
+      // Extract text content
+      const textContent = response.content
+        .filter(c => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('\n');
+      
+      return textContent;
+    } catch (error) {
+      logger.error("Unknown", "Claude", `Regular completion error: ${error}`);
+      throw error;
+    }
+  }
+
+  // Artificial streaming for tool calling results
+  private async artificialStream(text: string, onChunk: (chunk: string) => void): Promise<string> {
+    logger.debug("Unknown", "Claude", `Starting artificial streaming of ${text.length} characters`);
+    
+    // Split text into chunks for more natural streaming
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    let sentCount = 0;
+    
+    for (const sentence of sentences) {
+      sentCount++;
+      
+      // For longer sentences, split into smaller chunks
+      if (sentence.length > 80) {
+        const words = sentence.split(' ');
+        let chunk = '';
+        
+        for (let i = 0; i < words.length; i++) {
+          chunk += (i === 0 ? '' : ' ') + words[i];
+          
+          // Send chunk every few words
+          if (i % 5 === 4 || i === words.length - 1) {
+            onChunk(chunk);
+            chunk = '';
+            
+            // Small delay between chunks
+            await new Promise(resolve => setTimeout(resolve, 30));
+          }
+        }
+      } else {
+        // Send shorter sentences as a single chunk
+        onChunk(sentence + (sentCount < sentences.length ? ' ' : ''));
+        
+        // Slightly longer delay between sentences
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+    
+    logger.debug("Unknown", "Claude", "Artificial streaming completed");
+    return text;
+  }
+
   /**
    * Generate embeddings - not supported by Claude
    */

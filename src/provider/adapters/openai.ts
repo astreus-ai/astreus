@@ -85,14 +85,12 @@ export class OpenAIProvider implements ProviderModel {
 
       // Check if streaming is requested
       if (options?.stream && options?.onChunk) {
-        // If tools are available, do tool calling first then artificial streaming
+        // If tools are available, do tool calling first (no streaming for tool calls)
         if (options?.tools && options.tools.length > 0 && options?.toolCalling) {
-          logger.debug("Unknown", "OpenAI", "Using tool calling with artificial streaming");
+          logger.debug("Unknown", "OpenAI", "Tool calling enabled - no streaming for tool calls");
           
-          // First do regular completion with tools
+          // Do regular completion with tools (no streaming)
           const regularResponse = await this.regularComplete(messages, options);
-          
-          // Response structure logged for debugging
           
           // For tool calls, return the structured response immediately 
           // (streaming will be handled by the chat manager after tool execution)
@@ -100,13 +98,14 @@ export class OpenAIProvider implements ProviderModel {
             return regularResponse;
           }
           
-          // Then do artificial streaming of the result for non-tool responses
+          // If no tool calls but streaming requested, do artificial streaming
           if (typeof regularResponse === 'string' && regularResponse.length > 0) {
             return await this.artificialStream(regularResponse, options.onChunk);
           }
           
           return regularResponse;
         } else {
+          // No tools - do normal streaming
           return await this.streamComplete(messages, options, options.onChunk);
         }
       }
