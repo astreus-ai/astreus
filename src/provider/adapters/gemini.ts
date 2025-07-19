@@ -99,7 +99,16 @@ export class GeminiProvider implements ProviderModel {
 
       // Handle streaming
       if (options?.stream && options?.onChunk) {
-        return await this.streamComplete(messages, options);
+        // If tools are available, do tool calling first (no streaming for tool calls)
+        if (options?.tools && options.tools.length > 0 && options?.toolCalling) {
+          logger.debug("Unknown", "Gemini", "Tool calling enabled - no streaming for tool calls");
+          
+          // Do regular completion with tools (no streaming)
+          // Continue with the regular flow below for tool calls
+        } else {
+          // No tools - do normal streaming
+          return await this.streamComplete(messages, options);
+        }
       }
 
       // Send message and get response

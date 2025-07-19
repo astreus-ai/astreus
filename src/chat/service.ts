@@ -176,11 +176,16 @@ export class ChatService implements ChatInstance {
     const completionOptions: any = {
       temperature: params.temperature || 0.7,
       maxTokens: params.maxTokens || 2000,
-      stream: params.stream || false
+      stream: params.stream || false,
+      toolCalling: params.canUseTools
     };
 
     if (params.tools && params.canUseTools) {
       completionOptions.tools = params.tools;
+    }
+
+    if (params.stream && params.onChunk) {
+      completionOptions.onChunk = params.onChunk;
     }
 
     const response = await params.model.complete(messages, completionOptions);
@@ -289,11 +294,22 @@ Please analyze these results and generate a helpful, coherent response to the us
 Do not mention the technical details of the tool calls - just provide a natural, conversational response about what was accomplished.`
           };
           
-          // Call the model again with the results
+          // Call the model again with the results - with streaming for final response
+          const summaryCompletionOptions: any = {
+            temperature: params.temperature || 0.7,
+            maxTokens: params.maxTokens || 2000,
+            stream: params.stream || false,
+            toolCalling: false // No more tool calls for summary
+          };
+
+          if (params.stream && params.onChunk) {
+            summaryCompletionOptions.onChunk = params.onChunk;
+          }
+
           const summaryResponse = await params.model.complete([
             ...messages,
             resultsMessage
-          ]);
+          ], summaryCompletionOptions);
           
           // Use the summary response as content
           responseContent = typeof summaryResponse === 'string' 

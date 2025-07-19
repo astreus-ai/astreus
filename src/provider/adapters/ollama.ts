@@ -42,6 +42,34 @@ export class OllamaProvider implements ProviderModel {
 
   async complete(messages: ProviderMessage[], options?: CompletionOptions): Promise<string | StructuredCompletionResponse> {
     try {
+      logger.debug("Unknown", "Ollama", `Starting complete with ${options?.tools?.length || 0} tools, stream: ${options?.stream}`);
+
+      // Check if streaming is requested
+      if (options?.stream && options?.onChunk) {
+        // If tools are available, do tool calling first (no streaming for tool calls)
+        if (options?.tools && options.tools.length > 0 && options?.toolCalling) {
+          logger.debug("Unknown", "Ollama", "Tool calling enabled - no streaming for tool calls");
+          
+          // Do regular completion with tools (no streaming)
+          const regularResponse = await this.regularComplete(messages, options);
+          
+          // For tool calls, return the structured response immediately 
+          if (typeof regularResponse === 'object' && regularResponse.tool_calls) {
+            return regularResponse;
+          }
+          
+          // If no tool calls but streaming requested, do artificial streaming
+          if (typeof regularResponse === 'string' && regularResponse.length > 0) {
+            return await this.artificialStream(regularResponse, options.onChunk);
+          }
+          
+          return regularResponse;
+        } else {
+          // No tools - do normal streaming
+          return await this.streamComplete(messages, options);
+        }
+      }
+
       // Format messages for Ollama
       const formattedMessages = this.prepareMessages(messages, options?.systemMessage);
       
@@ -106,7 +134,7 @@ export class OllamaProvider implements ProviderModel {
         temperature: options?.temperature ?? this.config.temperature ?? 0.7,
         num_predict: options?.maxTokens ?? this.config.maxTokens
       },
-      stream: false,
+      stream: options?.stream || false,
     };
     
     // Add tools if provided
@@ -256,6 +284,161 @@ export class OllamaProvider implements ProviderModel {
     return message.content || '';
   }
   
+  async streamComplete(
+    messages: ProviderMessage[], 
+    options?: CompletionOptions
+  ): Promise<string> {
+    try {
+      logger.debug("Unknown", "Ollama", "Starting stream complete");
+
+      // Format messages for Ollama
+      const formattedMessages = this.prepareMessages(messages, options?.systemMessage);
+      
+      // Build request options with streaming enabled
+      const requestOptions = this.buildRequestOptions(formattedMessages, options);
+      requestOptions.stream = true;
+      
+      // Log request info
+      logger.debug(`Ollama streaming request: model=${this.name}`, { 
+        messages: formattedMessages.length, 
+        hasTools: !!requestOptions.tools,
+        toolCount: requestOptions.tools?.length || 0 
+      });
+      
+      // Make streaming API request
+      const response = await fetch(`${this.baseUrl}/api/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestOptions),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Ollama API error: ${response.status} ${errorText}`);
+      }
+
+      if (!response.body) {
+        throw new Error("No response body for streaming");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let fullResponse = '';
+      
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) break;
+          
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n').filter(line => line.trim());
+          
+          for (const line of lines) {
+            try {
+              const data = JSON.parse(line);
+              if (data.message && data.message.content) {
+                const content = data.message.content;
+                fullResponse += content;
+                if (options?.onChunk) {
+                  options.onChunk(content);
+                }
+              }
+            } catch (parseError) {
+              // Skip invalid JSON lines
+              logger.debug("Unknown", "Ollama", `Skipping invalid JSON line: ${line}`);
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      
+      return fullResponse;
+    } catch (error) {
+      logger.error("Unknown", "Ollama", `Streaming error: ${error}`);
+      this.handleError(error);
+      throw error;
+    }
+  }
+
+  // Regular completion without streaming (for tool calling)
+  private async regularComplete(messages: ProviderMessage[], options?: CompletionOptions): Promise<string | StructuredCompletionResponse> {
+    try {
+      // Format messages for Ollama
+      const formattedMessages = this.prepareMessages(messages, options?.systemMessage);
+      
+      // Build request options
+      const requestOptions = this.buildRequestOptions(formattedMessages, options);
+      
+      // Call Ollama API
+      const response = await fetch(`${this.baseUrl}/api/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestOptions),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Ollama API error: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json();
+      
+      // Handle response
+      return this.processResponse(data);
+    } catch (error) {
+      logger.error("Unknown", "Ollama", `Regular completion error: ${error}`);
+      this.handleError(error);
+      throw error;
+    }
+  }
+
+  // Artificial streaming for tool calling results
+  private async artificialStream(text: string, onChunk: (chunk: string) => void): Promise<string> {
+    logger.debug("Unknown", "Ollama", `Starting artificial streaming of ${text.length} characters`);
+    
+    // Split text into chunks for more natural streaming
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    let sentCount = 0;
+    
+    for (const sentence of sentences) {
+      sentCount++;
+      
+      // For longer sentences, split into smaller chunks
+      if (sentence.length > 80) {
+        const words = sentence.split(' ');
+        let chunk = '';
+        
+        for (let i = 0; i < words.length; i++) {
+          chunk += (i === 0 ? '' : ' ') + words[i];
+          
+          // Send chunk every few words
+          if (i % 5 === 4 || i === words.length - 1) {
+            onChunk(chunk);
+            chunk = '';
+            
+            // Small delay between chunks
+            await new Promise(resolve => setTimeout(resolve, 30));
+          }
+        }
+      } else {
+        // Send shorter sentences as a single chunk
+        onChunk(sentence + (sentCount < sentences.length ? ' ' : ''));
+        
+        // Slightly longer delay between sentences
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+    
+    logger.debug("Unknown", "Ollama", "Artificial streaming completed");
+    return text;
+  }
+
   private handleError(error: any): void {
     if (!error) return;
     
