@@ -1,9 +1,8 @@
-// Re-export agent components
-export { Agent } from "./agent";
-export { createAgent } from "./factory";
+import { BaseAgent } from './base';
+import { withMemory } from './decorators/with-memory';
+import { withTask } from './decorators/with-task';
 
-// Re-export types
-export * from "../types/agent";
+export class Agent extends withTask(withMemory(BaseAgent)) {}
 
-// Re-export configuration
-export * from "./config";
+export type { AgentConfig } from './types';
+export default Agent;
