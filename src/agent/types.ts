@@ -7,6 +7,9 @@ export interface AgentConfig {
   maxTokens?: number;
   systemPrompt?: string;
   memory?: boolean;
+  knowledge?: boolean;
+  vision?: boolean;
+  useTools?: boolean;
   contextCompression?: boolean;
   createdAt?: Date;
   updatedAt?: Date;

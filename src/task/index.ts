@@ -7,9 +7,11 @@ import { Memory } from '../memory';
 class Task {
   private agentId: number;
   private knex: Knex;
+  private agentInstance?: any;
 
-  constructor(agentId: number) {
+  constructor(agentId: number, agentInstance?: any) {
     this.agentId = agentId;
+    this.agentInstance = agentInstance;
     const db = getDatabase();
     this.knex = (db as any).knex;
   }
@@ -43,13 +45,18 @@ class Task {
   async createTask(request: TaskRequest): Promise<TaskType> {
     const tableName = this.getTaskTableName();
 
+    const metadata = request.metadata || {};
+    if (request.useTools !== undefined) {
+      metadata.useTools = request.useTools;
+    }
+
     const [task] = await this.knex(tableName)
       .insert({
         agentId: this.agentId,
         prompt: request.prompt,
         response: null,
         status: 'pending',
-        metadata: request.metadata ? JSON.stringify(request.metadata) : null
+        metadata: Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null
       })
       .returning('*');
     
@@ -71,62 +78,115 @@ class Task {
         .where({ id: this.agentId })
         .first();
 
-      const llm = getLLM();
-      
-      // Prepare messages for LLM
-      const llmMessages: { role: 'user' | 'assistant' | 'system'; content: string }[] = [];
-      
-      // Add memory context if agent has memory enabled
-      const agentHasMemory = agentData?.memory || false;
-      if (agentHasMemory) {
-        const memory = new Memory(this.agentId);
-        const recentMemories = await memory.listMemories({
-          limit: 20,
-          orderBy: 'createdAt',
-          order: 'asc'
-        });
-        
-        // Add memories as conversation history
-        for (const mem of recentMemories) {
-          if (mem.metadata?.type === 'user_message') {
-            llmMessages.push({ role: 'user', content: mem.content });
-          } else if (mem.metadata?.type === 'assistant_response') {
-            llmMessages.push({ role: 'assistant', content: mem.content });
-          }
-        }
-      }
-      
-      // Add current prompt
-      llmMessages.push({ role: 'user', content: task.prompt });
-
-      const llmOptions = {
-        model: options?.model || agentData?.model || 'gpt-4o',
-        messages: llmMessages,
-        temperature: agentData?.temperature || 0.7,
-        maxTokens: agentData?.maxTokens || 4096,
-        systemPrompt: agentData?.systemPrompt
-      };
+      // Check if tools should be used for this specific task
+      const taskUseTools = task.metadata?.useTools;
+      const agentUseTools = agentData?.useTools;
+      const shouldUseTools = taskUseTools !== undefined ? taskUseTools : (agentUseTools !== false);
 
       let llmResponse: any;
       
-      if (options?.stream) {
-        // Stream response
-        let fullContent = '';
-        const chunks: any[] = [];
+      // Add memory context if agent has memory enabled
+      const agentHasMemory = agentData?.memory || false;
+
+      // If agent has tools support and this task should use tools
+      if (shouldUseTools && this.agentInstance && typeof this.agentInstance.executeTaskWithTools === 'function') {
         
-        for await (const chunk of llm.generateStreamResponse(llmOptions)) {
-          fullContent += chunk.content;
-          chunks.push(chunk);
+        // Build the prompt with memory context if needed
+        let contextualPrompt = task.prompt;
+        
+        if (agentHasMemory) {
+          const memory = new Memory(this.agentId);
+          const recentMemories = await memory.listMemories({
+            limit: 20,
+            orderBy: 'createdAt',
+            order: 'asc'
+          });
+          
+          if (recentMemories.length > 0) {
+            const memoryContext = recentMemories
+              .map(mem => {
+                if (mem.metadata?.type === 'user_message') {
+                  return `Human: ${mem.content}`;
+                } else if (mem.metadata?.type === 'assistant_response') {
+                  return `Assistant: ${mem.content}`;
+                }
+                return null;
+              })
+              .filter(Boolean)
+              .join('\n');
+            
+            contextualPrompt = `Previous conversation:\n${memoryContext}\n\nCurrent request: ${task.prompt}`;
+          }
+        }
+
+        // Execute task with tools
+        const result = await this.agentInstance.executeTaskWithTools(contextualPrompt, {
+          enableTools: true,
+          stream: options?.stream || false
+        });
+
+        llmResponse = {
+          content: result.response,
+          model: result.model || options?.model || agentData?.model || 'gpt-4o',
+          usage: result.usage,
+          toolCalls: result.toolCalls
+        };
+
+      } else {
+        // Fallback to standard LLM execution without tools
+        const llm = getLLM();
+        
+        // Prepare messages for LLM
+        const llmMessages: { role: 'user' | 'assistant' | 'system'; content: string }[] = [];
+        
+        if (agentHasMemory) {
+          const memory = new Memory(this.agentId);
+          const recentMemories = await memory.listMemories({
+            limit: 20,
+            orderBy: 'createdAt',
+            order: 'asc'
+          });
+          
+          // Add memories as conversation history
+          for (const mem of recentMemories) {
+            if (mem.metadata?.type === 'user_message') {
+              llmMessages.push({ role: 'user', content: mem.content });
+            } else if (mem.metadata?.type === 'assistant_response') {
+              llmMessages.push({ role: 'assistant', content: mem.content });
+            }
+          }
         }
         
-        llmResponse = {
-          content: fullContent,
-          model: chunks[0]?.model || options?.model || agentData?.model || 'gpt-4o',
-          usage: chunks[chunks.length - 1]?.usage
+        // Add current prompt
+        llmMessages.push({ role: 'user', content: task.prompt });
+
+        const llmOptions = {
+          model: options?.model || agentData?.model || 'gpt-4o',
+          messages: llmMessages,
+          temperature: agentData?.temperature || 0.7,
+          maxTokens: agentData?.maxTokens || 4096,
+          systemPrompt: agentData?.systemPrompt
         };
-      } else {
-        // Generate response using LLM
-        llmResponse = await llm.generateResponse(llmOptions);
+
+        if (options?.stream) {
+          // Stream response
+          let fullContent = '';
+          const chunks: any[] = [];
+          
+          for await (const chunk of llm.generateStreamResponse(llmOptions)) {
+            fullContent += chunk.content;
+            chunks.push(chunk);
+          }
+          
+          llmResponse = {
+            content: fullContent,
+            model: chunks[0]?.model || options?.model || agentData?.model || 'gpt-4o',
+            usage: chunks[chunks.length - 1]?.usage
+          };
+        } else {
+          // Generate response using LLM
+          llmResponse = await llm.generateResponse(llmOptions);
+        }
       }
 
       // Update task with response and mark as completed

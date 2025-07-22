@@ -7,7 +7,7 @@ export function withTask(BaseClass: typeof BaseAgent) {
 
     constructor(data: any) {
       super(data);
-      this.task = new Task(this.getId());
+      this.task = new Task(this.getId(), this);
     }
 
     static async create(config: any) {
@@ -15,7 +15,7 @@ export function withTask(BaseClass: typeof BaseAgent) {
       
       // Initialize task table for all agents
       await initializeTaskTable(agent.getId());
-      (agent as any).task = new Task(agent.getId());
+      (agent as any).task = new Task(agent.getId(), agent);
       
       return agent;
     }
@@ -23,7 +23,7 @@ export function withTask(BaseClass: typeof BaseAgent) {
     static async findById(id: number) {
       const agent = await super.findById(id);
       if (agent) {
-        (agent as any).task = new Task(agent.getId());
+        (agent as any).task = new Task(agent.getId(), agent);
       }
       return agent;
     }
@@ -31,7 +31,7 @@ export function withTask(BaseClass: typeof BaseAgent) {
     static async findByName(name: string) {
       const agent = await super.findByName(name);
       if (agent) {
-        (agent as any).task = new Task(agent.getId());
+        (agent as any).task = new Task(agent.getId(), agent);
       }
       return agent;
     }
@@ -39,7 +39,7 @@ export function withTask(BaseClass: typeof BaseAgent) {
     static async list() {
       const agents = await super.list();
       return agents.map((agent: BaseAgent) => {
-        (agent as any).task = new Task(agent.getId());
+        (agent as any).task = new Task(agent.getId(), agent);
         return agent;
       });
     }
@@ -49,19 +49,19 @@ export function withTask(BaseClass: typeof BaseAgent) {
       
       // Ensure task is always available
       if (!this.task) {
-        this.task = new Task(this.getId());
+        this.task = new Task(this.getId(), this);
       }
     }
 
     // Task methods
     public getTask(): Task {
       if (!this.task) {
-        this.task = new Task(this.getId());
+        this.task = new Task(this.getId(), this);
       }
       return this.task;
     }
 
-    async createTask(request: { prompt: string; metadata?: Record<string, any> }) {
+    async createTask(request: { prompt: string; useTools?: boolean; metadata?: Record<string, any> }) {
       return this.getTask().createTask(request);
     }
 
