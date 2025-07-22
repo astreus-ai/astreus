@@ -137,7 +137,6 @@ class Task {
       });
 
       // Add to memory if agent has memory enabled
-      const agentHasMemory = agentData?.memory || false;
       if (agentHasMemory) {
         const memory = new Memory(this.agentId);
         

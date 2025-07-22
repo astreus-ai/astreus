@@ -1,6 +1,6 @@
 import { Knex } from 'knex';
 import { getDatabase } from '../database';
-import { Graph, GraphConfig, GraphNode, GraphEdge } from './types';
+import { Graph, GraphNode, GraphEdge } from './types';
 
 export class GraphStorage {
   private knex: Knex;
@@ -180,7 +180,7 @@ export class GraphStorage {
     }));
 
     const graph: Graph = {
-      id: graphId,
+      id: graphId.toString(),
       config: {
         id: graphId.toString(),
         name: graphData.name,

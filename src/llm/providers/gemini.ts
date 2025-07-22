@@ -1,17 +1,18 @@
-import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig, LLMMessage } from '../types';
+import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig } from '../types';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export class GeminiProvider implements LLMProvider {
   name = 'gemini';
-  private apiKey: string;
-  private baseUrl: string;
+  private client: GoogleGenerativeAI;
 
   constructor(config?: LLMConfig) {
-    this.apiKey = config?.apiKey || process.env.GOOGLE_API_KEY || '';
-    this.baseUrl = config?.baseUrl || process.env.GOOGLE_BASE_URL || 'https://generativelanguage.googleapis.com/v1';
+    const apiKey = config?.apiKey || process.env.GOOGLE_API_KEY;
     
-    if (!this.apiKey) {
+    if (!apiKey) {
       throw new Error('Google API key is required. Set GOOGLE_API_KEY environment variable.');
     }
+
+    this.client = new GoogleGenerativeAI(apiKey);
   }
 
   getSupportedModels(): string[] {
@@ -26,42 +27,33 @@ export class GeminiProvider implements LLMProvider {
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const { systemInstruction, contents } = this.prepareMessages(options);
     
-    const requestBody: any = {
+    const model = this.client.getGenerativeModel({
+      model: options.model,
+      ...(systemInstruction && { systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] } }),
+      generationConfig: {
+        temperature: options.temperature ?? 0.7,
+        maxOutputTokens: options.maxTokens ?? 4096
+      }
+    });
+
+    const result = await model.generateContent({
       contents,
       generationConfig: {
         temperature: options.temperature ?? 0.7,
         maxOutputTokens: options.maxTokens ?? 4096
       }
-    };
-
-    if (systemInstruction) {
-      requestBody.systemInstruction = { parts: [{ text: systemInstruction }] };
-    }
-
-    const response = await fetch(
-      `${this.baseUrl}/models/${options.model}:generateContent?key=${this.apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`Gemini API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    });
+    
+    const response = result.response;
+    const text = response.text() || '';
     
     return {
-      content: data.candidates?.[0]?.content?.parts?.[0]?.text || '',
+      content: text,
       model: options.model,
       usage: {
-        promptTokens: data.usageMetadata?.promptTokenCount || 0,
-        completionTokens: data.usageMetadata?.candidatesTokenCount || 0,
-        totalTokens: data.usageMetadata?.totalTokenCount || 0
+        promptTokens: 0, // Gemini doesn't provide detailed usage in basic response
+        completionTokens: 0,
+        totalTokens: 0
       }
     };
   }
@@ -69,67 +61,35 @@ export class GeminiProvider implements LLMProvider {
   async* generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const { systemInstruction, contents } = this.prepareMessages(options);
     
-    const requestBody: any = {
+    const model = this.client.getGenerativeModel({
+      model: options.model,
+      ...(systemInstruction && { systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] } }),
+      generationConfig: {
+        temperature: options.temperature ?? 0.7,
+        maxOutputTokens: options.maxTokens ?? 4096
+      }
+    });
+
+    const result = await model.generateContentStream({
       contents,
       generationConfig: {
         temperature: options.temperature ?? 0.7,
         maxOutputTokens: options.maxTokens ?? 4096
       }
-    };
-
-    if (systemInstruction) {
-      requestBody.systemInstruction = { parts: [{ text: systemInstruction }] };
-    }
-
-    const response = await fetch(
-      `${this.baseUrl}/models/${options.model}:streamGenerateContent?key=${this.apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`Gemini API error: ${response.status} ${response.statusText}`);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No response body');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
+    });
 
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.trim() && line.startsWith('{')) {
-            try {
-              const parsed = JSON.parse(line);
-              const content = parsed.candidates?.[0]?.content?.parts?.[0]?.text || '';
-              
-              if (content) {
-                yield { content, done: false, model: options.model };
-              }
-            } catch (e) {
-              // Skip invalid JSON
-            }
-          }
+      for await (const chunk of result.stream) {
+        const text = chunk.text();
+        
+        if (text) {
+          yield { content: text, done: false, model: options.model };
         }
       }
       
       yield { content: '', done: true, model: options.model };
-    } finally {
-      reader.releaseLock();
+    } catch (error) {
+      throw new Error(`Gemini streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -145,7 +105,7 @@ export class GeminiProvider implements LLMProvider {
       }
     }
     
-    // Convert to Gemini format
+    // Convert messages to Gemini format
     const contents = messages.map(msg => ({
       role: msg.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: msg.content }]

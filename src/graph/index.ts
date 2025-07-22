@@ -1,6 +1,6 @@
 import { Knex } from 'knex';
 import { getDatabase } from '../database';
-import { Agent } from '../agent';
+// Agent import removed - using agentId instead
 import { Task } from '../task';
 import { getGraphStorage } from './storage';
 import { 
@@ -243,14 +243,14 @@ export class Graph {
         metadata: node.metadata
       });
       
-      const taskResponse = await task.executeTask(createdTask.id, { 
+      const taskResponse = await task.executeTask(createdTask.id!, { 
         model: node.model,
         stream: forceStream || node.stream 
       });
       
       return {
         type: 'task',
-        taskId: createdTask.id,
+        taskId: createdTask.id!,
         response: taskResponse.response,
         model: taskResponse.model,
         usage: taskResponse.usage
@@ -406,7 +406,7 @@ export class Graph {
   async save(): Promise<number> {
     const storage = getGraphStorage();
     const graphId = await storage.saveGraph(this.graph);
-    this.graph.id = graphId;
+    this.graph.id = graphId.toString();
     this.graph.config.id = graphId.toString();
     return graphId;
   }
@@ -416,7 +416,7 @@ export class Graph {
       throw new Error('Graph must be saved before updating');
     }
     const storage = getGraphStorage();
-    await storage.updateGraph(this.graph.id, this.graph);
+    await storage.updateGraph(parseInt(this.graph.id), this.graph);
   }
 
   async delete(): Promise<boolean> {
@@ -424,7 +424,7 @@ export class Graph {
       throw new Error('Graph must be saved before deleting');
     }
     const storage = getGraphStorage();
-    return await storage.deleteGraph(this.graph.id);
+    return await storage.deleteGraph(parseInt(this.graph.id));
   }
 
   // Static methods
