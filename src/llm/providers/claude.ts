@@ -1,17 +1,23 @@
-import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig, LLMMessage } from '../types';
+import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig } from '../types';
+import Anthropic from '@anthropic-ai/sdk';
+import type { ContentBlockDeltaEvent, TextDelta } from '@anthropic-ai/sdk/resources/messages';
+import type { ToolUseBlock, ToolsBetaContentBlock } from '@anthropic-ai/sdk/resources/beta/tools/messages';
 
 export class ClaudeProvider implements LLMProvider {
   name = 'claude';
-  private apiKey: string;
-  private baseUrl: string;
+  private client: Anthropic;
 
   constructor(config?: LLMConfig) {
-    this.apiKey = config?.apiKey || process.env.ANTHROPIC_API_KEY || '';
-    this.baseUrl = config?.baseUrl || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
+    const apiKey = config?.apiKey || process.env.ANTHROPIC_API_KEY;
     
-    if (!this.apiKey) {
+    if (!apiKey) {
       throw new Error('Anthropic API key is required. Set ANTHROPIC_API_KEY environment variable.');
     }
+
+    this.client = new Anthropic({
+      apiKey,
+      baseURL: config?.baseUrl || process.env.ANTHROPIC_BASE_URL
+    });
   }
 
   getSupportedModels(): string[] {
@@ -26,36 +32,47 @@ export class ClaudeProvider implements LLMProvider {
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const { system, messages } = this.prepareMessages(options);
     
-    const response = await fetch(`${this.baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: options.model,
-        messages,
-        system,
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 4096,
-        stream: false
+    const message = await this.client.messages.create({
+      model: options.model,
+      messages: messages as Anthropic.Messages.MessageParam[],
+      system,
+      temperature: options.temperature ?? 0.7,
+      max_tokens: options.maxTokens ?? 4096,
+      stream: false,
+      ...(options.tools && options.tools.length > 0 && {
+        tools: options.tools.map(tool => ({
+          name: tool.function.name,
+          description: tool.function.description,
+          input_schema: tool.function.parameters
+        }))
       })
     });
 
-    if (!response.ok) {
-      throw new Error(`Claude API error: ${response.status} ${response.statusText}`);
-    }
+    // Extract tool calls from Claude's response
+    const toolCalls = (message.content as ToolsBetaContentBlock[])
+      .filter((block): block is ToolUseBlock => block.type === 'tool_use')
+      .map((block) => ({
+        id: block.id,
+        type: 'function' as const,
+        function: {
+          name: block.name,
+          arguments: block.input || {}
+        }
+      }));
 
-    const data = await response.json();
+    const textContent = (message.content as ToolsBetaContentBlock[])
+      .filter((block): block is Anthropic.Messages.TextBlock => block.type === 'text')
+      .map((block) => block.text)
+      .join('');
     
     return {
-      content: data.content?.[0]?.text || '',
-      model: data.model,
+      content: textContent,
+      model: message.model,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage: {
-        promptTokens: data.usage?.input_tokens || 0,
-        completionTokens: data.usage?.output_tokens || 0,
-        totalTokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
+        promptTokens: message.usage.input_tokens,
+        completionTokens: message.usage.output_tokens,
+        totalTokens: message.usage.input_tokens + message.usage.output_tokens
       }
     };
   }
@@ -63,70 +80,54 @@ export class ClaudeProvider implements LLMProvider {
   async* generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const { system, messages } = this.prepareMessages(options);
     
-    const response = await fetch(`${this.baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: options.model,
-        messages,
-        system,
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 4096,
-        stream: true
+    const stream = await this.client.messages.create({
+      model: options.model,
+      messages: messages as Anthropic.Messages.MessageParam[],
+      system,
+      temperature: options.temperature ?? 0.7,
+      max_tokens: options.maxTokens ?? 4096,
+      stream: true,
+      ...(options.tools && options.tools.length > 0 && {
+        tools: options.tools.map(tool => ({
+          name: tool.function.name,
+          description: tool.function.description,
+          input_schema: tool.function.parameters
+        }))
       })
     });
 
-    if (!response.ok) {
-      throw new Error(`Claude API error: ${response.status} ${response.statusText}`);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No response body');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
+    const toolCalls: any[] = [];
 
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6).trim();
-            
-            try {
-              const parsed = JSON.parse(data);
-              
-              if (parsed.type === 'content_block_delta') {
-                const content = parsed.delta?.text || '';
-                if (content) {
-                  yield { content, done: false, model: options.model };
-                }
-              } else if (parsed.type === 'message_stop') {
-                yield { content: '', done: true, model: options.model };
-                return;
-              }
-            } catch (e) {
-              // Skip invalid JSON
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta') {
+          const deltaEvent = event as ContentBlockDeltaEvent;
+          if (deltaEvent.delta.type === 'text_delta') {
+            const textDelta = deltaEvent.delta as TextDelta;
+            const content = textDelta.text || '';
+            if (content) {
+              yield { content, done: false, model: options.model };
             }
           }
+        } else if (event.type === 'content_block_start') {
+          // Standard streaming doesn't support tool_use in content_block_start
+          // Tool calls will be handled differently or in the final response
+        } else if (event.type === 'message_stop') {
+          yield { 
+            content: '', 
+            done: true, 
+            model: options.model,
+            toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+          };
+          return;
         }
       }
-    } finally {
-      reader.releaseLock();
+    } catch (error) {
+      throw new Error(`Claude streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  private prepareMessages(options: LLMRequestOptions): { system?: string; messages: Omit<LLMMessage, 'role'>[] } {
+  private prepareMessages(options: LLMRequestOptions): { system?: string; messages: any[] } {
     let system = options.systemPrompt;
     const messages = options.messages.filter(m => m.role !== 'system');
     
@@ -138,13 +139,43 @@ export class ClaudeProvider implements LLMProvider {
       }
     }
     
-    // Claude expects messages without system role
+    // Convert messages to Claude format
     return {
       system,
-      messages: messages.map(({ role, content }) => ({ 
-        role: role as 'user' | 'assistant', 
-        content 
-      }))
+      messages: messages.map(msg => {
+        if (msg.role === 'tool') {
+          return {
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: msg.tool_call_id,
+                content: msg.content
+              }
+            ]
+          };
+        }
+        
+        if (msg.tool_calls && msg.tool_calls.length > 0) {
+          return {
+            role: 'assistant',
+            content: [
+              ...(msg.content ? [{ type: 'text', text: msg.content }] : []),
+              ...msg.tool_calls.map(tc => ({
+                type: 'tool_use',
+                id: tc.id,
+                name: tc.function.name,
+                input: tc.function.arguments
+              }))
+            ]
+          };
+        }
+        
+        return {
+          role: msg.role as 'user' | 'assistant',
+          content: msg.content
+        };
+      })
     };
   }
 }

@@ -1,5 +1,4 @@
 import { Agent } from '../agent';
-import { Task, TaskResponse } from '../task';
 
 export type GraphNodeType = 'agent' | 'task';
 export type GraphExecutionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'paused';

@@ -15,25 +15,25 @@ export class LLM {
   private initializeProviders() {
     try {
       this.providers.set('openai', new OpenAIProvider());
-    } catch (e) {
+    } catch {
       // OpenAI provider not available
     }
 
     try {
       this.providers.set('claude', new ClaudeProvider());
-    } catch (e) {
+    } catch {
       // Claude provider not available
     }
 
     try {
       this.providers.set('gemini', new GeminiProvider());
-    } catch (e) {
+    } catch {
       // Gemini provider not available
     }
 
     try {
       this.providers.set('ollama', new OllamaProvider());
-    } catch (e) {
+    } catch {
       // Ollama provider not available
     }
   }

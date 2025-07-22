@@ -30,5 +30,21 @@ export type {
   AddTaskNodeOptions 
 } from './graph/types';
 
+// Context exports
+export { Context } from './context';
+export type { ContextConfig, ContextLayer, ContextWindow } from './context/types';
+
+// Plugin exports
+export { getPlugin, Plugin } from './plugin';
+export type { 
+  Plugin as PluginDefinition, 
+  ToolDefinition, 
+  ToolCall, 
+  ToolResult, 
+  ToolContext,
+  ToolCallResult,
+  PluginConfig 
+} from './plugin/types';
+
 // Default export
 export { default } from './agent';

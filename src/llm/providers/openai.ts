@@ -1,17 +1,21 @@
 import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig, LLMMessage } from '../types';
+import OpenAI from 'openai';
 
 export class OpenAIProvider implements LLMProvider {
   name = 'openai';
-  private apiKey: string;
-  private baseUrl: string;
+  private client: OpenAI;
 
   constructor(config?: LLMConfig) {
-    this.apiKey = config?.apiKey || process.env.OPENAI_API_KEY || '';
-    this.baseUrl = config?.baseUrl || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+    const apiKey = config?.apiKey || process.env.OPENAI_API_KEY;
     
-    if (!this.apiKey) {
+    if (!apiKey) {
       throw new Error('OpenAI API key is required. Set OPENAI_API_KEY environment variable.');
     }
+
+    this.client = new OpenAI({
+      apiKey,
+      baseURL: config?.baseUrl || process.env.OPENAI_BASE_URL
+    });
   }
 
   getSupportedModels(): string[] {
@@ -28,34 +32,37 @@ export class OpenAIProvider implements LLMProvider {
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const messages = this.prepareMessages(options);
     
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: options.model,
-        messages,
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 4096,
-        stream: false
+    const completion = await this.client.chat.completions.create({
+      model: options.model,
+      messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+      temperature: options.temperature ?? 0.7,
+      max_tokens: options.maxTokens ?? 4096,
+      stream: false,
+      ...(options.tools && options.tools.length > 0 && {
+        tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
+        tool_choice: 'auto'
       })
     });
 
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    const message = completion.choices[0]?.message;
     
     return {
-      content: data.choices[0]?.message?.content || '',
-      model: data.model,
+      content: message?.content || '',
+      model: completion.model,
+      toolCalls: message?.tool_calls?.map((tc) => ({
+        id: tc.id,
+        type: tc.type,
+        function: {
+          name: tc.function.name,
+          arguments: typeof tc.function.arguments === 'string' 
+            ? JSON.parse(tc.function.arguments)
+            : tc.function.arguments
+        }
+      })),
       usage: {
-        promptTokens: data.usage?.prompt_tokens || 0,
-        completionTokens: data.usage?.completion_tokens || 0,
-        totalTokens: data.usage?.total_tokens || 0
+        promptTokens: completion.usage?.prompt_tokens || 0,
+        completionTokens: completion.usage?.completion_tokens || 0,
+        totalTokens: completion.usage?.total_tokens || 0
       }
     };
   }
@@ -63,64 +70,69 @@ export class OpenAIProvider implements LLMProvider {
   async* generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const messages = this.prepareMessages(options);
     
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: options.model,
-        messages,
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 4096,
-        stream: true
+    const stream = await this.client.chat.completions.create({
+      model: options.model,
+      messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+      temperature: options.temperature ?? 0.7,
+      max_tokens: options.maxTokens ?? 4096,
+      stream: true,
+      ...(options.tools && options.tools.length > 0 && {
+        tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
+        tool_choice: 'auto'
       })
     });
 
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No response body');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
+    const toolCalls: any[] = [];
 
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6).trim();
-            
-            if (data === '[DONE]') {
-              yield { content: '', done: true, model: options.model };
-              return;
-            }
-
-            try {
-              const parsed = JSON.parse(data);
-              const content = parsed.choices?.[0]?.delta?.content || '';
-              
-              if (content) {
-                yield { content, done: false, model: options.model };
+      for await (const chunk of stream) {
+        const delta = chunk.choices?.[0]?.delta;
+        const content = delta?.content || '';
+        
+        // Handle tool calls in streaming
+        if (delta?.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            if (tc.index !== undefined) {
+              if (!toolCalls[tc.index]) {
+                toolCalls[tc.index] = {
+                  id: tc.id || '',
+                  type: tc.type || 'function',
+                  function: {
+                    name: tc.function?.name || '',
+                    arguments: tc.function?.arguments || ''
+                  }
+                };
+              } else {
+                if (tc.function?.arguments) {
+                  toolCalls[tc.index].function.arguments += tc.function.arguments;
+                }
               }
-            } catch (e) {
-              // Skip invalid JSON
             }
           }
         }
+        
+        if (content) {
+          yield { content, done: false, model: chunk.model };
+        }
       }
-    } finally {
-      reader.releaseLock();
+
+      // Final chunk with tool calls
+      yield { 
+        content: '', 
+        done: true, 
+        model: options.model,
+        toolCalls: toolCalls.length > 0 ? toolCalls.map(tc => ({
+          ...tc,
+          function: {
+            ...tc.function,
+            arguments: typeof tc.function.arguments === 'string' 
+              ? JSON.parse(tc.function.arguments)
+              : tc.function.arguments
+          }
+        })) : undefined
+      };
+    } catch (error) {
+      throw new Error(`OpenAI streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 

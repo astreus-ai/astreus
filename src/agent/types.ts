@@ -7,6 +7,7 @@ export interface AgentConfig {
   maxTokens?: number;
   systemPrompt?: string;
   memory?: boolean;
+  contextCompression?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }
