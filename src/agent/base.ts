@@ -1,11 +1,16 @@
 import { AgentConfig } from './types';
 import { getDatabase } from '../database';
+import { getLLM } from '../llm';
 
 export class BaseAgent {
   public data: AgentConfig;
 
   constructor(data: AgentConfig) {
     this.data = data;
+  }
+
+  get config(): AgentConfig {
+    return this.data;
   }
 
   static async create(config: AgentConfig): Promise<BaseAgent> {
@@ -85,6 +90,43 @@ export class BaseAgent {
     return this.data.memory || false;
   }
 
+  hasKnowledge(): boolean {
+    return this.data.knowledge || false;
+  }
+
+  canUseTools(): boolean {
+    return this.data.useTools !== false; // Default true
+  }
+
+  async ask(prompt: string, options?: { useTools?: boolean; [key: string]: any }): Promise<string> {
+    // Check if tools should be used
+    const shouldUseTools = options?.useTools !== undefined ? options.useTools : this.canUseTools();
+    
+    // If we have executeTaskWithTools method and should use tools
+    if (shouldUseTools && typeof (this as any).executeTaskWithTools === 'function') {
+      const result = await (this as any).executeTaskWithTools(prompt, {
+        enableTools: true,
+        stream: false
+      });
+      return result.response;
+    }
+    
+    // Fallback to simple LLM call without tools
+    const llm = getLLM();
+    const response = await llm.generateResponse({
+      model: this.data.model || 'gpt-4',
+      messages: [
+        ...(this.data.systemPrompt ? [{ role: 'system' as const, content: this.data.systemPrompt }] : []),
+        { role: 'user' as const, content: prompt }
+      ],
+      temperature: this.data.temperature,
+      maxTokens: this.data.maxTokens,
+      ...options
+    });
+    
+    return response.content;
+  }
+
   toJSON() {
     return {
       id: this.data.id,
@@ -95,6 +137,8 @@ export class BaseAgent {
       maxTokens: this.data.maxTokens,
       systemPrompt: this.data.systemPrompt,
       memory: this.data.memory,
+      knowledge: this.data.knowledge,
+      useTools: this.data.useTools,
       createdAt: this.data.createdAt,
       updatedAt: this.data.updatedAt
     };

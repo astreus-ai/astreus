@@ -35,6 +35,8 @@ export class Database {
         table.integer('maxTokens');
         table.text('systemPrompt');
         table.boolean('memory').defaultTo(false);
+        table.boolean('knowledge').defaultTo(false);
+        table.boolean('useTools').defaultTo(true);
         table.timestamps(true, true);
       });
     }
@@ -49,7 +51,9 @@ export class Database {
         temperature: data.temperature,
         maxTokens: data.maxTokens,
         systemPrompt: data.systemPrompt,
-        memory: data.memory || false
+        memory: data.memory || false,
+        knowledge: data.knowledge || false,
+        useTools: data.useTools !== undefined ? data.useTools : true
       })
       .returning('*');
     
@@ -81,7 +85,7 @@ export class Database {
 
   async updateAgent(id: number, data: Partial<AgentConfig>): Promise<AgentConfig | null> {
     const updateData: any = {};
-    const allowedFields = ['name', 'description', 'model', 'temperature', 'maxTokens', 'systemPrompt', 'memory'];
+    const allowedFields = ['name', 'description', 'model', 'temperature', 'maxTokens', 'systemPrompt', 'memory', 'knowledge', 'useTools'];
     
     for (const field of allowedFields) {
       if (field in data) {
@@ -119,6 +123,8 @@ export class Database {
       maxTokens: agent.maxTokens,
       systemPrompt: agent.systemPrompt,
       memory: agent.memory,
+      knowledge: agent.knowledge,
+      useTools: agent.useTools,
       createdAt: new Date(agent.created_at),
       updatedAt: new Date(agent.updated_at)
     };
@@ -147,4 +153,6 @@ export function getDatabase(): Database {
 }
 
 export * from './types';
+export * from './knowledge';
+export * from './embedding';
 export default getDatabase;

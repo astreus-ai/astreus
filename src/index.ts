@@ -5,8 +5,9 @@ export { Memory } from './memory';
 export { Task } from './task';
 
 // Database exports
-export { initializeDatabase, getDatabase } from './database';
+export { getDatabase, EmbeddingService } from './database';
 export type { DatabaseConfig } from './database/types';
+export type { EmbeddingConfig } from './database/embedding';
 
 // Memory types
 export type { Memory as MemoryType, MemorySearchOptions } from './memory/types';
@@ -45,6 +46,10 @@ export type {
   ToolCallResult,
   PluginConfig 
 } from './plugin/types';
+
+// Knowledge exports
+export { Knowledge, knowledgeSearchTool, knowledgeTools } from './knowledge';
+export type { KnowledgeConfig } from './knowledge';
 
 // Default export
 export { default } from './agent';

@@ -52,11 +52,8 @@ const agent = await createAgent({
   systemPrompt: "You are a helpful AI assistant."
 });
 
-// Chat with your agent
-const response = await agent.chat({
-  message: "Tell me about TypeScript",
-  sessionId: "user-123"
-});
+// Ask your agent
+const response = await agent.ask("Tell me about TypeScript");
 
 logger.info("Agent", "Response", response);
 ```

@@ -22,6 +22,7 @@ export interface TaskSearchOptions {
 
 export interface TaskRequest {
   prompt: string;
+  useTools?: boolean;
   metadata?: Record<string, any>;
 }
 
