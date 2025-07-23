@@ -24,29 +24,14 @@ const response = await agent.ask('How can you help me?');
 
 ## Core Features
 
-### Advanced Memory System
-Per-agent persistent memory with automatic context integration and vector search capabilities.
-
-### Task Orchestration
-Structured task execution with status tracking, dependency management, and streaming support.
-
-### Graph Workflows
-Complex workflow orchestration with conditional execution and parallel processing capabilities.
-
-### Multi-Database Support
-Support for SQLite and PostgreSQL with automatic schema migrations and connection pooling.
-
-### Plugin System
-Extensible tool integration with JSON schema validation and automatic LLM function calling.
-
-### Vision Processing
-Built-in image analysis and document processing capabilities for multimodal interactions.
-
-### Knowledge Base
-RAG integration with document chunking, vector embeddings, and similarity search.
-
-### Multi-LLM Integration
-Unified interface for OpenAI, Claude, Gemini, and Ollama with automatic model routing.
+- **Advanced Memory System**: Per-agent persistent memory with automatic context integration and vector search capabilities
+- **Task Orchestration**: Structured task execution with status tracking, dependency management, and streaming support
+- **Graph Workflows**: Complex workflow orchestration with conditional execution and parallel processing capabilities
+- **Multi-Database Support**: Support for SQLite and PostgreSQL with automatic schema migrations and connection pooling
+- **Plugin System**: Extensible tool integration with JSON schema validation and automatic LLM function calling
+- **Vision Processing**: Built-in image analysis and document processing capabilities for multimodal interactions
+- **Knowledge Base**: RAG integration with document chunking, vector embeddings, and similarity search
+- **Multi-LLM Integration**: Unified interface for OpenAI, Claude, Gemini, and Ollama with automatic model routing
 
 ## 📖 Documentation
 
