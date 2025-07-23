@@ -37,7 +37,7 @@ const response = await agent.ask('How can you help me?');
 
 For detailed documentation and advanced features, visit:
 - [Official Documentation](https://astreus.org/docs)
-- [Guides](https://astreus.org/docs/examples)
+- [Examples](https://astreus.org/docs/examples)
 
 ## 🤝 Contributing
 
