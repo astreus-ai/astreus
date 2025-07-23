@@ -15,12 +15,37 @@ export class OllamaProvider implements LLMProvider {
 
   getSupportedModels(): string[] {
     return [
-      'llama3.2',
-      'llama3.1', 
-      'mistral',
+      'deepseek-r1',
+      'deepseek-v3',
+      'deepseek-v2.5',
+      'deepseek-coder',
+      'deepseek-coder-v2',
+      'qwen3',
+      'qwen2.5-coder',
+      'llama3.3',
+      'gemma3',
+      'phi4',
+      'mistral-small',
       'codellama',
+      'llama3.2',
+      'llama3.1',
+      'qwen2.5',
+      'gemma2',
       'phi3',
-      'qwen2.5'
+      'mistral',
+      'codegemma',
+      'wizardlm2',
+      'dolphin-mistral',
+      'openhermes',
+      'deepcoder',
+      'stable-code',
+      'wizardcoder',
+      'magicoder',
+      'solar',
+      'yi',
+      'zephyr',
+      'orca-mini',
+      'vicuna'
     ];
   }
 
