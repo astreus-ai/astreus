@@ -1,7 +1,7 @@
 {
   "name": "@astreus-ai/astreus",
   "version": "0.5.0",
-  "description": "Open-source AI agent framework for creating, deploying and managing intelligent conversational AI agents.",
+  "description": "Open-source AI agent framework for building autonomous systems that solve real-world tasks effectively.",
   "author": "Berke Kiran",
   "license": "MIT",
   "type": "module",
