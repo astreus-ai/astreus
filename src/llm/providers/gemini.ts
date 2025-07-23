@@ -17,10 +17,18 @@ export class GeminiProvider implements LLMProvider {
 
   getSupportedModels(): string[] {
     return [
+      'gemini-2.5-pro',
+      'gemini-2.5-pro-deep-think',
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-2.0-flash',
+      'gemini-2.0-flash-thinking',
+      'gemini-2.0-flash-lite',
+      'gemini-2.0-pro-experimental',
       'gemini-1.5-pro',
       'gemini-1.5-flash',
-      'gemini-pro',
-      'gemini-pro-vision'
+      'gemini-1.5-flash-8b',
+      'gemini-pro'
     ];
   }
 
