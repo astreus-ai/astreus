@@ -27,7 +27,7 @@ const response = await agent.ask('How can you help me?');
 - **Advanced Memory System**: Per-agent persistent memory with automatic context integration and vector search capabilities
 - **Task Orchestration**: Structured task execution with status tracking, dependency management, and streaming support
 - **Graph Workflows**: Complex workflow orchestration with conditional execution and parallel processing capabilities
-- **Multi-Database Support**: Support for SQLite and PostgreSQL with automatic schema migrations and connection pooling
+- **MCP Integration**: Model Context Protocol support for seamless external tool and service connections
 - **Plugin System**: Extensible tool integration with JSON schema validation and automatic LLM function calling
 - **Vision Processing**: Built-in image analysis and document processing capabilities for multimodal interactions
 - **Knowledge Base**: RAG integration with document chunking, vector embeddings, and similarity search
@@ -57,4 +57,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 Astreus Team - [https://astreus.org](https://astreus.org)
 
-Project Link: [https://github.com/astreus-ai/astreus](https://github.com/astreus-ai/astreus)
+Project Link: [https://github.com/astreus-ai/astreus/astreus](https://github.com/astreus-ai/astreus/astreus)

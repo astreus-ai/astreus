@@ -1,4 +1,22 @@
 import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig } from '../types';
+
+// Ollama-specific tool parameter schema (matches JSON Schema format)
+interface OllamaToolSchema {
+  type: string;
+  properties?: Record<string, OllamaToolParameter>;
+  required?: string[];
+  items?: OllamaToolParameter;
+  description?: string;
+  enum?: Array<string | number>;
+}
+
+interface OllamaToolParameter {
+  type?: string | string[];
+  items?: { type: string };
+  description?: string;
+  enum?: Array<string | number>;
+  properties?: Record<string, OllamaToolParameter>;
+}
 import { Ollama, Message, ChatResponse, ToolCall } from 'ollama';
 
 export class OllamaProvider implements LLMProvider {
@@ -65,7 +83,7 @@ export class OllamaProvider implements LLMProvider {
         function: {
           name: tool.function.name,
           description: tool.function.description,
-          parameters: tool.function.parameters
+          parameters: tool.function.parameters as OllamaToolSchema
         }
       }))
     }) as ChatResponse;
@@ -108,12 +126,12 @@ export class OllamaProvider implements LLMProvider {
         function: {
           name: tool.function.name,
           description: tool.function.description,
-          parameters: tool.function.parameters
+          parameters: tool.function.parameters as OllamaToolSchema
         }
       }))
     });
 
-    const toolCalls: Array<{id: string; type: 'function'; function: {name: string; arguments: any}}> = [];
+    const toolCalls: Array<{id: string; type: 'function'; function: {name: string; arguments: Record<string, string | number | boolean | null>}}> = [];
 
     try {
       for await (const chunk of stream) {

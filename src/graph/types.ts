@@ -1,4 +1,18 @@
 import { Agent } from '../agent';
+import { MetadataObject } from '../types';
+
+/**
+ * Primitive values that can be returned as node results
+ */
+export type GraphResultPrimitive = string | number | boolean | null | Date;
+
+/**
+ * Complex result data that can contain primitives, arrays, or nested objects
+ */
+export type GraphResultValue = 
+  | GraphResultPrimitive
+  | GraphResultPrimitive[]
+  | { [key: string]: GraphResultValue };
 
 export type GraphNodeType = 'agent' | 'task';
 export type GraphExecutionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'paused';
@@ -24,11 +38,11 @@ export interface GraphNode {
   dependencies: string[]; // Node IDs that must complete first
   
   // Results
-  result?: any;
+  result?: GraphResultValue;
   error?: string;
   
   // Metadata
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -38,7 +52,7 @@ export interface GraphEdge {
   fromNodeId: string;
   toNodeId: string;
   condition?: string; // Optional condition for conditional execution
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
 }
 
 export interface GraphConfig {
@@ -49,7 +63,7 @@ export interface GraphConfig {
   maxConcurrency?: number; // Max parallel execution
   timeout?: number; // Execution timeout in ms
   retryAttempts?: number;
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
 }
 
 export interface Graph {
@@ -73,7 +87,7 @@ export interface GraphExecutionLogEntry {
   level: 'info' | 'warn' | 'error' | 'debug';
   message: string;
   nodeId?: string;
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
 }
 
 export interface GraphExecutionResult {
@@ -82,14 +96,14 @@ export interface GraphExecutionResult {
   completedNodes: number;
   failedNodes: number;
   duration: number;
-  results: Record<string, any>; // Node ID -> result mapping
+  results: Record<string, GraphResultValue>; // Node ID -> result mapping
   errors: Record<string, string>; // Node ID -> error mapping
 }
 
 export interface AddNodeOptions {
   dependencies?: string[];
   priority?: number;
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
 }
 
 export interface AddAgentNodeOptions extends AddNodeOptions {

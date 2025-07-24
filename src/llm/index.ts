@@ -4,37 +4,49 @@ import { OpenAIProvider } from './providers/openai';
 import { ClaudeProvider } from './providers/claude';
 import { GeminiProvider } from './providers/gemini';
 import { OllamaProvider } from './providers/ollama';
+import { getLogger } from '../logger';
 
 export class LLM {
   private providers: Map<string, LLMProvider> = new Map();
+  private logger = getLogger();
 
   constructor() {
-    this.initializeProviders();
+    // No longer initialize all providers upfront
   }
 
-  private initializeProviders() {
-    try {
-      this.providers.set('openai', new OpenAIProvider());
-    } catch {
-      // OpenAI provider not available
+  private initializeProvider(providerName: string): LLMProvider {
+    if (this.providers.has(providerName)) {
+      return this.providers.get(providerName)!;
     }
 
     try {
-      this.providers.set('claude', new ClaudeProvider());
-    } catch {
-      // Claude provider not available
-    }
-
-    try {
-      this.providers.set('gemini', new GeminiProvider());
-    } catch {
-      // Gemini provider not available
-    }
-
-    try {
-      this.providers.set('ollama', new OllamaProvider());
-    } catch {
-      // Ollama provider not available
+      let provider: LLMProvider;
+      
+      switch (providerName) {
+        case 'openai':
+          provider = new OpenAIProvider();
+          break;
+        case 'claude':
+          provider = new ClaudeProvider();
+          break;
+        case 'gemini':
+          provider = new GeminiProvider();
+          break;
+        case 'ollama':
+          provider = new OllamaProvider();
+          break;
+        default:
+          throw new Error(`Unsupported provider: ${providerName}`);
+      }
+      
+      this.providers.set(providerName, provider);
+      this.logger.debug(`Initialized provider: ${providerName}`);
+      
+      return provider;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.log('error', `Failed to initialize provider: ${providerName}`, 'LLM', { error: message });
+      throw new Error(`Provider ${providerName} initialization failed: ${message}`);
     }
   }
 
@@ -63,12 +75,8 @@ export class LLM {
       throw new Error(`Unsupported model: ${model}. Supported models: ${this.getSupportedModels().join(', ')}`);
     }
 
-    const provider = this.providers.get(providerType);
-    if (!provider) {
-      throw new Error(`Provider ${providerType} not available. Check your API keys and configuration.`);
-    }
-
-    return provider;
+    // Lazy initialize the provider when first needed
+    return this.initializeProvider(providerType);
   }
 }
 
@@ -85,4 +93,5 @@ export function getLLM(): LLM {
 // Export types and utilities
 export * from './types';
 export * from './models';
+export * from './embeddings';
 export { OpenAIProvider, ClaudeProvider, GeminiProvider, OllamaProvider };

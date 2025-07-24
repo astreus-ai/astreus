@@ -1,6 +1,8 @@
 import { Knex } from 'knex';
+import { IAgentModule, IAgent } from '../agent/types';
 import { getDatabase } from '../database';
 import { getLLM } from '../llm';
+import { MetadataObject } from '../types';
 import { 
   ContextConfig, 
   ContextLayer, 
@@ -8,8 +10,9 @@ import {
   CompressionResult
 } from './types';
 
-export class Context {
-  private agentId: number;
+
+export class Context implements IAgentModule {
+  readonly name = 'context';
   private knex: Knex;
   private config: Required<ContextConfig>;
   private window: ContextWindow;
@@ -17,15 +20,15 @@ export class Context {
   private compression: boolean;
   private model: string;
   private temperature: number;
+  private initialized: boolean = false;
 
-  constructor(agentId: number, maxTokens: number = 4000, compression: boolean = true, model: string = 'gpt-4o-mini', temperature: number = 0.3, config: ContextConfig = {}) {
-    this.agentId = agentId;
+  constructor(private agent: IAgent, maxTokens: number = 4000, compression: boolean = true, model: string = 'gpt-4o-mini', temperature: number = 0.3, config: ContextConfig = {}) {
     this.maxTokens = maxTokens;
     this.compression = compression;
     this.model = model;
     this.temperature = temperature;
-    const db = getDatabase();
-    this.knex = (db as any).knex;
+    // Note: knex will be initialized in initialize() method
+    this.knex = null!; // Will be initialized in initialize()
     
     // Set defaults
     this.config = {
@@ -50,43 +53,33 @@ export class Context {
     };
   }
 
-  private getContextTableName(): string {
-    return `agent_${this.agentId}_context`;
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+    const db = await getDatabase();
+    this.knex = db.getKnex();
+    await this.initializeContextTable();
+    this.initialized = true;
   }
 
-  async initializeContextTable(): Promise<void> {
-    const tableName = this.getContextTableName();
-    
-    const hasTable = await this.knex.schema.hasTable(tableName);
-    if (!hasTable) {
-      await this.knex.schema.createTable(tableName, (table) => {
-        table.increments('id').primary();
-        table.integer('agentId').notNullable().references('id').inTable('agents').onDelete('CASCADE');
-        table.enu('layer', ['immediate', 'summarized', 'persistent']).notNullable();
-        table.text('content').notNullable();
-        table.integer('tokenCount').notNullable();
-        table.integer('priority').defaultTo(0);
-        table.json('metadata');
-        table.timestamps(true, true);
-        table.index(['agentId', 'layer']);
-        table.index(['priority']);
-        table.index(['created_at']);
-      });
-    }
+
+  private async initializeContextTable(): Promise<void> {
+    // Contexts table is now shared and initialized in the main database module
+    // This method is kept for compatibility but does nothing
   }
 
   // Add content to context
-  async addToContext(
+  async addContext(
     layer: 'immediate' | 'summarized' | 'persistent',
     content: string,
     priority: number = 0,
-    metadata?: Record<string, any>
+    metadata?: MetadataObject
   ): Promise<void> {
+    await this.initialize();
     const tokenCount = this.estimateTokens(content);
     
     // Store in database
-    await this.knex(this.getContextTableName()).insert({
-      agentId: this.agentId,
+    await this.knex('contexts').insert({
+      agentId: this.agent.id,
       layer,
       content,
       tokenCount,
@@ -113,7 +106,7 @@ export class Context {
   }
 
   // Get context for LLM
-  async getContextForLLM(): Promise<string> {
+  async getContext(): Promise<string> {
     await this.loadContextWindow();
     
     let context = '';
@@ -157,8 +150,9 @@ export class Context {
 
   // Load context window from database
   private async loadContextWindow(): Promise<void> {
-    const contexts = await this.knex(this.getContextTableName())
-      .where({ agentId: this.agentId })
+    await this.initialize();
+    const contexts = await this.knex('contexts')
+      .where({ agentId: this.agent.id })
       .orderBy('created_at', 'desc')
       .limit(100); // Limit for performance
 
@@ -213,7 +207,7 @@ export class Context {
       const compression = await this.compressContent(immediateContent);
       
       // Add compressed content to summarized layer
-      await this.addToContext(
+      await this.addContext(
         'summarized',
         compression.compressedContent,
         5, // Higher priority for summaries
@@ -231,8 +225,8 @@ export class Context {
         .slice(0, -3);
 
       if (oldestImmediate.length > 0) {
-        await this.knex(this.getContextTableName())
-          .where({ agentId: this.agentId, layer: 'immediate' })
+        await this.knex('contexts')
+          .where({ agentId: this.agent.id, layer: 'immediate' })
           .whereIn('created_at', oldestImmediate.map(l => l.timestamp))
           .delete();
       }
@@ -270,14 +264,15 @@ export class Context {
 
   // Remove least important content
   private async removeLeastImportantContent(): Promise<void> {
+    await this.initialize();
     // Find least important immediate content
     const leastImportant = this.window.layers.immediate
       .sort((a, b) => a.priority - b.priority)[0];
 
     if (leastImportant) {
-      await this.knex(this.getContextTableName())
+      await this.knex('contexts')
         .where({ 
-          agentId: this.agentId, 
+          agentId: this.agent.id, 
           layer: 'immediate',
           content: leastImportant.content 
         })
@@ -329,8 +324,9 @@ export class Context {
 
   // Clear context
   async clearContext(layer?: 'immediate' | 'summarized' | 'persistent'): Promise<void> {
-    let query = this.knex(this.getContextTableName())
-      .where({ agentId: this.agentId });
+    await this.initialize();
+    let query = this.knex('contexts')
+      .where({ agentId: this.agent.id });
 
     if (layer) {
       query = query.andWhere({ layer });
@@ -347,12 +343,6 @@ export class Context {
     
     await this.loadContextWindow(); // Recalculate tokens
   }
-}
-
-// Static function for initializing context table
-export async function initializeContextTable(agentId: number): Promise<void> {
-  const context = new Context(agentId, 4000, true, 'gpt-4o-mini', 0.3);
-  await context.initializeContextTable();
 }
 
 export * from './types';

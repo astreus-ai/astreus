@@ -1,3 +1,5 @@
+import { MetadataObject } from '../types';
+
 export interface ToolParameter {
   name: string;
   type: 'string' | 'number' | 'boolean' | 'object' | 'array';
@@ -15,28 +17,41 @@ export interface ToolDefinition {
   handler: ToolHandler;
 }
 
+/**
+ * Primitive values that can be passed as tool parameters
+ */
+export type ToolParameterPrimitive = string | number | boolean | null;
+
+/**
+ * Complex tool parameter value that can contain primitives, arrays, or nested objects
+ */
+export type ToolParameterValue = 
+  | ToolParameterPrimitive
+  | ToolParameterPrimitive[]
+  | { [key: string]: ToolParameterValue };
+
 export interface ToolHandler {
-  (params: Record<string, any>, context?: ToolContext): Promise<ToolResult>;
+  (params: Record<string, ToolParameterValue>, context?: ToolContext): Promise<ToolResult>;
 }
 
 export interface ToolContext {
   agentId: number;
   taskId?: number;
   userId?: string;
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
 }
 
 export interface ToolResult {
   success: boolean;
-  data?: any;
+  data?: ToolParameterValue;
   error?: string;
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
 }
 
 export interface ToolCall {
   id: string;
   name: string;
-  parameters: Record<string, any>;
+  parameters: Record<string, ToolParameterValue>;
 }
 
 export interface ToolCallResult {
@@ -51,14 +66,14 @@ export interface Plugin {
   version: string;
   description: string;
   tools: ToolDefinition[];
-  initialize?: (config?: Record<string, any>) => Promise<void>;
+  initialize?: (config?: Record<string, ToolParameterValue>) => Promise<void>;
   cleanup?: () => Promise<void>;
 }
 
 export interface PluginConfig {
   name: string;
   enabled: boolean;
-  config?: Record<string, any>;
+  config?: Record<string, ToolParameterValue>;
 }
 
 export interface PluginManager {
@@ -67,6 +82,6 @@ export interface PluginManager {
   getPlugin(name: string): Plugin | undefined;
   getTools(): ToolDefinition[];
   getTool(name: string): ToolDefinition | undefined;
-  executeToolCall(toolCall: ToolCall, context?: ToolContext): Promise<ToolCallResult>;
+  executeTool(toolCall: ToolCall, context?: ToolContext): Promise<ToolCallResult>;
   listPlugins(): Plugin[];
 }

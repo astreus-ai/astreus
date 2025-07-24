@@ -1,3 +1,4 @@
+import { IAgentModule, IAgent } from '../agent/types';
 import { 
   Plugin as IPlugin, 
   PluginConfig, 
@@ -5,13 +6,38 @@ import {
   ToolDefinition, 
   ToolCall, 
   ToolCallResult, 
-  ToolContext 
+  ToolContext,
+  ToolParameter,
+  ToolParameterValue
 } from './types';
 
-export class Plugin implements IPluginManager {
+// Type for LLM function calling tool schema property
+interface LLMToolProperty {
+  type: string;
+  description?: string;
+  enum?: Array<string | number>;
+  items?: { type: string; description?: string };
+  properties?: Record<string, LLMToolProperty>;
+}
+
+// Type for LLM function calling tool schema
+interface LLMToolSchema {
+  type: string;
+  properties: Record<string, LLMToolProperty>;
+  required: string[];
+}
+
+export class Plugin implements IAgentModule, IPluginManager {
+  readonly name = 'plugin';
   private plugins: Map<string, IPlugin> = new Map();
   private configs: Map<string, PluginConfig> = new Map();
   private tools: Map<string, ToolDefinition> = new Map();
+
+  constructor(private agent: IAgent) {}
+
+  async initialize(): Promise<void> {
+    // Plugin manager is ready to use immediately
+  }
 
   async registerPlugin(plugin: IPlugin, config?: PluginConfig): Promise<void> {
     // Check if plugin already exists
@@ -85,7 +111,7 @@ export class Plugin implements IPluginManager {
     return this.tools.get(name);
   }
 
-  async executeToolCall(toolCall: ToolCall, context?: ToolContext): Promise<ToolCallResult> {
+  async executeTool(toolCall: ToolCall, context?: ToolContext): Promise<ToolCallResult> {
     const startTime = Date.now();
     
     try {
@@ -144,19 +170,13 @@ export class Plugin implements IPluginManager {
   }
 
   // Get tools formatted for LLM function calling
-  getToolsForLLM(): any[] {
+  getToolsForLLM(): Array<{ type: string; function: { name: string; description: string; parameters: LLMToolSchema } }> {
     return this.getTools().map(tool => ({
       type: 'function',
       function: {
         name: tool.name,
         description: tool.description,
-        parameters: {
-          type: 'object',
-          properties: this.convertParametersToJsonSchema(tool.parameters),
-          required: Object.entries(tool.parameters)
-            .filter(([_, param]) => param.required)
-            .map(([name, _]) => name)
-        }
+        parameters: this.convertParametersToJsonSchema(tool.parameters)
       }
     }));
   }
@@ -178,7 +198,7 @@ export class Plugin implements IPluginManager {
     }
   }
 
-  private validateToolParameters(tool: ToolDefinition, parameters: Record<string, any>): string | null {
+  private validateToolParameters(tool: ToolDefinition, parameters: Record<string, ToolParameterValue>): string | null {
     for (const [paramName, paramDef] of Object.entries(tool.parameters)) {
       const value = parameters[paramName];
       
@@ -189,7 +209,7 @@ export class Plugin implements IPluginManager {
 
       // Type validation
       if (value !== undefined && value !== null) {
-        if (!this.validateParameterType(value, paramDef)) {
+        if (!this.validateParameterType(value as ToolParameterValue, paramDef)) {
           return `Parameter '${paramName}' has invalid type. Expected ${paramDef.type}`;
         }
       }
@@ -198,7 +218,7 @@ export class Plugin implements IPluginManager {
     return null;
   }
 
-  private validateParameterType(value: any, paramDef: any): boolean {
+  private validateParameterType(value: ToolParameterValue, paramDef: ToolParameter): boolean {
     switch (paramDef.type) {
       case 'string':
         return typeof value === 'string';
@@ -215,8 +235,8 @@ export class Plugin implements IPluginManager {
     }
   }
 
-  private convertParametersToJsonSchema(parameters: Record<string, any>): Record<string, any> {
-    const properties: Record<string, any> = {};
+  private convertParametersToJsonSchema(parameters: Record<string, ToolParameter>): LLMToolSchema {
+    const properties: Record<string, LLMToolProperty> = {};
     
     for (const [name, param] of Object.entries(parameters)) {
       properties[name] = {
@@ -229,27 +249,35 @@ export class Plugin implements IPluginManager {
       }
 
       if (param.properties) {
-        properties[name].properties = this.convertParametersToJsonSchema(param.properties);
+        properties[name].properties = this.convertParametersToJsonSchema(param.properties).properties;
       }
 
       if (param.items) {
         properties[name].items = {
-          type: param.items.type,
-          description: param.items.description
+          type: param.items.type
         };
       }
     }
 
-    return properties;
+    return {
+      type: 'object',
+      properties,
+      required: Object.entries(parameters)
+        .filter(([, param]) => param.required)
+        .map(([name]) => name)
+    };
   }
 }
 
 // Global plugin instance
 let plugin: Plugin | null = null;
 
-export function getPlugin(): Plugin {
+export function getPlugin(agent?: IAgent): Plugin {
+  if (!plugin && agent) {
+    plugin = new Plugin(agent);
+  }
   if (!plugin) {
-    plugin = new Plugin();
+    throw new Error('Plugin not initialized. Call with agent first.');
   }
   return plugin;
 }

@@ -1,3 +1,7 @@
+import { MCPServerDefinition } from '../mcp/types';
+import { Plugin, PluginConfig } from '../plugin/types';
+import { MetadataObject } from '../types';
+
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 export interface Task {
@@ -6,7 +10,7 @@ export interface Task {
   prompt: string;
   response?: string;
   status: TaskStatus;
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
   createdAt?: Date;
   updatedAt?: Date;
   completedAt?: Date;
@@ -23,7 +27,15 @@ export interface TaskSearchOptions {
 export interface TaskRequest {
   prompt: string;
   useTools?: boolean;
-  metadata?: Record<string, any>;
+  mcpServers?: MCPServerDefinition[]; // Task-level MCP servers
+  plugins?: Array<{ plugin: Plugin; config?: PluginConfig }>; // Task-level plugins
+  attachments?: Array<{
+    type: 'image' | 'pdf' | 'text' | 'markdown' | 'code' | 'json' | 'file';
+    path: string;
+    name?: string;
+    language?: string; // For code files
+  }>;
+  metadata?: MetadataObject;
 }
 
 export interface TaskResponse {

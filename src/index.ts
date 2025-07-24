@@ -1,13 +1,19 @@
 // Main exports  
 export { Agent } from './agent';
 export { AgentConfig } from './agent/types';
+
+// Common types
+export type { MetadataObject } from './types';
 export { Memory } from './memory';
 export { Task } from './task';
 
 // Database exports
-export { getDatabase, EmbeddingService } from './database';
+export { getDatabase } from './database';
 export type { DatabaseConfig } from './database/types';
-export type { EmbeddingConfig } from './database/embedding';
+
+// Embedding exports
+export { EmbeddingService } from './llm/embeddings';
+export type { EmbeddingConfig } from './llm/embeddings';
 
 // Memory types
 export type { Memory as MemoryType, MemorySearchOptions } from './memory/types';
@@ -18,6 +24,10 @@ export type { Task as TaskType, TaskRequest, TaskResponse, TaskSearchOptions, Ta
 // LLM exports
 export { getLLM } from './llm';
 export type { LLMProvider, LLMRequestOptions, LLMResponse } from './llm/types';
+
+// Logger exports
+export { getLogger, initializeLogger } from './logger';
+export type { Logger, LoggerConfig, LogLevel } from './logger/types';
 
 // Graph exports
 export { Graph } from './graph';
@@ -46,6 +56,16 @@ export type {
   ToolCallResult,
   PluginConfig 
 } from './plugin/types';
+
+// MCP exports
+export { getMCP } from './mcp';
+export type {
+  MCPServerConfig,
+  MCPTool,
+  MCPToolCall,
+  MCPToolResult,
+  MCPServerDefinition
+} from './mcp/types';
 
 // Knowledge exports
 export { Knowledge, knowledgeSearchTool, knowledgeTools } from './knowledge';

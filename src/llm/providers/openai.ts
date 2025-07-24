@@ -1,9 +1,11 @@
 import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig, LLMMessage } from '../types';
 import OpenAI from 'openai';
+import { getLogger } from '../../logger';
 
 export class OpenAIProvider implements LLMProvider {
   name = 'openai';
   private client: OpenAI;
+  private logger = getLogger();
 
   constructor(config?: LLMConfig) {
     const apiKey = config?.apiKey || process.env.OPENAI_API_KEY;
@@ -16,6 +18,25 @@ export class OpenAIProvider implements LLMProvider {
       apiKey,
       baseURL: config?.baseUrl || process.env.OPENAI_BASE_URL
     });
+  }
+
+  private safeJsonParse(jsonString: string): Record<string, string | number | boolean | null> {
+    try {
+      const parsed = JSON.parse(jsonString);
+      // Ensure all values are of allowed types
+      const sanitized: Record<string, string | number | boolean | null> = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
+          sanitized[key] = value;
+        } else {
+          sanitized[key] = String(value); // Convert complex types to string
+        }
+      }
+      return sanitized;
+    } catch {
+      this.logger.log('warn', 'Failed to parse tool call arguments', 'OpenAI', { jsonString });
+      return {}; // Return empty object as fallback
+    }
   }
 
   getSupportedModels(): string[] {
@@ -63,7 +84,7 @@ export class OpenAIProvider implements LLMProvider {
         function: {
           name: tc.function.name,
           arguments: typeof tc.function.arguments === 'string' 
-            ? JSON.parse(tc.function.arguments)
+            ? this.safeJsonParse(tc.function.arguments)
             : tc.function.arguments
         }
       })),
@@ -90,7 +111,7 @@ export class OpenAIProvider implements LLMProvider {
       })
     });
 
-    const toolCalls: any[] = [];
+    const toolCalls: Array<{ id: string; type: string; function: { name: string; arguments: string } }> = [];
 
     try {
       for await (const chunk of stream) {
@@ -130,9 +151,10 @@ export class OpenAIProvider implements LLMProvider {
         done: true, 
         model: options.model,
         toolCalls: toolCalls.length > 0 ? toolCalls.map(tc => ({
-          ...tc,
+          id: tc.id,
+          type: 'function' as const,
           function: {
-            ...tc.function,
+            name: tc.function.name,
             arguments: typeof tc.function.arguments === 'string' 
               ? JSON.parse(tc.function.arguments)
               : tc.function.arguments

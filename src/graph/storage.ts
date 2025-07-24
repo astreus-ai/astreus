@@ -1,16 +1,29 @@
 import { Knex } from 'knex';
-import { getDatabase } from '../database';
+import { getDatabase } from '../database/index';
 import { Graph, GraphNode, GraphEdge } from './types';
+
+interface DatabaseInstance {
+  knex: Knex;
+}
 
 export class GraphStorage {
   private knex: Knex;
+  private initialized: boolean = false;
 
   constructor() {
-    const db = getDatabase();
-    this.knex = (db as any).knex;
+    // Note: knex will be initialized in initialize() method
+    this.knex = null!; // Will be initialized in initialize()
+  }
+
+  private async initialize(): Promise<void> {
+    if (this.initialized) return;
+    const db = await getDatabase();
+    this.knex = (db as DatabaseInstance).knex;
+    this.initialized = true;
   }
 
   async initializeTables(): Promise<void> {
+    await this.initialize();
     // Create graphs table
     const hasGraphsTable = await this.knex.schema.hasTable('graphs');
     if (!hasGraphsTable) {
@@ -79,6 +92,7 @@ export class GraphStorage {
   }
 
   async saveGraph(graph: Graph): Promise<number> {
+    await this.initialize();
     const [savedGraph] = await this.knex('graphs')
       .insert({
         name: graph.config.name,
@@ -133,6 +147,7 @@ export class GraphStorage {
   }
 
   async loadGraph(graphId: number): Promise<Graph | null> {
+    await this.initialize();
     // Load graph config
     const graphData = await this.knex('graphs')
       .where({ id: graphId })
@@ -205,6 +220,7 @@ export class GraphStorage {
   }
 
   async updateGraph(graphId: number, graph: Graph): Promise<void> {
+    await this.initialize();
     // Update graph
     await this.knex('graphs')
       .where({ id: graphId })
@@ -227,6 +243,7 @@ export class GraphStorage {
   }
 
   async deleteGraph(graphId: number): Promise<boolean> {
+    await this.initialize();
     const deleted = await this.knex('graphs')
       .where({ id: graphId })
       .delete();
@@ -235,6 +252,7 @@ export class GraphStorage {
   }
 
   async listGraphs(): Promise<{ id: number; name: string; status: string; createdAt: Date }[]> {
+    await this.initialize();
     const graphs = await this.knex('graphs')
       .select('id', 'name', 'status', 'created_at')
       .orderBy('created_at', 'desc');
