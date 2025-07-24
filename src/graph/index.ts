@@ -1,6 +1,6 @@
-import { Knex } from 'knex';
+import { IAgentModule, IAgent } from '../agent/types';
+import type { Agent } from '../agent';
 import { getDatabase } from '../database';
-// Agent import removed - using agentId instead
 import { Task } from '../task';
 import { getGraphStorage } from './storage';
 import { 
@@ -14,14 +14,40 @@ import {
   AddTaskNodeOptions,
   GraphExecutionStatus 
 } from './types';
+import { Memory as MemoryType } from '../memory/types';
+import { Knex } from 'knex';
 
-export class Graph {
+
+interface TaskExecutionResult {
+  type: 'task';
+  taskId: number;
+  response: string;
+  model?: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+}
+
+interface AgentExecutionResult {
+  type: 'agent';
+  agentId?: number;
+}
+
+type NodeExecutionResult = TaskExecutionResult | AgentExecutionResult;
+
+export class Graph implements IAgentModule {
+  readonly name = 'graph';
   private knex: Knex;
   private graph: GraphType;
+  private initialized: boolean = false;
+  private agent?: IAgent;
 
-  constructor(config: GraphConfig) {
-    const db = getDatabase();
-    this.knex = (db as any).knex;
+  constructor(config: GraphConfig, agent?: IAgent) {
+    // Note: knex will be initialized in initialize() method
+    this.knex = null!; // Will be initialized in initialize()
+    this.agent = agent;
     
     this.graph = {
       config,
@@ -32,6 +58,13 @@ export class Graph {
       createdAt: new Date(),
       updatedAt: new Date()
     };
+  }
+
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+    const db = await getDatabase();
+    this.knex = db.getKnex();
+    this.initialized = true;
   }
 
   // Node management
@@ -107,11 +140,12 @@ export class Graph {
 
   // Execution
   async run(options?: { stream?: boolean }): Promise<GraphExecutionResult> {
+    await this.initialize();
     this.log('info', 'Starting graph execution');
     this.graph.status = 'running';
     this.graph.startedAt = new Date();
     
-    const results: Record<string, any> = {};
+    const results: Record<string, NodeExecutionResult> = {};
     const errors: Record<string, string> = {};
     let completedNodes = 0;
     let failedNodes = 0;
@@ -141,7 +175,7 @@ export class Graph {
                 .then(result => {
                   results[node.id] = result;
                   node.status = 'completed';
-                  node.result = result;
+                  node.result = JSON.stringify(result);
                   completedNodes++;
                   executing.delete(node.id);
                   this.log('info', `Node ${node.name} completed (streamed)`, node.id);
@@ -159,7 +193,7 @@ export class Graph {
                 .then(result => {
                   results[node.id] = result;
                   node.status = 'completed';
-                  node.result = result;
+                  node.result = JSON.stringify(result);
                   completedNodes++;
                   executing.delete(node.id);
                   this.log('info', `Node ${node.name} completed`, node.id);
@@ -211,12 +245,12 @@ export class Graph {
       completedNodes,
       failedNodes,
       duration,
-      results,
+      results: Object.fromEntries(Object.entries(results).map(([k, v]) => [k, JSON.stringify(v)])),
       errors
     };
   }
 
-  private async executeNode(node: GraphNode, forceStream?: boolean): Promise<any> {
+  private async executeNode(node: GraphNode, forceStream?: boolean): Promise<NodeExecutionResult> {
     this.log('info', `Executing node ${node.name}`, node.id);
     node.status = 'running';
     node.updatedAt = new Date();
@@ -235,15 +269,19 @@ export class Graph {
       }
       
       // Execute task using the assigned agent
-      const task = new Task(node.agentId);
-      await task.initializeTaskTable();
+      if (!this.agent) {
+        throw new Error(`No agent available for task node ${node.name}`);
+      }
       
-      const createdTask = await task.createTask({
+      const taskModule = new Task(this.agent);
+      await taskModule.initialize();
+      
+      const createdTask = await taskModule.createTask({
         prompt: node.prompt,
         metadata: node.metadata
       });
       
-      const taskResponse = await task.executeTask(createdTask.id!, { 
+      const taskResponse = await taskModule.executeTask(createdTask.id!, { 
         model: node.model,
         stream: forceStream || node.stream 
       });
@@ -369,7 +407,7 @@ export class Graph {
   }
 
   // Memory methods for graph
-  async getMemories(): Promise<any[]> {
+  async getMemories(): Promise<MemoryType[]> {
     if (!this.graph.config.defaultAgentId) {
       throw new Error('No default agent set for this graph');
     }
@@ -381,13 +419,18 @@ export class Graph {
       return [];
     }
 
-    return await (agent as any).listMemories({
-      orderBy: 'createdAt',
-      order: 'asc'
-    });
+    // Check if agent has listMemories method (dynamically bound)
+    if ('listMemories' in agent && typeof (agent as Agent & { listMemories?: (options: { orderBy: string; order: string }) => Promise<MemoryType[]> }).listMemories === 'function') {
+      const agentWithMemory = agent as Agent & { listMemories: (options: { orderBy: string; order: string }) => Promise<MemoryType[]> };
+      return await agentWithMemory.listMemories({
+        orderBy: 'createdAt',
+        order: 'asc'
+      });
+    }
+    return [];
   }
 
-  async searchMemories(query: string, limit?: number): Promise<any[]> {
+  async searchMemories(query: string, limit?: number): Promise<MemoryType[]> {
     if (!this.graph.config.defaultAgentId) {
       throw new Error('No default agent set for this graph');
     }
@@ -399,11 +442,17 @@ export class Graph {
       return [];
     }
 
-    return await (agent as any).searchMemories(query, limit);
+    // Check if agent has searchMemories method (dynamically bound)
+    if ('searchMemories' in agent && typeof (agent as Agent & { searchMemories?: (query: string, limit?: number) => Promise<MemoryType[]> }).searchMemories === 'function') {
+      const agentWithMemory = agent as Agent & { searchMemories: (query: string, limit?: number) => Promise<MemoryType[]> };
+      return await agentWithMemory.searchMemories(query, limit);
+    }
+    return [];
   }
 
   // Persistence methods
   async save(): Promise<number> {
+    await this.initialize();
     const storage = getGraphStorage();
     const graphId = await storage.saveGraph(this.graph);
     this.graph.id = graphId.toString();
@@ -412,6 +461,7 @@ export class Graph {
   }
 
   async update(): Promise<void> {
+    await this.initialize();
     if (!this.graph.id) {
       throw new Error('Graph must be saved before updating');
     }
@@ -420,6 +470,7 @@ export class Graph {
   }
 
   async delete(): Promise<boolean> {
+    await this.initialize();
     if (!this.graph.id) {
       throw new Error('Graph must be saved before deleting');
     }
@@ -446,12 +497,11 @@ export class Graph {
     return await storage.listGraphs();
   }
 
-  static async create(config: GraphConfig): Promise<Graph> {
-    const graph = new Graph(config);
+  static async create(config: GraphConfig, agent?: IAgent): Promise<Graph> {
+    const graph = new Graph(config, agent);
     await graph.save();
     return graph;
   }
 }
 
 export * from './types';
-export * from './storage';

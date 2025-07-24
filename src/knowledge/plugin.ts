@@ -1,4 +1,20 @@
-import { ToolDefinition } from '../plugin/types';
+import { ToolDefinition, ToolResult, ToolContext, ToolParameterValue } from '../plugin/types';
+
+
+interface KnowledgeResult {
+  content: string;
+  similarity: number;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
+interface AgentWithKnowledge {
+  hasKnowledge(): boolean;
+  searchKnowledge?(query: string, limit: number, threshold: number): Promise<KnowledgeResult[]>;
+}
+
+interface KnowledgeToolContext extends ToolContext {
+  agent: AgentWithKnowledge;
+}
 
 export const knowledgeSearchTool: ToolDefinition = {
   name: 'search_knowledge',
@@ -21,11 +37,14 @@ export const knowledgeSearchTool: ToolDefinition = {
       description: 'Similarity threshold for results (default: 0.7)'
     }
   },
-  handler: async (params: any, context: any) => {
-    const { query, limit = 5, threshold = 0.7 } = params;
+  handler: async (params: Record<string, ToolParameterValue>, context?: ToolContext): Promise<ToolResult> => {
+    // Extract and validate parameters
+    const query = params.query as string;
+    const limit = (params.limit as number) || 5;
+    const threshold = (params.threshold as number) || 0.7;
     
     // Get agent instance from context
-    const agent = context.agent;
+    const agent = (context as KnowledgeToolContext)?.agent;
     if (!agent) {
       throw new Error('Agent context not available');
     }
@@ -45,25 +64,25 @@ export const knowledgeSearchTool: ToolDefinition = {
       if (results.length === 0) {
         return {
           success: true,
-          data: {
+          data: JSON.stringify({
             message: 'No relevant information found in knowledge base',
             results: [],
             query
-          }
+          })
         };
       }
 
       return {
         success: true,
-        data: {
+        data: JSON.stringify({
           message: `Found ${results.length} relevant result(s)`,
-          results: results.map((result: any) => ({
+          results: results.map((result: KnowledgeResult) => ({
             content: result.content,
             similarity: result.similarity,
             metadata: result.metadata
           })),
           query
-        }
+        })
       };
     } catch (error) {
       return {

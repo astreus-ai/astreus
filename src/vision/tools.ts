@@ -1,7 +1,23 @@
-import { ToolDefinition } from '../plugin/types';
-import { VisionService } from './index';
+import { ToolDefinition, ToolResult } from '../plugin/types';
+import { Vision } from './index';
 import * as fs from 'fs';
 import * as path from 'path';
+
+interface AnalysisParams {
+  image_path: string;
+  prompt?: string;
+  detail?: string;
+}
+
+interface DescriptionParams {
+  image_path: string;
+  style?: string;
+}
+
+interface ExtractTextParams {
+  image_path: string;
+  language?: string;
+}
 
 export const analyzeImageTool: ToolDefinition = {
   name: 'analyze_image',
@@ -24,33 +40,55 @@ export const analyzeImageTool: ToolDefinition = {
       description: 'Analysis detail level: "low" or "high" (default: auto)'
     }
   },
-  handler: async (params: any, _context: any) => {
+  handler: async (params: AnalysisParams): Promise<ToolResult> => {
     const { image_path, prompt, detail } = params;
 
     try {
-      const visionService = new VisionService();
-      
-      if (!fs.existsSync(image_path)) {
+      // Validate and sanitize image path
+      if (!image_path || typeof image_path !== 'string') {
         return {
           success: false,
           data: null,
-          error: `Image file not found: ${image_path}`
+          error: 'Invalid image path provided'
         };
       }
 
-      const analysis = await visionService.analyzeImage(image_path, {
+      // Resolve and normalize path to prevent traversal attacks
+      const normalizedPath = path.resolve(path.normalize(image_path));
+      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
+      const fileExtension = path.extname(normalizedPath).toLowerCase();
+      
+      if (!allowedExtensions.includes(fileExtension)) {
+        return {
+          success: false,
+          data: null,
+          error: `Unsupported image format: ${fileExtension}`
+        };
+      }
+
+      const visionService = new Vision();
+      
+      if (!fs.existsSync(normalizedPath)) {
+        return {
+          success: false,
+          data: null,
+          error: `Image file not found: ${normalizedPath}`
+        };
+      }
+
+      const analysis = await visionService.analyzeImage(normalizedPath, {
         prompt,
         detail: detail as 'low' | 'high',
         maxTokens: 1000
       });
 
-      const fileName = path.basename(image_path);
+      const fileName = path.basename(normalizedPath);
       
       return {
         success: true,
         data: {
           fileName,
-          filePath: image_path,
+          filePath: normalizedPath,
           analysis,
           prompt: prompt || 'General image analysis'
         }
@@ -81,17 +119,39 @@ export const describeImageTool: ToolDefinition = {
       description: 'Description style: "detailed", "concise", "accessibility", or "technical"'
     }
   },
-  handler: async (params: any, _context: any) => {
+  handler: async (params: DescriptionParams): Promise<ToolResult> => {
     const { image_path, style = 'detailed' } = params;
 
     try {
-      const visionService = new VisionService();
-      
-      if (!fs.existsSync(image_path)) {
+      // Validate and sanitize image path
+      if (!image_path || typeof image_path !== 'string') {
         return {
           success: false,
           data: null,
-          error: `Image file not found: ${image_path}`
+          error: 'Invalid image path provided'
+        };
+      }
+
+      // Resolve and normalize path to prevent traversal attacks
+      const normalizedPath = path.resolve(path.normalize(image_path));
+      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
+      const fileExtension = path.extname(normalizedPath).toLowerCase();
+      
+      if (!allowedExtensions.includes(fileExtension)) {
+        return {
+          success: false,
+          data: null,
+          error: `Unsupported image format: ${fileExtension}`
+        };
+      }
+
+      const visionService = new Vision();
+      
+      if (!fs.existsSync(normalizedPath)) {
+        return {
+          success: false,
+          data: null,
+          error: `Image file not found: ${normalizedPath}`
         };
       }
 
@@ -104,18 +164,18 @@ export const describeImageTool: ToolDefinition = {
 
       const prompt = prompts[style as keyof typeof prompts] || prompts.detailed;
       
-      const description = await visionService.analyzeImage(image_path, {
+      const description = await visionService.analyzeImage(normalizedPath, {
         prompt,
         maxTokens: 800
       });
 
-      const fileName = path.basename(image_path);
+      const fileName = path.basename(normalizedPath);
       
       return {
         success: true,
         data: {
           fileName,
-          filePath: image_path,
+          filePath: normalizedPath,
           style,
           description
         }
@@ -146,35 +206,57 @@ export const extractTextFromImageTool: ToolDefinition = {
       description: 'Expected language of the text (optional, helps with accuracy)'
     }
   },
-  handler: async (params: any, _context: any) => {
+  handler: async (params: ExtractTextParams): Promise<ToolResult> => {
     const { image_path, language } = params;
 
     try {
-      const visionService = new VisionService();
-      
-      if (!fs.existsSync(image_path)) {
+      // Validate and sanitize image path
+      if (!image_path || typeof image_path !== 'string') {
         return {
           success: false,
           data: null,
-          error: `Image file not found: ${image_path}`
+          error: 'Invalid image path provided'
+        };
+      }
+
+      // Resolve and normalize path to prevent traversal attacks
+      const normalizedPath = path.resolve(path.normalize(image_path));
+      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
+      const fileExtension = path.extname(normalizedPath).toLowerCase();
+      
+      if (!allowedExtensions.includes(fileExtension)) {
+        return {
+          success: false,
+          data: null,
+          error: `Unsupported image format: ${fileExtension}`
+        };
+      }
+
+      const visionService = new Vision();
+      
+      if (!fs.existsSync(normalizedPath)) {
+        return {
+          success: false,
+          data: null,
+          error: `Image file not found: ${normalizedPath}`
         };
       }
 
       const languageHint = language ? ` The text is likely in ${language}.` : '';
       const prompt = `Extract and transcribe all text from this image. Maintain the original formatting, line breaks, and structure as much as possible.${languageHint} Only return the extracted text, no additional commentary.`;
       
-      const extractedText = await visionService.analyzeImage(image_path, {
+      const extractedText = await visionService.analyzeImage(normalizedPath, {
         prompt,
         maxTokens: 1500
       });
 
-      const fileName = path.basename(image_path);
+      const fileName = path.basename(normalizedPath);
       
       return {
         success: true,
         data: {
           fileName,
-          filePath: image_path,
+          filePath: normalizedPath,
           language: language || 'auto-detect',
           extractedText
         }

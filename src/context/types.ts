@@ -1,3 +1,5 @@
+import { MetadataObject } from '../types';
+
 export interface ContextConfig {
   layerWeights?: {
     immediate: number;    // Recent interactions
@@ -11,7 +13,7 @@ export interface ContextLayer {
   tokenCount: number;
   priority: number;
   timestamp: Date;
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
 }
 
 export interface ContextLayers {
@@ -42,7 +44,7 @@ export interface ContextMemoryEntry {
   content: string;
   tokenCount: number;
   priority: number;
-  metadata?: Record<string, any>;
+  metadata?: MetadataObject;
   createdAt?: Date;
   updatedAt?: Date;
 }

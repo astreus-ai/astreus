@@ -10,5 +10,6 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   clean: true,
-  minify: true,
+  minify: false, // Disable minify to preserve decorator inheritance
+  keepNames: true, // Preserve function names for proper inheritance
 }); 

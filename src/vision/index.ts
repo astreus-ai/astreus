@@ -1,5 +1,8 @@
+import { IAgentModule, IAgent } from '../agent/types';
+import { ToolDefinition } from '../plugin/types';
 import OpenAI from 'openai';
 import { Ollama } from 'ollama';
+import { visionTools } from './tools';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -16,12 +19,13 @@ export interface AnalysisOptions {
   detail?: 'low' | 'high';
 }
 
-export class VisionService {
+export class Vision implements IAgentModule {
+  readonly name = 'vision';
   private config: VisionConfig;
   private openai?: OpenAI;
   private ollama?: Ollama;
 
-  constructor(config?: VisionConfig) {
+  constructor(private agent?: IAgent, config?: VisionConfig) {
     this.config = config || this.getConfigFromEnv();
     
     if (this.config.provider === 'openai') {
@@ -33,6 +37,24 @@ export class VisionService {
       this.ollama = new Ollama({
         host: this.config.baseURL || process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
       });
+    }
+  }
+
+  async initialize(): Promise<void> {
+    // Register vision tools if agent has plugin system
+    if (this.agent && 'registerPlugin' in this.agent) {
+      try {
+        const visionPlugin = {
+          name: 'vision-tools',
+          version: '1.0.0',
+          description: 'Built-in vision analysis tools',
+          tools: visionTools
+        };
+        await (this.agent as IAgent & { registerPlugin: (plugin: { name: string; version: string; description?: string; tools?: ToolDefinition[] }) => Promise<void> }).registerPlugin(visionPlugin);
+      } catch (error) {
+        // Plugin registration failed, but vision module can still work
+        console.warn('Failed to register vision tools:', error);
+      }
     }
   }
 
@@ -158,4 +180,3 @@ export class VisionService {
 }
 
 export { visionTools } from './tools';
-export { withVision } from '../agent/decorators/with-vision';

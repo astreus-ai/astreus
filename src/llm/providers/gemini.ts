@@ -101,7 +101,7 @@ export class GeminiProvider implements LLMProvider {
     }
   }
 
-  private prepareMessages(options: LLMRequestOptions): { systemInstruction?: string; contents: any[] } {
+  private prepareMessages(options: LLMRequestOptions): { systemInstruction?: string; contents: Array<{ role: string; parts: Array<{ text: string }> }> } {
     let systemInstruction = options.systemPrompt;
     const messages = options.messages.filter(m => m.role !== 'system');
     

@@ -1,7 +1,7 @@
 import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig } from '../types';
 import Anthropic from '@anthropic-ai/sdk';
 import type { ContentBlockDeltaEvent, TextDelta } from '@anthropic-ai/sdk/resources/messages';
-import type { ToolUseBlock, ToolsBetaContentBlock } from '@anthropic-ai/sdk/resources/beta/tools/messages';
+import type { ToolUseBlock, ToolsBetaContentBlock, ToolsBetaMessageParam } from '@anthropic-ai/sdk/resources/beta/tools/messages';
 
 export class ClaudeProvider implements LLMProvider {
   name = 'claude';
@@ -18,6 +18,18 @@ export class ClaudeProvider implements LLMProvider {
       apiKey,
       baseURL: config?.baseUrl || process.env.ANTHROPIC_BASE_URL
     });
+  }
+
+  private sanitizeArguments(input: object): Record<string, string | number | boolean | null> {
+    const sanitized: Record<string, string | number | boolean | null> = {};
+    for (const [key, value] of Object.entries(input)) {
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
+        sanitized[key] = value;
+      } else {
+        sanitized[key] = String(value); // Convert complex types to string
+      }
+    }
+    return sanitized;
   }
 
   getSupportedModels(): string[] {
@@ -37,9 +49,9 @@ export class ClaudeProvider implements LLMProvider {
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const { system, messages } = this.prepareMessages(options);
     
-    const message = await this.client.messages.create({
+    const message = await this.client.beta.tools.messages.create({
       model: options.model,
-      messages: messages as Anthropic.Messages.MessageParam[],
+      messages: messages as ToolsBetaMessageParam[],
       system,
       temperature: options.temperature ?? 0.7,
       max_tokens: options.maxTokens ?? 4096,
@@ -61,7 +73,7 @@ export class ClaudeProvider implements LLMProvider {
         type: 'function' as const,
         function: {
           name: block.name,
-          arguments: block.input || {}
+          arguments: this.sanitizeArguments(block.input || {})
         }
       }));
 
@@ -85,9 +97,9 @@ export class ClaudeProvider implements LLMProvider {
   async* generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const { system, messages } = this.prepareMessages(options);
     
-    const stream = await this.client.messages.create({
+    const stream = await this.client.beta.tools.messages.create({
       model: options.model,
-      messages: messages as Anthropic.Messages.MessageParam[],
+      messages: messages as ToolsBetaMessageParam[],
       system,
       temperature: options.temperature ?? 0.7,
       max_tokens: options.maxTokens ?? 4096,
@@ -101,7 +113,7 @@ export class ClaudeProvider implements LLMProvider {
       })
     });
 
-    const toolCalls: any[] = [];
+    const toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: Record<string, string | number | boolean | null> } }> = [];
 
     try {
       for await (const event of stream) {
@@ -132,7 +144,7 @@ export class ClaudeProvider implements LLMProvider {
     }
   }
 
-  private prepareMessages(options: LLMRequestOptions): { system?: string; messages: any[] } {
+  private prepareMessages(options: LLMRequestOptions): { system?: string; messages: ToolsBetaMessageParam[] } {
     let system = options.systemPrompt;
     const messages = options.messages.filter(m => m.role !== 'system');
     
@@ -150,36 +162,36 @@ export class ClaudeProvider implements LLMProvider {
       messages: messages.map(msg => {
         if (msg.role === 'tool') {
           return {
-            role: 'user',
+            role: 'user' as const,
             content: [
               {
-                type: 'tool_result',
-                tool_use_id: msg.tool_call_id,
-                content: msg.content
+                type: 'tool_result' as const,
+                tool_use_id: msg.tool_call_id!,
+                content: [{ type: 'text' as const, text: msg.content }]
               }
             ]
-          };
+          } as ToolsBetaMessageParam;
         }
         
         if (msg.tool_calls && msg.tool_calls.length > 0) {
           return {
-            role: 'assistant',
+            role: 'assistant' as const,
             content: [
-              ...(msg.content ? [{ type: 'text', text: msg.content }] : []),
+              ...(msg.content ? [{ type: 'text' as const, text: msg.content }] : []),
               ...msg.tool_calls.map(tc => ({
-                type: 'tool_use',
+                type: 'tool_use' as const,
                 id: tc.id,
                 name: tc.function.name,
                 input: tc.function.arguments
               }))
             ]
-          };
+          } as ToolsBetaMessageParam;
         }
         
         return {
           role: msg.role as 'user' | 'assistant',
           content: msg.content
-        };
+        } as Anthropic.Messages.MessageParam;
       })
     };
   }

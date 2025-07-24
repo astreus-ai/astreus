@@ -10,7 +10,7 @@ export interface ToolCall {
   type: 'function';
   function: {
     name: string;
-    arguments: Record<string, any>;
+    arguments: Record<string, string | number | boolean | null>;
   };
 }
 
@@ -21,7 +21,16 @@ export interface Tool {
     description: string;
     parameters: {
       type: 'object';
-      properties: Record<string, any>;
+      properties: Record<string, {
+        type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+        description?: string;
+        enum?: Array<string | number>;
+        items?: { type: string };
+        properties?: Record<string, {
+          type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+          description?: string;
+        }>;
+      }>;
       required?: string[];
     };
   };
