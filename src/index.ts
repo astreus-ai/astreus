@@ -11,9 +11,9 @@ export { Task } from './task';
 export { getDatabase } from './database';
 export type { DatabaseConfig } from './database/types';
 
-// Embedding exports
-export { EmbeddingService } from './llm/embeddings';
-export type { EmbeddingConfig } from './llm/embeddings';
+// Embedding exports (legacy compatibility)
+export { EmbeddingService } from './knowledge';
+export type { EmbeddingConfig } from './knowledge';
 
 // Memory types
 export type { Memory as MemoryType, MemorySearchOptions } from './memory/types';
@@ -41,9 +41,6 @@ export type {
   AddTaskNodeOptions 
 } from './graph/types';
 
-// Context exports
-export { Context } from './context';
-export type { ContextConfig, ContextLayer, ContextWindow } from './context/types';
 
 // Plugin exports
 export { getPlugin, Plugin } from './plugin';

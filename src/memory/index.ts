@@ -49,10 +49,16 @@ export class Memory implements IAgentModule {
    * Add a memory
    */
   async addMemory(content: string, metadata?: MetadataObject): Promise<MemoryType> {
+    // User-facing info log
+    const memoryType = metadata?.type || 'general';
+    this.logger.info(`Adding new ${memoryType} memory`);
+    
     this.logger.debug('Adding memory', {
       contentLength: content.length,
       agentId: this.agent.id,
-      ...(metadata?.type && { type: metadata.type as string })
+      contentPreview: content.slice(0, 100) + '...',
+      type: metadata?.type ? String(metadata.type) : 'general',
+      hasMetadata: !!metadata
     });
     
     await this.ensureDatabase();
@@ -66,7 +72,14 @@ export class Memory implements IAgentModule {
       })
       .returning('*');
     
-    return this.formatMemory(memory);
+    const formattedMemory = this.formatMemory(memory);
+    
+    this.logger.debug('Memory added successfully', {
+      memoryId: formattedMemory.id || 0,
+      type: String(memoryType)
+    });
+    
+    return formattedMemory;
   }
 
   /**
@@ -94,9 +107,14 @@ export class Memory implements IAgentModule {
    * Search memories
    */
   async searchMemories(query: string, options?: MemorySearchOptions): Promise<MemoryType[]> {
+    // User-facing info log
+    this.logger.info(`Searching memories for: "${query}"`);
+    
     this.logger.debug('Searching memories', {
       query,
       ...(options?.limit && { limit: options.limit }),
+      ...(options?.startDate && { startDate: options.startDate }),
+      ...(options?.endDate && { endDate: options.endDate }),
       agentId: this.agent.id
     });
     
@@ -123,7 +141,14 @@ export class Memory implements IAgentModule {
 
     const memories = await dbQuery;
     
-    this.logger.debug(`Found ${memories.length} memories`);
+    // User-facing result summary
+    this.logger.info(`Found ${memories.length} matching ${memories.length === 1 ? 'memory' : 'memories'}`);
+    
+    this.logger.debug(`Found ${memories.length} memories`, {
+      resultCount: memories.length,
+      sampleIds: memories.slice(0, 3).map(m => Number(m.id)),
+      hasResults: memories.length > 0
+    });
     
     return memories.map(memory => this.formatMemory(memory));
   }
@@ -132,9 +157,14 @@ export class Memory implements IAgentModule {
    * List memories
    */
   async listMemories(options?: MemorySearchOptions): Promise<MemoryType[]> {
+    // User-facing info log
+    this.logger.info('Listing memories');
+    
     this.logger.debug('Listing memories', {
       ...(options?.limit && { limit: options.limit }),
       ...(options?.orderBy && { orderBy: options.orderBy }),
+      ...(options?.startDate && { startDate: options.startDate }),
+      ...(options?.endDate && { endDate: options.endDate }),
       agentId: this.agent.id
     });
     
@@ -193,6 +223,8 @@ export class Memory implements IAgentModule {
    * Delete a memory
    */
   async deleteMemory(id: number): Promise<boolean> {
+    this.logger.info(`Deleting memory: ${id}`);
+    
     await this.ensureDatabase();
     const tableName = 'memories';
 
@@ -200,19 +232,44 @@ export class Memory implements IAgentModule {
       .where({ id, agentId: this.agent.id })
       .delete();
     
-    return deleted > 0;
+    const success = deleted > 0;
+    
+    if (success) {
+      this.logger.info(`Memory ${id} deleted successfully`);
+    } else {
+      this.logger.warn(`Failed to delete memory ${id} - not found or unauthorized`);
+    }
+    
+    this.logger.debug('Delete memory result', {
+      memoryId: id,
+      success,
+      agentId: this.agent.id
+    });
+    
+    return success;
   }
 
   /**
    * Clear all memories
    */
   async clearMemories(): Promise<number> {
+    this.logger.info('Clearing all memories');
+    
     await this.ensureDatabase();
     const tableName = 'memories';
 
-    return await this.knex!(tableName)
+    const deletedCount = await this.knex!(tableName)
       .where({ agentId: this.agent.id })
       .delete();
+    
+    this.logger.info(`Cleared ${deletedCount} ${deletedCount === 1 ? 'memory' : 'memories'}`);
+    
+    this.logger.debug('Clear memories result', {
+      deletedCount,
+      agentId: this.agent.id
+    });
+    
+    return deletedCount;
   }
 
   /**

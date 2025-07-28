@@ -3,6 +3,7 @@ import type { Agent } from '../agent';
 import { getDatabase } from '../database';
 import { Task } from '../task';
 import { getGraphStorage } from './storage';
+import { Logger, LogData } from '../logger/types';
 import { 
   Graph as GraphType, 
   GraphConfig, 
@@ -43,11 +44,13 @@ export class Graph implements IAgentModule {
   private graph: GraphType;
   private initialized: boolean = false;
   private agent?: IAgent;
+  private logger?: Logger;
 
   constructor(config: GraphConfig, agent?: IAgent) {
     // Note: knex will be initialized in initialize() method
     this.knex = null!; // Will be initialized in initialize()
     this.agent = agent;
+    this.logger = agent?.logger;
     
     this.graph = {
       config,
@@ -58,6 +61,11 @@ export class Graph implements IAgentModule {
       createdAt: new Date(),
       updatedAt: new Date()
     };
+
+    // User-facing info log
+    if (this.logger) {
+      this.logger.info('Graph module initialized', undefined, this.agent?.name);
+    }
   }
 
   async initialize(): Promise<void> {
@@ -65,6 +73,11 @@ export class Graph implements IAgentModule {
     const db = await getDatabase();
     this.knex = db.getKnex();
     this.initialized = true;
+    
+    // User-facing info log
+    if (this.logger) {
+      this.logger.info('Graph module ready', undefined, this.agent?.name);
+    }
   }
 
   // Node management
@@ -87,6 +100,8 @@ export class Graph implements IAgentModule {
     this.graph.nodes.push(node);
     this.graph.updatedAt = new Date();
     
+    this.log('debug', `Added agent node: ${node.name} (agentId: ${options.agentId})`, nodeId);
+    
     return nodeId;
   }
 
@@ -96,7 +111,7 @@ export class Graph implements IAgentModule {
     const node: GraphNode = {
       id: nodeId,
       type: 'task',
-      name: `Task-${nodeId.split('_')[1]}`,
+      name: `Task-${nodeId.split('_')[1]}-${nodeId.split('_')[2]}`,
       prompt: options.prompt,
       model: options.model,
       stream: options.stream,
@@ -111,6 +126,8 @@ export class Graph implements IAgentModule {
 
     this.graph.nodes.push(node);
     this.graph.updatedAt = new Date();
+    
+    this.log('debug', `Added task node: ${node.name} (prompt: "${options.prompt.slice(0, 50)}...")`, nodeId);
     
     return nodeId;
   }
@@ -152,6 +169,8 @@ export class Graph implements IAgentModule {
     
     try {
       const sortedNodes = this.topologicalSort();
+      this.log('debug', `Execution plan: ${sortedNodes.length} nodes, max concurrency: ${this.graph.config.maxConcurrency || 1}`);
+      
       const maxConcurrency = this.graph.config.maxConcurrency || 1;
       const executing = new Set<string>();
       let currentIndex = 0;
@@ -167,6 +186,7 @@ export class Graph implements IAgentModule {
           
           // Check if all dependencies are completed
           if (this.areDependenciesCompleted(node)) {
+            this.log('debug', `Node ${node.name} ready to execute - all dependencies completed`, node.id);
             executing.add(node.id);
             
             // Special handling for last node with streaming
@@ -218,11 +238,21 @@ export class Graph implements IAgentModule {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
         
-        // Move past any nodes that can't be executed due to failed dependencies
-        while (currentIndex < sortedNodes.length && !this.canNodeExecute(sortedNodes[currentIndex])) {
+        // Skip nodes that have failed dependencies (not running/pending ones)
+        while (currentIndex < sortedNodes.length && this.hasFailedDependencies(sortedNodes[currentIndex])) {
           const node = sortedNodes[currentIndex];
           node.status = 'skipped';
-          this.log('warn', `Node ${node.name} skipped due to failed dependencies`, node.id);
+          
+          // Debug: show which dependencies failed
+          const failedDeps = node.dependencies.filter(depId => {
+            const depNode = this.graph.nodes.find(n => n.id === depId);
+            return depNode?.status === 'failed';
+          });
+          
+          this.log('warn', `Node ${node.name} skipped due to failed dependencies: ${failedDeps.map(id => {
+            const depNode = this.graph.nodes.find(n => n.id === id);
+            return `${depNode?.name || id}(${depNode?.status || 'unknown'})`;
+          }).join(', ')}`, node.id);
           currentIndex++;
         }
       }
@@ -237,7 +267,7 @@ export class Graph implements IAgentModule {
     this.graph.completedAt = new Date();
     const duration = this.graph.completedAt.getTime() - this.graph.startedAt!.getTime();
     
-    this.log('info', `Graph execution ${this.graph.status}. Completed: ${completedNodes}, Failed: ${failedNodes}`);
+    this.log('info', `Graph execution ${this.graph.status}. Completed: ${completedNodes}, Failed: ${failedNodes} (${duration}ms)`);
     
     return {
       graph: this.graph,
@@ -268,6 +298,34 @@ export class Graph implements IAgentModule {
         throw new Error(`Task node ${node.name} has no prompt`);
       }
       
+      // Build context from dependency results and agent context
+      let enhancedPrompt = node.prompt;
+      
+      
+      if (node.dependencies.length > 0) {
+        const dependencyResults: string[] = [];
+        
+        for (const depId of node.dependencies) {
+          const depNode = this.graph.nodes.find(n => n.id === depId);
+          if (depNode?.result) {
+            try {
+              const depResult = JSON.parse(String(depNode.result));
+              if (depResult.type === 'task' && depResult.response) {
+                dependencyResults.push(`Previous result from ${depNode.name}: ${depResult.response}`);
+              }
+            } catch {
+              // If parsing fails, use raw result
+              dependencyResults.push(`Previous result from ${depNode.name}: ${String(depNode.result)}`);
+            }
+          }
+        }
+        
+        if (dependencyResults.length > 0) {
+          enhancedPrompt = `${dependencyResults.join('\n\n')}\n\nBased on the above context, ${node.prompt}`;
+          this.log('debug', `Enhanced prompt with ${dependencyResults.length} dependency results`, node.id);
+        }
+      }
+      
       // Execute task using the assigned agent
       if (!this.agent) {
         throw new Error(`No agent available for task node ${node.name}`);
@@ -277,7 +335,7 @@ export class Graph implements IAgentModule {
       await taskModule.initialize();
       
       const createdTask = await taskModule.createTask({
-        prompt: node.prompt,
+        prompt: enhancedPrompt,
         metadata: node.metadata
       });
       
@@ -285,6 +343,7 @@ export class Graph implements IAgentModule {
         model: node.model,
         stream: forceStream || node.stream 
       });
+      
       
       return {
         type: 'task',
@@ -305,10 +364,10 @@ export class Graph implements IAgentModule {
     });
   }
 
-  private canNodeExecute(node: GraphNode): boolean {
-    return node.dependencies.every(depId => {
+  private hasFailedDependencies(node: GraphNode): boolean {
+    return node.dependencies.some(depId => {
       const depNode = this.graph.nodes.find(n => n.id === depId);
-      return depNode?.status === 'completed' || depNode?.status === 'skipped';
+      return depNode?.status === 'failed';
     });
   }
 
@@ -362,6 +421,41 @@ export class Graph implements IAgentModule {
     };
     
     this.graph.executionLog.push(entry);
+    
+    // Also log to agent's logger if available
+    if (this.logger) {
+      const nodeContext = nodeId ? ` [Node: ${nodeId}]` : '';
+      const fullMessage = message + nodeContext;
+      
+      // Use the logger's log method with 'Graph' as module name
+      // Check if logger has the public log method (it should based on implementation)
+      if ('log' in this.logger && typeof this.logger.log === 'function') {
+        (this.logger as { log: (level: string, message: string, module?: string, data?: LogData, error?: Error, agentName?: string) => void }).log(
+          level, 
+          fullMessage, 
+          'Graph', 
+          undefined, 
+          level === 'error' ? new Error(fullMessage) : undefined, 
+          this.agent?.name
+        );
+      } else {
+        // Fallback to standard methods if log method is not available
+        switch (level) {
+          case 'info':
+            this.logger.info(fullMessage, undefined, this.agent?.name);
+            break;
+          case 'warn':
+            this.logger.warn(fullMessage, undefined, this.agent?.name);
+            break;
+          case 'error':
+            this.logger.error(fullMessage, undefined, undefined, this.agent?.name);
+            break;
+          case 'debug':
+            this.logger.debug(fullMessage, undefined, this.agent?.name);
+            break;
+        }
+      }
+    }
   }
 
   private generateNodeId(): string {

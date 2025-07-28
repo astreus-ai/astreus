@@ -18,7 +18,6 @@ export interface IAgent {
   hasMemory(): boolean;
   hasKnowledge(): boolean;
   hasVision(): boolean;
-  hasContext(): boolean;
 }
 
 /**
@@ -38,6 +37,8 @@ export interface AgentConfig {
   name: string;
   description?: string;
   model?: string;
+  embeddingModel?: string; // Specific model for embeddings (auto-detected if not specified)
+  visionModel?: string; // Specific model for vision (auto-detected if not specified)
   temperature?: number;
   maxTokens?: number;
   systemPrompt?: string;
@@ -45,7 +46,7 @@ export interface AgentConfig {
   knowledge?: boolean;
   vision?: boolean;
   useTools?: boolean;
-  contextCompression?: boolean;
+  contextCompression?: boolean; // Enable smart context management for long conversations
   debug?: boolean; // Enable debug logging
   createdAt?: Date;
   updatedAt?: Date;

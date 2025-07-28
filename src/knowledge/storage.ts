@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { MetadataObject } from '../types';
-import { EmbeddingService } from '../llm/embeddings';
+import { getLogger } from '../logger';
 
 interface KnowledgeSearchResult {
   id: number;
@@ -45,15 +45,16 @@ interface KnowledgeChunk {
 
 export interface KnowledgeDatabaseConfig {
   url?: string;
-  embeddingService?: EmbeddingService;
+  embeddingProvider?: { name: string; generateEmbedding?: (text: string, model?: string) => Promise<{ embedding: number[] }> };
 }
 
 export class KnowledgeDatabase {
   private pool: Pool;
   private tableName: string = 'knowledge_vectors';
-  private embeddingService: EmbeddingService;
+  private embeddingProvider: { name: string; generateEmbedding?: (text: string, model?: string) => Promise<{ embedding: number[] }> } | null = null;
   private embeddingDimensions: number | null = null;
   private tableDimensions: number | null = null;
+  private logger = getLogger();
 
   constructor(config?: KnowledgeDatabaseConfig) {
     const connectionString = config?.url || process.env.KNOWLEDGE_DB_URL;
@@ -67,13 +68,22 @@ export class KnowledgeDatabase {
       ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
     });
     
-    this.embeddingService = config?.embeddingService || new EmbeddingService();
+    this.embeddingProvider = config?.embeddingProvider || null;
+    if (!this.embeddingProvider) {
+      throw new Error('Embedding provider is required for knowledge database');
+    }
   }
 
   async initialize(): Promise<void> {
-    // Get embedding dimensions first
+    // Get embedding dimensions from a test embedding
     if (!this.embeddingDimensions) {
-      this.embeddingDimensions = await this.embeddingService.getDimensions();
+      // Generate a test embedding to determine dimensions
+      if (!this.embeddingProvider?.generateEmbedding) {
+        throw new Error('Embedding provider not properly initialized');
+      }
+      const testResult = await this.embeddingProvider.generateEmbedding('test');
+      this.embeddingDimensions = testResult.embedding.length;
+      this.logger.debug('Detected embedding dimensions', { dimensions: this.embeddingDimensions });
     }
     
     const client = await this.pool.connect();
@@ -120,23 +130,23 @@ export class KnowledgeDatabase {
         this.tableDimensions = existingDimensions;
         
         if (existingDimensions && existingDimensions !== this.embeddingDimensions) {
-          console.log(`WARNING: knowledge_chunks table has ${existingDimensions} dimensions but embedding provider uses ${this.embeddingDimensions} dimensions`);
-          console.log('This will cause embedding insertion errors. Consider:');
-          console.log('1. Switch to an embedding provider with matching dimensions');
-          console.log('2. Or backup data and recreate table with new dimensions');
-          console.log('3. Or regenerate embeddings with new provider');
+          this.logger.warn(`Dimension mismatch: knowledge_chunks table has ${existingDimensions} dimensions but embedding provider uses ${this.embeddingDimensions} dimensions`);
+          this.logger.warn('This will cause embedding insertion errors. Consider:');
+          this.logger.warn('1. Switch to an embedding provider with matching dimensions');
+          this.logger.warn('2. Or backup data and recreate table with new dimensions');
+          this.logger.warn('3. Or regenerate embeddings with new provider');
           
           // Check if table has any data
           const dataCount = await client.query('SELECT COUNT(*) FROM knowledge_chunks');
           const hasData = parseInt(dataCount.rows[0].count) > 0;
           
           if (hasData) {
-            console.log(`Table contains ${dataCount.rows[0].count} records. Data will be preserved.`);
-            console.log('To force recreation with data loss, you can manually drop the table.');
+            this.logger.info(`Table contains ${dataCount.rows[0].count} records. Data will be preserved.`);
+            this.logger.info('To force recreation with data loss, you can manually drop the table.');
             // Don't auto-drop if there's data - let user decide
             return;
           } else {
-            console.log('Table is empty, safely recreating with new dimensions...');
+            this.logger.info('Table is empty, safely recreating with new dimensions...');
             await client.query('DROP TABLE knowledge_chunks CASCADE');
             await client.query(`
               CREATE TABLE knowledge_chunks (
@@ -249,7 +259,7 @@ export class KnowledgeDatabase {
     if (this.tableDimensions && embedding.length !== this.tableDimensions) {
       throw new Error(
         `Embedding dimension mismatch: got ${embedding.length} dimensions but table expects ${this.tableDimensions}. ` +
-        `Current embedding provider: ${this.embeddingService.getProvider().name} (${this.embeddingDimensions} dimensions). ` +
+        `Current embedding provider: ${this.embeddingProvider?.name || 'unknown'} (${this.embeddingDimensions} dimensions). ` +
         `Please ensure embedding provider matches table schema or recreate table.`
       );
     }
