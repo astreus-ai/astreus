@@ -11,6 +11,12 @@ interface MCPMessage {
   params?: Record<string, MCPValue>;
   result?: {
     tools?: MCPTool[];
+    [key: string]: unknown;
+  };
+  error?: {
+    code: number;
+    message: string;
+    data?: unknown;
   };
 }
 
@@ -159,9 +165,11 @@ export class MCP implements IAgentModule {
     });
 
     childProcess.stderr?.on('data', (data: Buffer) => {
+      const stderr = data.toString().trim();
+      this.logger.error(`MCP server stderr (${name}): ${stderr}`);
       this.logger.debug('MCP server stderr', {
         serverName: name,
-        stderr: data.toString().trim()
+        stderr
       });
     });
 
@@ -197,7 +205,7 @@ export class MCP implements IAgentModule {
     });
 
     // Initialize
-    this.logger.debug('Sending initialize message to MCP server', { serverName: name });
+    this.logger.debug(`Sending initialize message to MCP server: ${name}`);
     this.sendToServer(name, {
       jsonrpc: '2.0',
       id: 1,
@@ -210,7 +218,7 @@ export class MCP implements IAgentModule {
     });
 
     // List tools
-    this.logger.debug('Requesting tools list from MCP server', { serverName: name });
+    this.logger.debug(`Requesting tools list from MCP server: ${name}`);
     this.sendToServer(name, {
       jsonrpc: '2.0',
       id: 2,
@@ -219,7 +227,11 @@ export class MCP implements IAgentModule {
   }
 
   public handleMessage(serverName: string, message: MCPMessage): void {
-    if (message.method === 'tools/list' && message.result?.tools) {
+    this.logger.debug(`Received MCP message from ${serverName}: method=${message.method}, id=${message.id}`);
+    this.logger.debug('Full MCP message', { serverName, message: JSON.stringify(message) });
+    
+    // Handle tools/list response - can be either method response or result-only message
+    if ((message.method === 'tools/list' || (message.id === 2 && message.result?.tools)) && message.result?.tools) {
       // User-facing info log
       this.logger.info(`Discovered ${message.result.tools.length} tools from ${serverName}`);
       
@@ -233,6 +245,7 @@ export class MCP implements IAgentModule {
         const toolKey = `${serverName}:${tool.name}`;
         this.tools.set(toolKey, tool);
         
+        this.logger.debug(`Registered MCP tool: ${serverName}:${tool.name} - ${tool.description}`);
         this.logger.debug('Registered MCP tool', {
           serverName,
           toolName: tool.name,
@@ -241,25 +254,35 @@ export class MCP implements IAgentModule {
         });
       }
       
+      this.logger.info(`MCP tools registration completed for ${serverName}: ${this.tools.size} total tools`);
       this.logger.debug('MCP tools registration completed', {
         serverName,
         totalTools: this.tools.size,
         serverTools: Array.from(this.tools.keys()).filter(k => k.startsWith(`${serverName}:`))
       });
+    } else if (message.result) {
+      this.logger.debug(`MCP message result from ${serverName}: ${JSON.stringify(message.result)}`);
+    } else if (message.error) {
+      this.logger.error(`MCP error from ${serverName}: ${JSON.stringify(message.error)}`);
+    } else {
+      this.logger.debug(`MCP message from ${serverName} (no result/error): ${JSON.stringify(message)}`);
     }
   }
 
   public sendToServer(name: string, message: MCPMessage): void {
     const childProcess = this.processes.get(name);
     if (childProcess?.stdin) {
+      this.logger.debug(`Sending to ${name}: ${message.method} (id: ${message.id})`);
       this.logger.debug('Sending message to MCP server', {
         serverName: name,
         method: message.method || 'unknown',
         id: message.id || 0,
-        hasParams: !!message.params
+        hasParams: !!message.params,
+        message: JSON.stringify(message)
       });
       childProcess.stdin.write(JSON.stringify(message) + '\n');
     } else {
+      this.logger.error(`Cannot send message to ${name} - MCP server not available`);
       this.logger.debug('Cannot send message - MCP server not available', {
         serverName: name,
         method: message.method || 'unknown',
@@ -272,6 +295,7 @@ export class MCP implements IAgentModule {
   getMCPTools(): MCPTool[] {
     const tools = Array.from(this.tools.values());
     
+    this.logger.debug(`MCP has ${tools.length} tools available: ${tools.map(t => t.name).join(', ')}`);
     this.logger.debug('Retrieved MCP tools', {
       toolCount: tools.length,
       toolNames: tools.map(t => t.name)
@@ -380,10 +404,30 @@ export class MCP implements IAgentModule {
   }
 
   async callMCPTool(toolName: string, args: Record<string, MCPValue>): Promise<MCPToolResult> {
-    const [serverName, actualToolName] = toolName.split(':');
+    // Handle both formats: "tool_name" and "server:tool_name"
+    let serverName: string;
+    let actualToolName: string;
+    
+    if (toolName.includes(':')) {
+      [serverName, actualToolName] = toolName.split(':');
+    } else {
+      // Find the tool in all servers
+      const foundTool = Array.from(this.tools.keys()).find(key => key.endsWith(`:${toolName}`));
+      if (foundTool) {
+        [serverName, actualToolName] = foundTool.split(':');
+      } else {
+        // User-facing error log
+        this.logger.error(`MCP tool not found: ${toolName}`);
+        this.logger.debug('MCP tool not found', {
+          requestedTool: toolName,
+          availableTools: Array.from(this.tools.keys())
+        });
+        return { content: [{ type: 'text', text: 'Tool not found' }], isError: true };
+      }
+    }
     
     // User-facing info log
-    this.logger.info(`Calling MCP tool: ${actualToolName} on ${serverName}`);
+    this.logger.debug(`Calling MCP tool: ${actualToolName} on ${serverName}`);
     
     this.logger.debug('Calling MCP tool', {
       fullToolName: toolName,
@@ -451,7 +495,7 @@ export class MCP implements IAgentModule {
                   });
                 } else {
                   // User-facing success message
-                  this.logger.info(`MCP tool completed: ${actualToolName}`);
+                  this.logger.debug(`MCP tool completed: ${actualToolName}`);
                   
                   this.logger.debug('MCP tool call successful', {
                     serverName,
