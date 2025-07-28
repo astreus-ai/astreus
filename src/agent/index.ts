@@ -14,7 +14,7 @@ import { Vision } from '../vision';
 import { getDatabase } from '../database';
 import { getProviderForModel } from '../llm/models';
 import { getLLM } from '../llm';
-import { LLMRequestOptions } from '../llm/types';
+import { LLMRequestOptions, Tool } from '../llm/types';
 import { Logger } from '../logger';
 
 /**
@@ -566,13 +566,45 @@ export class Agent extends BaseAgent {
     // Add current prompt
     messages.push({ role: 'user', content: enhancedPrompt });
     
-    // Tool usage will be implemented in future updates
-    // const shouldUseTools = options?.useTools !== undefined ? 
-    //   options.useTools : 
-    //   (options?.attachments && options.attachments.length > 0) || this.canUseTools();
+    // Check if we should use tools
+    const shouldUseTools = options?.useTools !== undefined ? 
+      options.useTools : 
+      (options?.attachments && options.attachments.length > 0) || this.canUseTools();
     
     // Get LLM instance
     const llm = getLLM(this.logger);
+    
+    // Collect all available tools
+    let tools: Tool[] = [];
+    
+    if (shouldUseTools) {
+      // Add MCP tools
+      if (this.modules.mcp) {
+        const mcpTools = this.modules.mcp.getMCPTools();
+        for (const mcpTool of mcpTools) {
+          tools.push({
+            type: 'function',
+            function: {
+              name: `mcp_${mcpTool.name}`,
+              description: mcpTool.description,
+              parameters: mcpTool.inputSchema as Tool['function']['parameters']
+            }
+          });
+        }
+      }
+      
+      // Add plugin tools (future implementation)
+      // if (this.modules.plugin) {
+      //   const pluginTools = this.modules.plugin.getTools();
+      //   // Add plugin tools to tools array
+      // }
+      
+      this.logger.info(`Prepared ${tools.length} tools for LLM: ${tools.map(t => t.function.name).join(', ')}`);
+      this.logger.debug('Tools prepared for LLM', {
+        toolCount: tools.length,
+        toolNames: tools.map(t => t.function.name)
+      });
+    }
     
     // Prepare LLM options
     const llmOptions: LLMRequestOptions = {
@@ -580,11 +612,9 @@ export class Agent extends BaseAgent {
       messages,
       temperature: options?.temperature || this.getTemperature(),
       maxTokens: options?.maxTokens || this.getMaxTokens(),
-      stream: options?.stream
+      stream: options?.stream,
+      tools: tools.length > 0 ? tools : undefined
     };
-    
-    // Add tools if needed - tool integration will be handled by individual modules
-    // For now, let LLM provider handle tool execution internally
     
     // Handle streaming vs non-streaming
     let response: string;
@@ -610,9 +640,99 @@ export class Agent extends BaseAgent {
       
       response = fullContent;
     } else {
-      // Single LLM call - tool execution is handled by LLM provider
+      // Single LLM call with tool handling
       const llmResponse = await llm.generateResponse(llmOptions);
-      response = llmResponse.content;
+      
+      // Handle tool calls if present
+      if (llmResponse.toolCalls && llmResponse.toolCalls.length > 0) {
+        this.logger.debug('Processing tool calls', {
+          toolCallCount: llmResponse.toolCalls.length,
+          toolNames: llmResponse.toolCalls.map(tc => tc.function.name)
+        });
+        
+        // Add assistant message with tool calls (ensure arguments are strings for OpenAI)
+        const formattedToolCalls = llmResponse.toolCalls.map(tc => ({
+          ...tc,
+          function: {
+            ...tc.function,
+            arguments: typeof tc.function.arguments === 'string' 
+              ? tc.function.arguments 
+              : JSON.stringify(tc.function.arguments)
+          }
+        }));
+        
+        messages.push({
+          role: 'assistant',
+          content: llmResponse.content || '',
+          tool_calls: formattedToolCalls
+        } as any);
+        
+        // Execute each tool call
+        for (const toolCall of llmResponse.toolCalls) {
+          try {
+            let toolResult: string;
+            
+            if (toolCall.function.name.startsWith('mcp_')) {
+              // Handle MCP tool call
+              const mcpToolName = toolCall.function.name.substring(4); // Remove 'mcp_' prefix
+              
+              // Ensure arguments are properly formatted for MCP
+              let mcpArgs: Record<string, unknown>;
+              if (typeof toolCall.function.arguments === 'string') {
+                mcpArgs = JSON.parse(toolCall.function.arguments);
+              } else {
+                mcpArgs = toolCall.function.arguments as Record<string, unknown>;
+              }
+              
+              const mcpResult = await this.modules.mcp!.callMCPTool(mcpToolName, mcpArgs as Record<string, import('../mcp/types').MCPValue>);
+              toolResult = mcpResult.content.map(c => c.text || '').join('\n');
+            } else {
+              // Handle other tool types (plugins, etc.)
+              toolResult = `Tool ${toolCall.function.name} not implemented yet`;
+            }
+            
+            // Add tool result to messages
+            messages.push({
+              role: 'tool',
+              content: toolResult,
+              tool_call_id: toolCall.id
+            } as any);
+            
+            this.logger.debug('Tool call executed', {
+              toolName: toolCall.function.name,
+              toolCallId: toolCall.id,
+              resultLength: toolResult.length
+            });
+            
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Tool call failed: ${toolCall.function.name}`, error as Error);
+            
+            // Add error result to messages
+            messages.push({
+              role: 'tool',
+              content: `Error: ${errorMessage}`,
+              tool_call_id: toolCall.id
+            } as any);
+          }
+        }
+        
+        // Get final response from LLM with tool results
+        const finalLlmOptions: LLMRequestOptions = {
+          ...llmOptions,
+          messages,
+          tools: undefined // Don't include tools in follow-up call
+        };
+        
+        const finalResponse = await llm.generateResponse(finalLlmOptions);
+        response = finalResponse.content;
+        
+        this.logger.debug('Final response generated after tool calls', {
+          responseLength: response.length
+        });
+      } else {
+        response = llmResponse.content;
+      }
     }
     
 
