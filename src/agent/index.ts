@@ -9,10 +9,10 @@ import { Memory as MemoryType } from '../memory/types';
 import { Graph } from '../graph';
 import { Plugin } from '../plugin';
 import { MCP } from '../mcp';
-import { Context } from '../context';
 import { Knowledge } from '../knowledge';
 import { Vision } from '../vision';
 import { getDatabase } from '../database';
+import { getProviderForModel } from '../llm/models';
 import { getLLM } from '../llm';
 import { LLMRequestOptions } from '../llm/types';
 import { Logger } from '../logger';
@@ -74,9 +74,6 @@ export abstract class BaseAgent implements IAgent {
     return this.data.vision === true;
   }
 
-  hasContext(): boolean {
-    return this.data.contextCompression === true;
-  }
 
   // Instance methods
   async update(updates: Partial<AgentConfig>): Promise<void> {
@@ -137,7 +134,7 @@ export abstract class BaseAgent implements IAgent {
    * Protected helper for concrete implementations
    */
   protected async callLLM(prompt: string, options?: RunOptions): Promise<string> {
-    const llm = getLLM();
+    const llm = getLLM(this.logger);
     
     const response = await llm.generateResponse({
       model: options?.model || this.getModel(),
@@ -165,7 +162,6 @@ export class Agent extends BaseAgent {
     graph?: Graph;
     plugin?: Plugin;
     mcp?: MCP;
-    context?: Context;
     knowledge?: Knowledge;
     vision?: Vision;
   };
@@ -187,9 +183,6 @@ export class Agent extends BaseAgent {
       this.modules.mcp = new MCP(this);
     }
     
-    if (data.contextCompression) {
-      this.modules.context = new Context(this);
-    }
     
     if (data.knowledge) {
       this.modules.knowledge = new Knowledge(this);
@@ -223,9 +216,6 @@ export class Agent extends BaseAgent {
       this.bindAllMethods(this.modules.mcp);
     }
     
-    if (this.modules.context) {
-      this.bindAllMethods(this.modules.context);
-    }
     
     if (this.modules.knowledge) {
       this.bindAllMethods(this.modules.knowledge);
@@ -256,6 +246,30 @@ export class Agent extends BaseAgent {
    * Initialize all modules
    */
   async initializeModules(): Promise<void> {
+    // User-facing info log with agent details
+    this.logger.info(`Initializing agent: ${this.data.name}`);
+    
+    // Get LLM provider information
+    const model = this.data.model || 'gpt-4o-mini';
+    const provider = getProviderForModel(model);
+    
+    // Detailed debug log with all agent configuration
+    this.logger.debug('Agent initialization started', {
+      id: this.data.id || 0,
+      name: this.data.name,
+      model: model,
+      provider: provider || 'unknown',
+      temperature: this.data.temperature || 0.7,
+      maxTokens: this.data.maxTokens || 2000,
+      hasSystemPrompt: !!this.data.systemPrompt,
+      memory: !!this.data.memory,
+      knowledge: !!this.data.knowledge,
+      vision: !!this.data.vision,
+      useTools: this.data.useTools !== false,
+      contextCompression: !!this.data.contextCompression,
+      debug: !!this.data.debug
+    });
+    
     await this.modules.task.initialize();
     
     if (this.modules.memory) {
@@ -270,9 +284,6 @@ export class Agent extends BaseAgent {
       await this.modules.mcp.initialize();
     }
     
-    if (this.modules.context) {
-      await this.modules.context.initialize();
-    }
     
     if (this.modules.knowledge) {
       await this.modules.knowledge.initialize();
@@ -284,6 +295,24 @@ export class Agent extends BaseAgent {
     
     // Re-bind methods after initialization
     this.bindModuleMethods();
+    
+    // User-facing success message with capabilities summary
+    const capabilities = [];
+    if (this.data.memory) capabilities.push('Memory');
+    if (this.data.knowledge) capabilities.push('Knowledge');
+    if (this.data.vision) capabilities.push('Vision');
+    if (this.data.useTools !== false) capabilities.push('Tools');
+    if (this.data.contextCompression) capabilities.push('Context Compression');
+    
+    this.logger.info(`Agent ready: ${this.data.name} (${model} via ${provider || 'unknown'}) - ${capabilities.join(', ')}`);
+    
+    this.logger.debug('Agent initialization completed', {
+      name: this.data.name,
+      model: model,
+      provider: provider || 'unknown',
+      enabledCapabilities: capabilities,
+      totalModules: Object.keys(this.modules).length
+    });
   }
 
   /**
@@ -292,26 +321,54 @@ export class Agent extends BaseAgent {
   static async create(config: AgentConfig): Promise<Agent> {
     const db = await getDatabase();
     
+    // Ensure all optional fields have defaults to prevent undefined behavior
+    const fullConfig: AgentConfig = {
+      memory: false,
+      knowledge: false,
+      vision: false,
+      useTools: true,
+      contextCompression: false,
+      debug: false,
+      ...config // Override with provided config
+    };
+    
     // Check if agent with this name already exists
-    const existingAgent = await db.getAgentByName(config.name);
+    const existingAgent = await db.getAgentByName(fullConfig.name);
     
     let agentData: AgentConfig;
     if (existingAgent) {
       // Agent exists, update it with new config
-      const updatedAgent = await db.updateAgent(existingAgent.id!, config);
+      const updatedAgent = await db.updateAgent(existingAgent.id!, fullConfig);
       if (!updatedAgent) {
         throw new Error(`Failed to update agent with ID ${existingAgent.id}`);
       }
       agentData = updatedAgent;
     } else {
       // Agent doesn't exist, create new one
-      agentData = await db.createAgent(config);
+      agentData = await db.createAgent(fullConfig);
     }
     
     const agent = new Agent(agentData);
     
     // Initialize all modules
     await agent.initializeModules();
+    
+    // Log agent creation/update
+    if (existingAgent) {
+      agent.logger.info(`Agent updated: ${agentData.name}`);
+    } else {
+      agent.logger.info(`Agent created: ${agentData.name}`);
+    }
+    
+    agent.logger.debug('Agent initialized', {
+      agentId: agentData.id || 0,
+      name: agentData.name,
+      model: agentData.model || 'default',
+      memory: !!agentData.memory,
+      knowledge: !!agentData.knowledge,
+      vision: !!agentData.vision,
+      debug: !!agentData.debug
+    });
     
     return agent;
   }
@@ -439,7 +496,7 @@ export class Agent extends BaseAgent {
             try {
               const fs = await import('fs/promises');
               const content = await fs.readFile(attachment.path, 'utf-8');
-              const preview = content.length > 500 ? content.substring(0, 500) + '...' : content;
+              const preview = content.length > 500 ? content.slice(0, 500) + '...' : content;
               description += `\nContent:\n${preview}`;
             } catch (error) {
               description += ` [File read error: ${error instanceof Error ? error.message : 'Unknown error'}]`;
@@ -453,6 +510,7 @@ export class Agent extends BaseAgent {
       enhancedPrompt = `${prompt}\n\nAttached files:\n${attachmentDescriptions.join('\n\n')}`;
     }
     
+
     // Add memory context if available
     if (this.hasMemory() && this.modules.memory) {
       try {
@@ -514,7 +572,7 @@ export class Agent extends BaseAgent {
     //   (options?.attachments && options.attachments.length > 0) || this.canUseTools();
     
     // Get LLM instance
-    const llm = getLLM();
+    const llm = getLLM(this.logger);
     
     // Prepare LLM options
     const llmOptions: LLMRequestOptions = {
@@ -557,6 +615,7 @@ export class Agent extends BaseAgent {
       response = llmResponse.content;
     }
     
+
     // Store in memory if enabled
     if (this.hasMemory() && this.modules.memory) {
       try {
@@ -598,7 +657,6 @@ export class Agent extends BaseAgent {
     const wasMemoryEnabled = this.hasMemory();
     const wasKnowledgeEnabled = this.hasKnowledge();
     const wasVisionEnabled = this.hasVision();
-    const wasContextEnabled = this.hasContext();
     
     await super.update(updates);
     
@@ -622,13 +680,6 @@ export class Agent extends BaseAgent {
       await this.modules.vision.initialize();
     } else if (!this.hasVision() && wasVisionEnabled) {
       delete this.modules.vision;
-    }
-    
-    if (this.hasContext() && !wasContextEnabled) {
-      this.modules.context = new Context(this);
-      await this.modules.context.initialize();
-    } else if (!this.hasContext() && wasContextEnabled) {
-      delete this.modules.context;
     }
     
     // Re-bind methods after module changes

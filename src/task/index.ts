@@ -1,10 +1,13 @@
 import { IAgentModule, IAgent } from '../agent/types';
 import { Task as TaskType, TaskSearchOptions, TaskStatus, TaskRequest, TaskResponse } from './types';
 import { getDatabase } from '../database';
-import { getLLM } from '../llm';
+import { getLLM, LLMResponse, LLMStreamChunk, LLMMessage, LLMMessageContent, LLMMessageContentPart } from '../llm';
 import { Memory } from '../memory';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
+import { Logger } from '../logger/types';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 // Database row interfaces
 interface TaskDbRow {
@@ -24,46 +27,24 @@ interface AgentDbRow {
   name: string;
   systemPrompt?: string;
   model?: string;
+  embeddingModel?: string;
+  visionModel?: string;
   temperature?: number;
   maxTokens?: number;
   useTools?: boolean;
   memory?: boolean;
 }
 
-interface LLMResponse {
-  content: string;
-  model: string;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-  toolCalls?: Array<{
-    id: string;
-    type: 'function';
-    function: {
-      name: string;
-      arguments: Record<string, string | number | boolean | null>;
-    };
-  }>;
-}
-
-interface LLMStreamChunk {
-  content: string;
-  model?: string;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-}
 
 
 export class Task implements IAgentModule {
   readonly name = 'task';
   private knex: Knex | null = null;
+  private logger: Logger;
 
-  constructor(private agent: IAgent) {}
+  constructor(private agent: IAgent) {
+    this.logger = agent.logger;
+  }
 
   async initialize(): Promise<void> {
     await this.ensureDatabase();
@@ -84,6 +65,19 @@ export class Task implements IAgentModule {
   }
 
   async createTask(request: TaskRequest): Promise<TaskType> {
+    // User-facing info log
+    this.logger.info('Creating new task');
+    
+    this.logger.debug('Creating task', {
+      promptLength: request.prompt.length,
+      promptPreview: request.prompt.slice(0, 100) + '...,',
+      agentId: this.agent.id,
+      hasAttachments: !!request.attachments?.length,
+      hasMcpServers: !!request.mcpServers?.length,
+      hasPlugins: !!request.plugins?.length,
+      useTools: !!request.useTools
+    });
+    
     await this.ensureDatabase();
     const tableName = 'tasks';
 
@@ -119,7 +113,7 @@ export class Task implements IAgentModule {
             try {
               const fs = await import('fs/promises');
               const content = await fs.readFile(attachment.path, 'utf-8');
-              const preview = content.length > 200 ? content.substring(0, 200) + '...' : content;
+              const preview = content.length > 200 ? content.slice(0, 200) + '...' : content;
               description += `\nPreview: ${preview}`;
             } catch (error) {
               description += ` [File not accessible: ${error instanceof Error ? error.message : 'Unknown error'}]`;
@@ -148,10 +142,33 @@ export class Task implements IAgentModule {
       })
       .returning('*');
     
-    return this.formatTask(task);
+    const formattedTask = this.formatTask(task);
+    
+    // User-facing success message
+    this.logger.info(`Task created with ID: ${formattedTask.id}`);
+    
+    this.logger.debug('Task created successfully', {
+      taskId: formattedTask.id || 0,
+      status: String(formattedTask.status),
+      hasMetadata: !!formattedTask.metadata
+    });
+    
+    return formattedTask;
   }
 
   async executeTask(taskId: number, options?: { model?: string; stream?: boolean }): Promise<TaskResponse> {
+    const startTime = Date.now();
+    
+    // User-facing info log
+    this.logger.info(`Executing task: ${taskId}`);
+    
+    this.logger.debug('Starting task execution', {
+      taskId,
+      agentId: this.agent.id,
+      model: options?.model || 'default',
+      stream: !!options?.stream
+    });
+    
     const task = await this.getTask(taskId);
     if (!task) {
       throw new Error(`Task ${taskId} not found`);
@@ -191,15 +208,18 @@ export class Task implements IAgentModule {
             }
           }
         } catch (error) {
-          console.warn('Failed to parse plugins metadata:', error);
+          this.logger.debug('Failed to parse plugins metadata', { 
+            error: error instanceof Error ? error.message : String(error) 
+          });
         }
       }
 
       // If agent has tools support and this task should use tools
       if (shouldUseTools && this.agent && 'executeTaskWithTools' in this.agent && typeof this.agent.executeTaskWithTools === 'function') {
         
-        // Build the prompt with memory context if needed
+        // Build the prompt with context and memory if needed
         let contextualPrompt = task.prompt;
+        
         
         if (agentHasMemory) {
           const memory = new Memory(this.agent);
@@ -241,10 +261,10 @@ export class Task implements IAgentModule {
 
       } else {
         // Fallback to standard LLM execution without tools
-        const llm = getLLM();
+        const llm = getLLM(this.logger);
         
         // Prepare messages for LLM
-        const llmMessages: { role: 'user' | 'assistant' | 'system'; content: string }[] = [];
+        const llmMessages: LLMMessage[] = [];
         
         if (agentHasMemory) {
           const memory = new Memory(this.agent);
@@ -264,11 +284,81 @@ export class Task implements IAgentModule {
           }
         }
         
-        // Add current prompt
-        llmMessages.push({ role: 'user', content: task.prompt });
+        // Process attachments if present
+        let userMessageContent: LLMMessageContent = task.prompt;
+        
+        if (task.metadata?.attachments) {
+          try {
+            const attachments = JSON.parse(task.metadata.attachments as string);
+            const imageAttachments = attachments.filter((att: { type: string; path: string }) => att.type === 'image');
+            
+            if (imageAttachments.length > 0) {
+              // Use visionModel if specified, otherwise fall back to main model
+              const visionModel = agentData?.visionModel || options?.model || agentData?.model || 'gpt-4o';
+              const visionCapableModels = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4-vision-preview', 'claude-3', 'gemini'];
+              const isVisionCapable = visionCapableModels.some(vm => visionModel.includes(vm));
+              
+              if (isVisionCapable) {
+                // Create multi-modal content
+                const contentParts: LLMMessageContentPart[] = [
+                  { type: 'text', text: task.prompt }
+                ];
+                
+                // Add image parts
+                for (const imageAtt of imageAttachments) {
+                  try {
+                    const imagePath = path.resolve(imageAtt.path);
+                    const imageData = await fs.readFile(imagePath);
+                    const base64Image = imageData.toString('base64');
+                    const mimeType = getMimeType(path.extname(imagePath));
+                    
+                    contentParts.push({
+                      type: 'image_url',
+                      image_url: {
+                        url: `data:${mimeType};base64,${base64Image}`,
+                        detail: 'auto'
+                      }
+                    });
+                    
+                    this.logger.debug('Added image to message', {
+                      imagePath: imageAtt.path,
+                      mimeType,
+                      base64Length: base64Image.length
+                    });
+                  } catch {
+                    this.logger.warn(`Failed to read image attachment: ${imageAtt.path}`);
+                  }
+                }
+                
+                userMessageContent = contentParts;
+              }
+            }
+          } catch {
+            this.logger.debug('Failed to parse attachments');
+          }
+        }
+        
+        // Add current prompt with potential image content
+        llmMessages.push({ role: 'user', content: userMessageContent });
+
+        // Use visionModel if images are present, otherwise use regular model
+        const hasImages = task.metadata?.attachments && 
+          JSON.parse(task.metadata.attachments as string).some((att: { type: string }) => att.type === 'image');
+        const modelToUse = hasImages && agentData?.visionModel ? 
+          agentData.visionModel : 
+          (options?.model || agentData?.model || 'gpt-4o');
+
+        this.logger.debug('Model selection for task execution', {
+          hasImages: !!hasImages,
+          agentVisionModel: agentData?.visionModel || 'none',
+          agentMainModel: agentData?.model || 'none',
+          optionsModel: options?.model || 'none',
+          modelToUse: modelToUse,
+          taskId: taskId
+        });
 
         const llmOptions = {
-          model: options?.model || agentData?.model || 'gpt-4o',
+          model: modelToUse,
           messages: llmMessages,
           temperature: agentData?.temperature || 0.7,
           maxTokens: agentData?.maxTokens || 4096,
@@ -287,8 +377,7 @@ export class Task implements IAgentModule {
           
           llmResponse = {
             content: fullContent,
-            model: chunks[0]?.model || options?.model || agentData?.model || 'gpt-4o',
-            usage: chunks[chunks.length - 1]?.usage
+            model: chunks[0]?.model || options?.model || agentData?.model || 'gpt-4o'
           };
         } else {
           // Generate response using LLM
@@ -302,6 +391,17 @@ export class Task implements IAgentModule {
         status: 'completed',
         completedAt: new Date()
       });
+      
+      // User-facing success message
+      this.logger.info(`Task ${taskId} completed successfully`);
+      
+      this.logger.debug('Task execution completed', {
+        taskId,
+        responseLength: llmResponse.content.length,
+        executionTimeMs: Date.now() - startTime,
+        status: 'completed'
+      });
+
 
       // Add to memory if agent has memory enabled
       if (agentHasMemory) {
@@ -331,6 +431,14 @@ export class Task implements IAgentModule {
     } catch (error) {
       // Mark task as failed
       await this.updateTaskStatus(taskId, 'failed');
+      
+      // User-facing error message
+      this.logger.error(`Task ${taskId} failed`, error instanceof Error ? error : undefined, {
+        taskId,
+        executionTimeMs: Date.now() - startTime,
+        agentId: this.agent.id
+      });
+      
       throw error;
     }
   }
@@ -348,6 +456,17 @@ export class Task implements IAgentModule {
   }
 
   async listTasks(options: TaskSearchOptions = {}): Promise<TaskType[]> {
+    this.logger.info('Listing tasks');
+    
+    this.logger.debug('Listing tasks with options', {
+      limit: options.limit || 100,
+      offset: options.offset || 0,
+      status: options.status || 'all',
+      orderBy: options.orderBy || 'createdAt',
+      order: options.order || 'desc',
+      agentId: this.agent.id
+    });
+    
     await this.ensureDatabase();
     const tableName = 'tasks';
     
@@ -450,6 +569,20 @@ export class Task implements IAgentModule {
       completedAt: task.completedAt ? new Date(task.completedAt) : undefined
     };
   }
+}
+
+// Helper function to get MIME type from file extension
+function getMimeType(extension: string): string {
+  const mimeTypes: Record<string, string> = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.bmp': 'image/bmp',
+    '.webp': 'image/webp'
+  };
+  
+  return mimeTypes[extension.toLowerCase()] || 'image/jpeg';
 }
 
 // Export types

@@ -57,4 +57,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 Astreus Team - [https://astreus.org](https://astreus.org)
 
-Project Link: [https://github.com/astreus-ai/astreus/astreus](https://github.com/astreus-ai/astreus/astreus)
+Project Link: [https://github.com/astreus-ai/astreus](https://github.com/astreus-ai/astreus)

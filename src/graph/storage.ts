@@ -2,10 +2,6 @@ import { Knex } from 'knex';
 import { getDatabase } from '../database/index';
 import { Graph, GraphNode, GraphEdge } from './types';
 
-interface DatabaseInstance {
-  knex: Knex;
-}
-
 export class GraphStorage {
   private knex: Knex;
   private initialized: boolean = false;
@@ -18,12 +14,16 @@ export class GraphStorage {
   private async initialize(): Promise<void> {
     if (this.initialized) return;
     const db = await getDatabase();
-    this.knex = (db as DatabaseInstance).knex;
+    this.knex = db.getKnex();
+    await this.createTables();
     this.initialized = true;
   }
 
   async initializeTables(): Promise<void> {
     await this.initialize();
+  }
+
+  private async createTables(): Promise<void> {
     // Create graphs table
     const hasGraphsTable = await this.knex.schema.hasTable('graphs');
     if (!hasGraphsTable) {
