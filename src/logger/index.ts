@@ -1,17 +1,9 @@
-import { Logger as ILogger, LoggerConfig, LogLevel, LogEntry, LogData } from './types';
-import * as fs from 'fs';
-import * as path from 'path';
-import chalk from 'chalk';
+import pino from 'pino';
+import { Logger as ILogger, LoggerConfig, LogLevel, LogData } from './types';
 
 export class Logger implements ILogger {
+  private pino: pino.Logger;
   public config: LoggerConfig;
-  public logLevels: Record<LogLevel, number> = {
-    debug: 0,
-    info: 1,
-    success: 1,
-    warn: 2,
-    error: 3
-  };
 
   constructor(config: Partial<LoggerConfig> = {}) {
     const envLevel = process.env.LOG_LEVEL as LogLevel;
@@ -23,136 +15,127 @@ export class Logger implements ILogger {
       enableFile: false,
       ...config
     };
-  }
 
-  public shouldLog(level: LogLevel): boolean {
-    return this.logLevels[level] >= this.logLevels[this.config.level];
-  }
-
-  private getColorForLevel(level: LogLevel): (text: string) => string {
-    // Fallback if chalk is not available
-    if (!chalk) {
-      return (text: string) => text;
-    }
+    // Create pino instance with pretty printing in development
+    const isProduction = process.env.NODE_ENV === 'production';
     
-    switch (level) {
-      case 'debug': return chalk.gray || ((text: string) => text);
-      case 'info': return chalk.blue || ((text: string) => text);
-      case 'success': return chalk.green || ((text: string) => text);
-      case 'warn': return chalk.yellow || ((text: string) => text);
-      case 'error': return chalk.red || ((text: string) => text);
-      default: return chalk.white || ((text: string) => text);
-    }
-  }
-
-  public formatMessage(entry: LogEntry, agentName?: string): string {
-    const colorFn = this.getColorForLevel(entry.level);
-    const component = entry.module || 'Core';
-    
-    // Professional format: "Astreus [AgentName] Component → Message"
-    // Use provided agentName or fall back to stored agentName in config
-    const resolvedAgentName = agentName || this.config.agentName;
-    let baseFormat: string;
-    if (resolvedAgentName) {
-      baseFormat = `Astreus [${resolvedAgentName}] ${component} → ${entry.message}`;
-    } else {
-      baseFormat = `Astreus ${component} → ${entry.message}`;
-    }
-    
-    // Ensure colorFn is a function
-    const safeColorFn = typeof colorFn === 'function' ? colorFn : (text: string) => text;
-    
-    if (this.config.debug) {
-      const timestamp = entry.timestamp.toISOString();
-      let message = safeColorFn(`[${timestamp}] ${baseFormat}`);
-      
-      if (entry.data) {
-        const dimFn = (chalk && chalk.dim) ? chalk.dim : (text: string) => text;
-        message += `\n${dimFn('Data:')} ${JSON.stringify(entry.data, null, 2)}`;
-      }
-      
-      if (entry.error) {
-        const redFn = (chalk && chalk.red) ? chalk.red : (text: string) => text;
-        message += `\n${redFn('Error:')} ${entry.error.message}`;
-        if (entry.error.stack) {
-          message += `\n${redFn('Stack:')} ${entry.error.stack}`;
+    const pinoConfig: pino.LoggerOptions = {
+      level: this.config.level === 'success' ? 'info' : this.config.level,
+      formatters: {
+        level: (label) => {
+          return { level: label };
         }
-      }
-      
-      return message;
-    } else {
-      return safeColorFn(baseFormat);
-    }
-  }
-
-  public log(level: LogLevel, message: string, module: string = 'Core', data?: LogData, error?: Error, agentName?: string): void {
-    if (!this.shouldLog(level)) return;
-
-    const entry: LogEntry = {
-      level,
-      message,
-      module,
-      timestamp: new Date(),
-      data,
-      error
+      },
+      base: {
+        framework: 'Astreus'
+      },
+      timestamp: this.config.debug ? pino.stdTimeFunctions.isoTime : false
     };
 
-    const formattedMessage = this.formatMessage(entry, agentName);
-
-    if (this.config.enableConsole) {
-      // Use console.log for all levels to preserve colors
-      console.log(formattedMessage);
-    }
-
-    if (this.config.enableFile && this.config.filePath) {
-      // Strip colors for file output
-      // eslint-disable-next-line no-control-regex
-      const fileMessage = this.formatMessage(entry, agentName).replace(/\u001B\[[0-9;]*m/g, '');
-      this.writeToFile(fileMessage);
+    // Pretty print in development, JSON in production
+    if (!isProduction && this.config.enableConsole) {
+      this.pino = pino({
+        ...pinoConfig,
+        transport: {
+          target: 'pino-pretty',
+          options: {
+            colorize: true,
+            translateTime: false,
+            ignore: 'pid,hostname,framework,level,time,module,agent,data,err',
+            messageFormat: 'Astreus [{agent}] {module} → {msg}',
+            customColors: 'info:blue,warn:yellow,error:red,success:green',
+            hideObject: true,
+            singleLine: false,
+            messageKey: 'msg'
+          }
+        }
+      });
+    } else {
+      this.pino = pino(pinoConfig);
     }
   }
 
-  public writeToFile(formattedMessage: string): void {
-    try {
-      if (this.config.filePath) {
-        const dir = path.dirname(this.config.filePath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        
-        fs.appendFileSync(this.config.filePath, formattedMessage + '\n');
-      }
-    } catch (error) {
-      console.error('[Logger] Failed to write to file:', error);
+  private formatLogObject(message: string, module: string = 'Core', data?: LogData, error?: Error, agentName?: string): Record<string, unknown> {
+    const logObject: Record<string, unknown> = {
+      msg: message,
+      module,
+      framework: 'Astreus',
+      agent: agentName || this.config.agentName || 'System'
+    };
+
+    if (data) {
+      logObject.data = data;
     }
+
+    if (error) {
+      logObject.err = {
+        message: error.message,
+        stack: error.stack,
+        name: error.name
+      };
+    }
+
+    return logObject;
   }
 
   debug(message: string, data?: LogData, agentName?: string): void {
-    this.log('debug', message, 'Core', data, undefined, agentName);
+    const logObj = this.formatLogObject(message, 'Core', data, undefined, agentName);
+    this.pino.debug(logObj);
   }
 
   info(message: string, data?: LogData, agentName?: string): void {
-    this.log('info', message, 'Core', data, undefined, agentName);
+    const logObj = this.formatLogObject(message, 'Core', data, undefined, agentName);
+    this.pino.info(logObj);
   }
 
   warn(message: string, data?: LogData, agentName?: string): void {
-    this.log('warn', message, 'Core', data, undefined, agentName);
+    const logObj = this.formatLogObject(message, 'Core', data, undefined, agentName);
+    this.pino.warn(logObj);
   }
 
   error(message: string, error?: Error, data?: LogData, agentName?: string): void {
-    this.log('error', message, 'Core', data, error, agentName);
+    const logObj = this.formatLogObject(message, 'Core', data, error, agentName);
+    this.pino.error(logObj);
   }
 
   success(message: string, data?: LogData, agentName?: string): void {
-    this.log('success', message, 'Core', data, undefined, agentName);
+    // Pino doesn't have success level, use info with success marker
+    const logObj = this.formatLogObject(message, 'Core', data, undefined, agentName);
+    logObj.level = 'success';
+    this.pino.info(logObj);
+  }
+
+  // Add a public log method for custom module names
+  log(level: LogLevel, message: string, module: string = 'Core', data?: LogData, error?: Error, agentName?: string): void {
+    const logObj = this.formatLogObject(message, module, data, error, agentName);
+    
+    switch(level) {
+      case 'debug':
+        this.pino.debug(logObj);
+        break;
+      case 'info':
+      case 'success':
+        this.pino.info(logObj);
+        break;
+      case 'warn':
+        this.pino.warn(logObj);
+        break;
+      case 'error':
+        this.pino.error(logObj);
+        break;
+    }
   }
 
   setLevel(level: LogLevel): void {
     this.config.level = level;
+    this.pino.level = level === 'success' ? 'info' : level;
   }
 
   setDebug(debug: boolean): void {
     this.config.debug = debug;
+    // Recreate logger with new debug setting
+    const newLogger = new Logger({ ...this.config, debug });
+    this.pino = newLogger.pino;
   }
 }
 
@@ -161,7 +144,7 @@ let globalLogger: Logger | null = null;
 
 export function getLogger(config?: Partial<LoggerConfig>): Logger {
   if (!globalLogger) {
-    globalLogger = new Logger(config);
+    globalLogger = new Logger({ agentName: 'System', ...config });
   }
   return globalLogger;
 }

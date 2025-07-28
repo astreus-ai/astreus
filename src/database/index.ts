@@ -3,6 +3,7 @@ import { DatabaseConfig } from './types';
 import { AgentConfig } from '../agent/types';
 import { createKnexConfig } from './knex';
 import { Logger } from '../logger/types';
+import { getLogger } from '../logger';
 
 interface AgentDbRow {
   id: number;
@@ -38,15 +39,7 @@ export class Database {
 
   constructor(config: DatabaseConfig, logger?: Logger) {
     this.config = config;
-    this.logger = logger || { 
-      info: () => {}, 
-      debug: () => {}, 
-      warn: () => {}, 
-      error: () => {},
-      success: () => {},
-      setLevel: () => {},
-      setDebug: () => {}
-    } as Logger;
+    this.logger = logger || getLogger();
     
     // User-facing info log
     this.logger.info('Initializing database connection');
