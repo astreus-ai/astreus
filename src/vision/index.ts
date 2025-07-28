@@ -2,6 +2,7 @@ import { IAgentModule, IAgent } from '../agent/types';
 import { ToolDefinition } from '../plugin/types';
 import { createVisionTools } from './tools';
 import { Logger } from '../logger/types';
+import { getLogger } from '../logger';
 import { getLLMProvider } from '../llm';
 import { VisionAnalysisOptions } from '../llm/types';
 import * as path from 'path';
@@ -25,7 +26,7 @@ export class Vision implements IAgentModule {
   private logger: Logger;
 
   constructor(private agent?: IAgent, config?: VisionConfig) {
-    this.logger = agent?.logger || { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, success: () => {}, setLevel: () => {}, setDebug: () => {} } as Logger;
+    this.logger = agent?.logger || getLogger();
     
     // Handle agent-provided config
     if (!config && agent?.config) {

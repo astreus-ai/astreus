@@ -39,6 +39,7 @@ export interface Logger {
   warn(message: string, data?: LogData, agentName?: string): void;
   error(message: string, error?: Error, data?: LogData, agentName?: string): void;
   success(message: string, data?: LogData, agentName?: string): void;
+  log(level: LogLevel, message: string, module: string, data?: LogData, error?: Error, agentName?: string): void;
   setLevel(level: LogLevel): void;
   setDebug(debug: boolean): void;
 }

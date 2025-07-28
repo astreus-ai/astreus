@@ -5,21 +5,14 @@ import { ClaudeProvider } from './providers/claude';
 import { GeminiProvider } from './providers/gemini';
 import { OllamaProvider } from './providers/ollama';
 import { Logger } from '../logger/types';
+import { getLogger } from '../logger';
 
 export class LLM {
   private providers: Map<string, LLMProvider> = new Map();
   private logger: Logger;
 
   constructor(logger?: Logger) {
-    this.logger = logger || { 
-      info: () => {}, 
-      debug: () => {}, 
-      warn: () => {}, 
-      error: () => {},
-      success: () => {},
-      setLevel: () => {},
-      setDebug: () => {}
-    } as Logger;
+    this.logger = logger || getLogger();
     
     // User-facing info log
     this.logger.info('LLM service initialized');
