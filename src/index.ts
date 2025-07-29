@@ -1,62 +1,72 @@
-// Astreus - AI Agent Framework
+// Main exports  
+export { Agent } from './agent';
+export { AgentConfig } from './agent/types';
 
-import { logger } from './utils/logger';
-import { createAgent } from './agent/';
-import { createProvider } from './provider/';
-import { createMemory } from './memory/';
-import { createDatabase } from './database/';
-import { createRAG, parsePDF } from './rag/';
-import { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv } from './rag/vector-db';
-import { createChat } from './chat/';
-import { PersonalityFactory } from './personality/';
+// Common types
+export type { MetadataObject } from './types';
+export { Memory } from './memory';
+export { Task } from './task';
 
-// Convenience function to create personality manager
-export const createPersonalityManager = PersonalityFactory.create;
+// Database exports
+export { getDatabase } from './database';
+export type { DatabaseConfig } from './database/types';
 
-export { createAgent };
-export { createProvider };
-export { createMemory };
-export { createDatabase };
-export { createRAG };
-export { createChat };
-export { parsePDF };
-export { logger };
-export { createVectorDatabaseConnector, loadVectorDatabaseConfigFromEnv };
-export { PersonalityFactory };
+// Embedding exports (legacy compatibility)
+export { EmbeddingService } from './knowledge';
+export type { EmbeddingConfig } from './knowledge';
 
-export * from './types';
-// Re-export configurations from each module
-export { 
-  DEFAULT_AGENT_NAME, 
-  DEFAULT_MODEL,
-  DEFAULT_TEMPERATURE as AGENT_DEFAULT_TEMPERATURE,
-  DEFAULT_MAX_TOKENS as AGENT_DEFAULT_MAX_TOKENS
-} from "./agent/config";
+// Memory types
+export type { Memory as MemoryType, MemorySearchOptions } from './memory/types';
 
-export * from "./context/config";
-export * from "./database/config";
-export * from "./memory/config";
+// Task types
+export type { Task as TaskType, TaskRequest, TaskResponse, TaskSearchOptions, TaskStatus } from './task/types';
 
-export { 
-  PROVIDER_TYPES,
-  DEFAULT_OPENAI_BASE_URL,
-  DEFAULT_OLLAMA_BASE_URL,
-  DEFAULT_CLAUDE_BASE_URL,
-  DEFAULT_CLAUDE_API_VERSION,
-  DEFAULT_GEMINI_BASE_URL,
-  DEFAULT_TEMPERATURE as PROVIDER_DEFAULT_TEMPERATURE,
-  DEFAULT_MAX_TOKENS as PROVIDER_DEFAULT_MAX_TOKENS,
-  DEFAULT_OPENAI_EMBEDDING_MODEL,
-  DEFAULT_OLLAMA_EMBEDDING_MODEL
-} from "./provider/config";
+// LLM exports
+export { getLLM } from './llm';
+export type { LLMProvider, LLMRequestOptions, LLMResponse } from './llm/types';
 
-export * from "./rag/config";
-export * from "./tasks/config";
-export * from "./personality/config";
-export * from "./utils/errors";
-export * from "./utils";
-export * from "./tasks/";
-export * from "./context/";
-export * from "./personality/";
-export { validateRequiredParam, validateRequiredParams } from "./utils/validation";
-export { PluginRegistry } from "./plugin/";
+// Logger exports
+export { getLogger, initializeLogger } from './logger';
+export type { Logger, LoggerConfig, LogLevel } from './logger/types';
+
+// Graph exports
+export { Graph } from './graph';
+export type { 
+  Graph as GraphType, 
+  GraphNode, 
+  GraphEdge, 
+  GraphConfig, 
+  GraphExecutionResult,
+  AddAgentNodeOptions,
+  AddTaskNodeOptions 
+} from './graph/types';
+
+
+// Plugin exports
+export { getPlugin, Plugin } from './plugin';
+export type { 
+  Plugin as PluginDefinition, 
+  ToolDefinition, 
+  ToolCall, 
+  ToolResult, 
+  ToolContext,
+  ToolCallResult,
+  PluginConfig 
+} from './plugin/types';
+
+// MCP exports
+export { getMCP } from './mcp';
+export type {
+  MCPServerConfig,
+  MCPTool,
+  MCPToolCall,
+  MCPToolResult,
+  MCPServerDefinition
+} from './mcp/types';
+
+// Knowledge exports
+export { Knowledge, knowledgeSearchTool, knowledgeTools } from './knowledge';
+export type { KnowledgeConfig } from './knowledge';
+
+// Default export
+export { default } from './agent';
