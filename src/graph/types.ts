@@ -1,5 +1,6 @@
 import { Agent } from '../agent';
 import { MetadataObject } from '../types';
+import { Schedule, ScheduleOptions } from '../scheduler/types';
 
 /**
  * Primitive values that can be returned as node results
@@ -33,9 +34,15 @@ export interface GraphNode {
   stream?: boolean;
   
   // Execution properties
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'scheduled';
   priority: number;
   dependencies: string[]; // Node IDs that must complete first
+  
+  // Scheduling properties
+  schedule?: Schedule;
+  scheduledFor?: Date; // Calculated execution time (considers both schedule + dependencies)
+  isScheduled?: boolean; // Whether this node has scheduling enabled
+  scheduleOptions?: ScheduleOptions;
   
   // Results
   result?: GraphResultValue;
@@ -115,4 +122,15 @@ export interface AddTaskNodeOptions extends AddNodeOptions {
   model?: string;
   agentId?: number; // Override default agent
   stream?: boolean; // Enable streaming for this task
+}
+
+export interface AddScheduledTaskNodeOptions extends AddTaskNodeOptions {
+  schedule: Schedule;
+  scheduleOptions?: ScheduleOptions;
+}
+
+export interface GraphSchedulingOptions {
+  respectSchedules?: boolean; // Whether to respect node schedules during execution
+  waitForScheduled?: boolean; // Whether to wait for scheduled nodes or skip them
+  schedulingCheckInterval?: number; // How often to check for scheduled nodes (ms)
 }

@@ -556,6 +556,8 @@ export class Task implements IAgentModule {
       .delete();
   }
 
+
+
   private formatTask(task: TaskDbRow): TaskType {
     return {
       id: task.id,
