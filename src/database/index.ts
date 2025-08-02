@@ -4,6 +4,8 @@ import { AgentConfig } from '../agent/types';
 import { createKnexConfig } from './knex';
 import { Logger } from '../logger/types';
 import { getLogger } from '../logger';
+import { getEncryptionService } from './encryption';
+import { getSensitiveFields } from './sensitive-fields';
 
 interface AgentDbRow {
   id: number;
@@ -29,12 +31,69 @@ export class Database {
   protected knex: Knex;
   protected config: DatabaseConfig;
   private logger: Logger;
+  private encryption = getEncryptionService();
 
   /**
    * Get the knex instance for direct database operations
    */
   getKnex(): Knex {
     return this.knex;
+  }
+
+  /**
+   * Encrypt sensitive fields before storing
+   */
+  private async encryptSensitiveFields(data: Record<string, unknown>, tableName: string): Promise<Record<string, unknown>> {
+    if (!this.encryption.isEnabled()) {
+      return data;
+    }
+
+    const encrypted = { ...data };
+    
+    // Get sensitive fields from centralized configuration
+    const fieldsToEncrypt = getSensitiveFields(tableName);
+    
+    for (const field of fieldsToEncrypt) {
+      if (encrypted[field] !== undefined && encrypted[field] !== null) {
+        if (field === 'metadata' && typeof encrypted[field] === 'object') {
+          // Handle JSON metadata fields
+          encrypted[field] = await this.encryption.encryptJSON(encrypted[field], `${tableName}.${field}`);
+        } else {
+          // Handle string fields
+          encrypted[field] = await this.encryption.encrypt(String(encrypted[field]), `${tableName}.${field}`);
+        }
+      }
+    }
+
+    return encrypted;
+  }
+
+  /**
+   * Decrypt sensitive fields after retrieving
+   */
+  private async decryptSensitiveFields(data: Record<string, unknown>, tableName: string): Promise<Record<string, unknown>> {
+    if (!this.encryption.isEnabled() || !data) {
+      return data;
+    }
+
+    const decrypted = { ...data };
+    
+    // Get sensitive fields from centralized configuration
+    const fieldsToDecrypt = getSensitiveFields(tableName);
+    
+    for (const field of fieldsToDecrypt) {
+      if (decrypted[field] !== undefined && decrypted[field] !== null) {
+        if (field === 'metadata') {
+          // Handle JSON metadata fields
+          decrypted[field] = await this.encryption.decryptJSON(String(decrypted[field]), `${tableName}.${field}`);
+        } else {
+          // Handle string fields
+          decrypted[field] = await this.encryption.decrypt(String(decrypted[field]), `${tableName}.${field}`);
+        }
+      }
+    }
+
+    return decrypted;
   }
 
   constructor(config: DatabaseConfig, logger?: Logger) {
@@ -234,6 +293,7 @@ export class Database {
         table.increments('id').primary();
         table.integer('agentId').notNullable().references('id').inTable('agents').onDelete('CASCADE');
         table.text('content').notNullable();
+        table.text('embedding').nullable(); // For vector similarity search
         table.json('metadata');
         table.timestamps(true, true);
         table.index(['agentId']);
@@ -242,6 +302,29 @@ export class Database {
       
       this.logger.info('Memories table created');
       this.logger.debug('Memories table created successfully');
+    } else {
+      // Check and add missing columns for memories
+      const hasEmbedding = await this.knex.schema.hasColumn('memories', 'embedding');
+      
+      this.logger.debug('Checking memories table columns', {
+        hasEmbedding
+      });
+      
+      if (!hasEmbedding) {
+        this.logger.info('Updating memories table schema');
+        
+        this.logger.debug('Adding embedding column to memories table');
+        
+        await this.knex.schema.alterTable('memories', (table) => {
+          // Add embedding column for vector similarity search
+          // Note: For SQLite, we'll store as TEXT (JSON array), 
+          // for PostgreSQL, this should be vector type
+          table.text('embedding').nullable();
+        });
+        
+        this.logger.info('Memories table updated with embedding column');
+        this.logger.debug('Memories table schema updated successfully');
+      }
     }
 
     
@@ -274,26 +357,34 @@ export class Database {
       hasSystemPrompt: !!data.systemPrompt
     });
     
+    // Prepare data for insertion with encryption
+    const insertData = {
+      name: data.name,
+      description: data.description,
+      model: data.model,
+      embeddingModel: data.embeddingModel,
+      visionModel: data.visionModel,
+      temperature: data.temperature,
+      maxTokens: data.maxTokens,
+      systemPrompt: data.systemPrompt,
+      memory: data.memory || false,
+      knowledge: data.knowledge || false,
+      vision: data.vision || false,
+      useTools: data.useTools !== undefined ? data.useTools : true,
+      contextCompression: data.contextCompression || false,
+      debug: data.debug || false
+    };
+
+    // Encrypt sensitive fields
+    const encryptedData = await this.encryptSensitiveFields(insertData, 'agents');
+    
     const [agent] = await this.knex('agents')
-      .insert({
-        name: data.name,
-        description: data.description,
-        model: data.model,
-        embeddingModel: data.embeddingModel,
-        visionModel: data.visionModel,
-        temperature: data.temperature,
-        maxTokens: data.maxTokens,
-        systemPrompt: data.systemPrompt,
-        memory: data.memory || false,
-        knowledge: data.knowledge || false,
-        vision: data.vision || false,
-        useTools: data.useTools !== undefined ? data.useTools : true,
-        contextCompression: data.contextCompression || false,
-        debug: data.debug || false
-      })
+      .insert(encryptedData)
       .returning('*');
     
-    const formattedAgent = this.formatAgent(agent);
+    // Decrypt for response
+    const decryptedAgent = await this.decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+    const formattedAgent = this.formatAgent(decryptedAgent as unknown as AgentDbRow);
     
     // User-facing success message
     this.logger.info(`Agent created with ID: ${formattedAgent.id}`);
@@ -319,7 +410,11 @@ export class Database {
       name: agent?.name 
     });
     
-    return agent ? this.formatAgent(agent) : null;
+    if (!agent) return null;
+    
+    // Decrypt sensitive fields
+    const decryptedAgent = await this.decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+    return this.formatAgent(decryptedAgent as unknown as AgentDbRow);
   }
 
   async getAgentByName(name: string): Promise<AgentConfig | null> {
@@ -335,7 +430,11 @@ export class Database {
       id: agent?.id 
     });
     
-    return agent ? this.formatAgent(agent) : null;
+    if (!agent) return null;
+    
+    // Decrypt sensitive fields
+    const decryptedAgent = await this.decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+    return this.formatAgent(decryptedAgent as unknown as AgentDbRow);
   }
 
   async listAgents(): Promise<AgentConfig[]> {
@@ -349,7 +448,15 @@ export class Database {
       names: agents.map(a => a.name).slice(0, 10) // First 10 names
     });
     
-    return agents.map(agent => this.formatAgent(agent));
+    // Decrypt sensitive fields for each agent
+    const decryptedAgents = await Promise.all(
+      agents.map(async (agent) => {
+        const decrypted = await this.decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+        return this.formatAgent(decrypted as unknown as AgentDbRow);
+      })
+    );
+    
+    return decryptedAgents;
   }
 
   async updateAgent(id: number, data: Partial<AgentConfig>): Promise<AgentConfig | null> {
@@ -421,13 +528,18 @@ export class Database {
       return this.getAgent(id);
     }
     
+    // Encrypt sensitive fields in update data
+    const encryptedUpdateData = await this.encryptSensitiveFields(updateData, 'agents');
+    
     const [agent] = await this.knex('agents')
       .where({ id })
-      .update(updateData)
+      .update(encryptedUpdateData)
       .returning('*');
     
     if (agent) {
-      const formattedAgent = this.formatAgent(agent);
+      // Decrypt for response
+      const decryptedAgent = await this.decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+      const formattedAgent = this.formatAgent(decryptedAgent as unknown as AgentDbRow);
       
       // User-facing success message
       this.logger.info(`Agent ${id} updated successfully`);
@@ -508,6 +620,7 @@ export async function initializeDatabase(config: DatabaseConfig, logger?: Logger
 }
 
 async function ensureDatabaseInitialized(): Promise<Database> {
+  // Race condition fix: check database again after potential initialization
   if (database) {
     return database;
   }
@@ -517,20 +630,30 @@ async function ensureDatabaseInitialized(): Promise<Database> {
     return isInitializing;
   }
 
+  // Double-check pattern to prevent race conditions
+  if (database) {
+    return database;
+  }
+
   // Try to initialize from environment variable
   const dbUrl = process.env.DB_URL;
   if (!dbUrl) {
     throw new Error('DB_URL environment variable is not set. Please set it before using the database.');
   }
 
-  // Start initialization
+  // Start initialization with error handling
   isInitializing = initializeDatabase({ connectionString: dbUrl });
   
   try {
     database = await isInitializing;
-    return database;
-  } finally {
+    // Clear initialization promise after successful completion
     isInitializing = null;
+    return database;
+  } catch (error) {
+    // Reset state on failure to allow retry
+    isInitializing = null;
+    database = null;
+    throw error;
   }
 }
 
@@ -539,4 +662,5 @@ export async function getDatabase(): Promise<Database> {
 }
 
 export * from './types';
+export * from './sensitive-fields';
 export default getDatabase;

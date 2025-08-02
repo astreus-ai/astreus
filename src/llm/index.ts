@@ -182,6 +182,18 @@ export class LLM {
     return providers;
   }
 
+  async generateEmbedding(text: string, model?: string): Promise<{ embedding: number[] }> {
+    const modelToUse = model || 'text-embedding-ada-002';
+    const provider = this.getProviderForModel(modelToUse);
+    
+    if (!provider.generateEmbedding) {
+      throw new Error(`Provider for model ${modelToUse} does not support embedding generation`);
+    }
+    
+    const result = await provider.generateEmbedding(text, modelToUse);
+    return { embedding: result.embedding };
+  }
+
   private getProviderForModel(model: string): LLMProvider {
     this.logger.debug('Looking up provider for model', { model });
     
@@ -210,14 +222,54 @@ export class LLM {
   }
 }
 
-// Singleton instances per logger
+// Singleton instances per logger with cleanup mechanism
 const llmInstances: Map<Logger | undefined, LLM> = new Map();
+const CLEANUP_INTERVAL = 10 * 60 * 1000; // 10 minutes
+const MAX_INSTANCES = 50; // Prevent unlimited growth
+
+// Cleanup old instances periodically
+let cleanupTimer: NodeJS.Timeout | null = null;
+
+function startCleanupTimer() {
+  if (!cleanupTimer) {
+    cleanupTimer = setInterval(() => {
+      // Keep only recent instances, remove old ones
+      if (llmInstances.size > MAX_INSTANCES) {
+        const entries = Array.from(llmInstances.entries());
+        // Keep the last MAX_INSTANCES/2 entries
+        const toKeep = entries.slice(-Math.floor(MAX_INSTANCES / 2));
+        llmInstances.clear();
+        toKeep.forEach(([key, value]) => llmInstances.set(key, value));
+      }
+    }, CLEANUP_INTERVAL);
+    
+    // Ensure cleanup on process exit
+    process.on('beforeExit', () => {
+      if (cleanupTimer) {
+        clearInterval(cleanupTimer);
+        cleanupTimer = null;
+      }
+      llmInstances.clear();
+    });
+  }
+}
 
 export function getLLM(logger?: Logger): LLM {
+  startCleanupTimer();
+  
   if (!llmInstances.has(logger)) {
     llmInstances.set(logger, new LLM(logger));
   }
   return llmInstances.get(logger)!;
+}
+
+// Manual cleanup function for testing or explicit cleanup
+export function clearLLMInstances(): void {
+  llmInstances.clear();
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = null;
+  }
 }
 
 export async function getLLMProvider(providerName: string, config?: { apiKey?: string; baseUrl?: string | null; logger?: Logger }): Promise<LLMProvider> {

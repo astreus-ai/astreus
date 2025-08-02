@@ -82,16 +82,41 @@ export class MCP implements IAgentModule {
       throw new Error(`Invalid command for MCP server '${name}': command must be a non-empty string`);
     }
 
-    // Sanitize command - only allow alphanumeric, hyphens, underscores, and forward slashes
-    const sanitizedCommand = config.command.replace(/[^a-zA-Z0-9\-_/]/g, '');
-    if (sanitizedCommand !== config.command) {
+    // Strict command validation - only allow absolute paths or simple command names
+    const command = config.command.trim();
+    const isAbsolutePath = command.startsWith('/');
+    const isSimpleCommand = /^[a-zA-Z0-9_-]+$/.test(command);
+    
+    if (!isAbsolutePath && !isSimpleCommand) {
       this.logger.error(`Unsafe command for MCP server: ${name}`);
-      this.logger.debug('MCP server command sanitization failed', {
+      this.logger.debug('MCP server command validation failed - not absolute path or simple command', {
         name,
-        originalCommand: config.command,
-        sanitizedCommand
+        command,
+        isAbsolutePath,
+        isSimpleCommand
       });
-      throw new Error(`Invalid command for MCP server '${name}': contains unsafe characters`);
+      throw new Error(`Invalid command for MCP server '${name}': command must be an absolute path or simple command name`);
+    }
+
+    // For absolute paths, ensure they exist and are executable
+    if (isAbsolutePath) {
+      try {
+        const fs = await import('fs');
+        const stats = fs.statSync(command);
+        if (!stats.isFile()) {
+          throw new Error(`Command is not a file: ${command}`);
+        }
+        // Check if file is executable (basic check)
+        fs.accessSync(command, fs.constants.F_OK | fs.constants.X_OK);
+      } catch (error) {
+        this.logger.error(`Command file validation failed for MCP server: ${name}`);
+        this.logger.debug('MCP server command file validation failed', {
+          name,
+          command,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        throw new Error(`Invalid command file for MCP server '${name}': ${error instanceof Error ? error.message : 'file access error'}`);
+      }
     }
 
     // Validate args array
@@ -106,22 +131,108 @@ export class MCP implements IAgentModule {
       throw new Error(`Invalid args for MCP server '${name}': args must be an array`);
     }
 
-    // Validate each argument
-    for (const arg of args) {
+    // Validate each argument to prevent injection
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
       if (typeof arg !== 'string') {
         this.logger.error(`Invalid argument for MCP server: ${name}`);
         this.logger.debug('MCP server argument validation failed', {
           name,
           invalidArg: arg,
-          argType: typeof arg
+          argType: typeof arg,
+          argIndex: i
         });
         throw new Error(`Invalid argument for MCP server '${name}': all arguments must be strings`);
+      }
+      
+      // Check for dangerous patterns in arguments
+      const dangerousPatterns = [
+        /[;&|`$(){}[\]]/,  // Shell metacharacters
+        /\.\./,            // Directory traversal
+        /\/etc\/|\/proc\/|\/sys\//,  // System directories
+        /^-/               // Options that start with dash (could be dangerous)
+      ];
+      
+      for (const pattern of dangerousPatterns) {
+        if (pattern.test(arg)) {
+          this.logger.error(`Dangerous argument detected for MCP server: ${name}`);
+          this.logger.debug('MCP server dangerous argument detected', {
+            name,
+            arg: arg.slice(0, 50), // Truncate for logging
+            argIndex: i,
+            pattern: pattern.toString()
+          });
+          throw new Error(`Dangerous argument for MCP server '${name}': argument contains unsafe characters or patterns`);
+        }
+      }
+      
+      // Limit argument length to prevent buffer overflow attacks
+      if (arg.length > 1000) {
+        this.logger.error(`Argument too long for MCP server: ${name}`);
+        this.logger.debug('MCP server argument too long', {
+          name,
+          argIndex: i,
+          argLength: arg.length,
+          maxLength: 1000
+        });
+        throw new Error(`Argument too long for MCP server '${name}': maximum length is 1000 characters`);
+      }
+    }
+
+    // Validate environment variables to prevent injection
+    if (config.env) {
+      for (const [key, value] of Object.entries(config.env)) {
+        // Validate environment variable key
+        if (!/^[A-Z_][A-Z0-9_]*$/i.test(key)) {
+          this.logger.error(`Invalid environment variable key for MCP server: ${name}`);
+          this.logger.debug('MCP server environment variable key validation failed', {
+            name,
+            envKey: key
+          });
+          throw new Error(`Invalid environment variable key for MCP server '${name}': '${key}' contains invalid characters`);
+        }
+        
+        // Validate environment variable value
+        if (typeof value !== 'string' && value !== undefined) {
+          this.logger.error(`Invalid environment variable value for MCP server: ${name}`);
+          this.logger.debug('MCP server environment variable value validation failed', {
+            name,
+            envKey: key,
+            valueType: typeof value
+          });
+          throw new Error(`Invalid environment variable value for MCP server '${name}': '${key}' must be a string`);
+        }
+        
+        // Check for dangerous patterns in environment values
+        if (value && typeof value === 'string') {
+          if (value.includes('\x00') || value.length > 10000) {
+            this.logger.error(`Dangerous environment variable value for MCP server: ${name}`);
+            this.logger.debug('MCP server dangerous environment variable detected', {
+              name,
+              envKey: key,
+              valueLength: value.length
+            });
+            throw new Error(`Dangerous environment variable value for MCP server '${name}': '${key}' contains unsafe content`);
+          }
+        }
       }
     }
 
     // Use process.env by default, only override if explicitly provided
     const envVars = config.env ? { ...process.env, ...config.env } : process.env;
     
+    // Check process limits to prevent resource exhaustion
+    if (this.processes.size >= 10) {
+      this.logger.error(`Too many MCP servers running for agent: ${this.agent.name}`);
+      this.logger.debug('MCP server limit reached', {
+        name,
+        currentProcesses: this.processes.size,
+        maxProcesses: 10,
+        agentId: this.agent.id
+      });
+      throw new Error(`Cannot start MCP server '${name}': maximum number of MCP servers (10) reached`);
+    }
+
     this.logger.debug('Spawning MCP server process', {
       name,
       command: config.command,
@@ -133,7 +244,9 @@ export class MCP implements IAgentModule {
     const childProcess = spawn(config.command, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: envVars,
-      cwd: config.cwd
+      cwd: config.cwd,
+      detached: false, // Prevent process from becoming session leader
+      timeout: 5000   // Timeout for process startup
     });
 
     let buffer = '';

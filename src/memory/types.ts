@@ -17,6 +17,9 @@ export interface MemorySearchOptions {
   order?: 'asc' | 'desc';
   startDate?: Date;
   endDate?: Date;
+  // Vector similarity search options
+  similarityThreshold?: number;
+  useEmbedding?: boolean;
 }
 
 // Export Memory as MemoryType for backward compatibility

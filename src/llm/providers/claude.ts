@@ -102,7 +102,7 @@ export class ClaudeProvider implements LLMProvider {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async generateEmbedding(text: string, model?: string): Promise<EmbeddingResult> {
+  async generateEmbedding(_text: string, _model?: string): Promise<EmbeddingResult> {
     // Claude doesn't currently support embeddings, but this method is ready for future implementation
     throw new Error('Claude provider does not currently support embedding generation. Please use OpenAI, Gemini, or Ollama providers for embeddings.');
   }

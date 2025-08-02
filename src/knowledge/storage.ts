@@ -1,6 +1,8 @@
 import { Pool } from 'pg';
 import { MetadataObject } from '../types';
 import { getLogger } from '../logger';
+import { getEncryptionService } from '../database/encryption';
+import { getSensitiveFields } from '../database/sensitive-fields';
 
 interface KnowledgeSearchResult {
   id: number;
@@ -55,6 +57,7 @@ export class KnowledgeDatabase {
   private embeddingDimensions: number | null = null;
   private tableDimensions: number | null = null;
   private logger = getLogger();
+  private encryption = getEncryptionService();
 
   constructor(config?: KnowledgeDatabaseConfig) {
     const connectionString = config?.url || process.env.KNOWLEDGE_DB_URL;
@@ -72,6 +75,62 @@ export class KnowledgeDatabase {
     if (!this.embeddingProvider) {
       throw new Error('Embedding provider is required for knowledge database');
     }
+  }
+
+  /**
+   * Encrypt sensitive knowledge fields before storing
+   */
+  private async encryptKnowledgeData(data: Record<string, unknown>, tableName: string): Promise<Record<string, unknown>> {
+    if (!this.encryption.isEnabled()) {
+      return data;
+    }
+
+    const encrypted = { ...data };
+    
+    // Get sensitive fields from centralized configuration
+    const fieldsToEncrypt = getSensitiveFields(tableName);
+    
+    for (const field of fieldsToEncrypt) {
+      if (encrypted[field] !== undefined && encrypted[field] !== null) {
+        if (field === 'metadata' && typeof encrypted[field] === 'object') {
+          // Handle JSON metadata fields
+          encrypted[field] = await this.encryption.encryptJSON(encrypted[field], `${tableName}.${field}`);
+        } else {
+          // Handle string fields
+          encrypted[field] = await this.encryption.encrypt(String(encrypted[field]), `${tableName}.${field}`);
+        }
+      }
+    }
+
+    return encrypted;
+  }
+
+  /**
+   * Decrypt sensitive knowledge fields after retrieving
+   */
+  private async decryptKnowledgeData(data: Record<string, unknown>, tableName: string): Promise<Record<string, unknown>> {
+    if (!this.encryption.isEnabled() || !data) {
+      return data;
+    }
+
+    const decrypted = { ...data };
+    
+    // Get sensitive fields from centralized configuration
+    const fieldsToDecrypt = getSensitiveFields(tableName);
+    
+    for (const field of fieldsToDecrypt) {
+      if (decrypted[field] !== undefined && decrypted[field] !== null) {
+        if (field === 'metadata') {
+          // Handle JSON metadata fields
+          decrypted[field] = await this.encryption.decryptJSON(String(decrypted[field]), `${tableName}.${field}`);
+        } else {
+          // Handle string fields
+          decrypted[field] = await this.encryption.decrypt(String(decrypted[field]), `${tableName}.${field}`);
+        }
+      }
+    }
+
+    return decrypted;
   }
 
   async initialize(): Promise<void> {
@@ -235,11 +294,35 @@ export class KnowledgeDatabase {
       const { countTokens } = await import('../database/utils');
       const tokenCount = countTokens(content);
       
+      // Prepare data for encryption
+      const documentData = {
+        agent_id: agentId,
+        title,
+        content,
+        file_path: filePath,
+        file_type: fileType,
+        file_size: fileSize,
+        metadata: metadata || {},
+        token_count: tokenCount
+      };
+
+      // Encrypt sensitive fields
+      const encryptedData = await this.encryptKnowledgeData(documentData, 'knowledge_documents');
+      
       const result = await client.query(
         `INSERT INTO knowledge_documents (agent_id, title, content, file_path, file_type, file_size, metadata, token_count) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
          RETURNING id`,
-        [agentId, title, content, filePath, fileType, fileSize, metadata || {}, tokenCount]
+        [
+          encryptedData.agent_id,
+          encryptedData.title,
+          encryptedData.content,
+          encryptedData.file_path,
+          encryptedData.file_type,
+          encryptedData.file_size,
+          encryptedData.metadata,
+          encryptedData.token_count
+        ]
       );
       return result.rows[0].id;
     } finally {
@@ -269,11 +352,33 @@ export class KnowledgeDatabase {
       const { countTokens } = await import('../database/utils');
       const tokenCount = countTokens(content);
 
+      // Prepare data for encryption
+      const chunkData = {
+        document_id: documentId,
+        agent_id: agentId,
+        content,
+        token_count: tokenCount,
+        chunk_index: chunkIndex,
+        embedding: `[${embedding.join(',')}]`, // Keep embedding as is - it's not sensitive
+        metadata: metadata || {}
+      };
+
+      // Encrypt sensitive fields (not embedding)
+      const encryptedData = await this.encryptKnowledgeData(chunkData, 'knowledge_chunks');
+
       const result = await client.query(
         `INSERT INTO knowledge_chunks (document_id, agent_id, content, token_count, chunk_index, embedding, metadata) 
          VALUES ($1, $2, $3, $4, $5, $6, $7) 
          RETURNING id`,
-        [documentId, agentId, content, tokenCount, chunkIndex, `[${embedding.join(',')}]`, metadata || {}]
+        [
+          encryptedData.document_id,
+          encryptedData.agent_id,
+          encryptedData.content,
+          encryptedData.token_count,
+          encryptedData.chunk_index,
+          encryptedData.embedding,
+          encryptedData.metadata
+        ]
       );
       
       // Update document chunk count
@@ -315,6 +420,45 @@ export class KnowledgeDatabase {
          LIMIT $4`,
         [`[${embedding.join(',')}]`, agentId, threshold, limit]
       );
+      
+      // Decrypt sensitive fields in search results
+      if (this.encryption.isEnabled()) {
+        const decryptedResults = await Promise.all(
+          result.rows.map(async (row) => {
+            try {
+              // Decrypt chunk content and metadata
+              const decryptedChunk = await this.decryptKnowledgeData(
+                { content: row.content, metadata: row.chunk_metadata },
+                'knowledge_chunks'
+              );
+              
+              // Decrypt document title, file_path and metadata
+              const decryptedDoc = await this.decryptKnowledgeData(
+                { title: row.document_title, file_path: row.file_path, metadata: row.document_metadata },
+                'knowledge_documents'
+              );
+              
+              return {
+                ...row,
+                content: decryptedChunk.content,
+                chunk_metadata: decryptedChunk.metadata,
+                document_title: decryptedDoc.title,
+                file_path: decryptedDoc.file_path,
+                document_metadata: decryptedDoc.metadata
+              };
+            } catch {
+              // If decryption fails, return original row (might be unencrypted legacy data)
+              this.logger.debug('Failed to decrypt knowledge search result', { 
+                chunkId: row.id,
+                documentId: row.document_id 
+              });
+              return row;
+            }
+          })
+        );
+        return decryptedResults;
+      }
+      
       return result.rows;
     } finally {
       client.release();
@@ -330,6 +474,23 @@ export class KnowledgeDatabase {
          ORDER BY created_at DESC`,
         [agentId]
       );
+      
+      // Decrypt sensitive fields in documents
+      if (this.encryption.isEnabled()) {
+        const decryptedDocuments = await Promise.all(
+          result.rows.map(async (document) => {
+            try {
+              return await this.decryptKnowledgeData(document, 'knowledge_documents');
+            } catch {
+              // If decryption fails, return original document (might be unencrypted legacy data)
+              this.logger.debug('Failed to decrypt document', { documentId: document.id });
+              return document;
+            }
+          })
+        );
+        return decryptedDocuments;
+      }
+      
       return result.rows;
     } finally {
       client.release();
@@ -345,6 +506,23 @@ export class KnowledgeDatabase {
          ORDER BY chunk_index`,
         [documentId]
       );
+      
+      // Decrypt sensitive fields in chunks
+      if (this.encryption.isEnabled()) {
+        const decryptedChunks = await Promise.all(
+          result.rows.map(async (chunk) => {
+            try {
+              return await this.decryptKnowledgeData(chunk, 'knowledge_chunks');
+            } catch {
+              // If decryption fails, return original chunk (might be unencrypted legacy data)
+              this.logger.debug('Failed to decrypt chunk', { chunkId: chunk.id });
+              return chunk;
+            }
+          })
+        );
+        return decryptedChunks;
+      }
+      
       return result.rows;
     } finally {
       client.release();

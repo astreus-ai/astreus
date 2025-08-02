@@ -160,7 +160,7 @@ export class Graph implements IAgentModule {
   }
 
   // Execution
-  async run(options?: { stream?: boolean } & GraphSchedulingOptions): Promise<GraphExecutionResult> {
+  async run(options?: { stream?: boolean; timeout?: number; nodeTimeout?: number } & GraphSchedulingOptions): Promise<GraphExecutionResult> {
     await this.initialize();
     this.log('info', 'Starting graph execution with scheduling support');
     this.graph.status = 'running';
@@ -171,13 +171,24 @@ export class Graph implements IAgentModule {
     let completedNodes = 0;
     let failedNodes = 0;
     
-    // Default scheduling options
+    // Default scheduling options with timeout support
     const schedulingOptions = {
       respectSchedules: true,
       waitForScheduled: true,
       schedulingCheckInterval: 1000,
+      timeout: options?.timeout || 300000, // 5 minutes default
+      nodeTimeout: options?.nodeTimeout || 60000, // 1 minute per node default
       ...options
     };
+    
+    // Set up overall graph timeout
+    const overallTimeoutId = setTimeout(() => {
+      this.graph.status = 'failed';
+      this.log('error', `Graph execution timed out after ${schedulingOptions.timeout}ms`);
+      throw new Error(`Graph execution timed out after ${schedulingOptions.timeout}ms`);
+    }, schedulingOptions.timeout);
+    
+    const nodeTimeouts = new Map<string, NodeJS.Timeout>();
     
     try {
       // Calculate initial node schedules
@@ -206,10 +217,28 @@ export class Graph implements IAgentModule {
             this.log('debug', `Node ${node.name} ready to execute - all dependencies completed`, node.id);
             executing.add(node.id);
             
+            // Set up node timeout
+            const nodeTimeoutId = setTimeout(() => {
+              if (executing.has(node.id)) {
+                errors[node.id] = `Node execution timed out after ${schedulingOptions.nodeTimeout}ms`;
+                node.status = 'failed';
+                node.error = `Node execution timed out after ${schedulingOptions.nodeTimeout}ms`;
+                failedNodes++;
+                executing.delete(node.id);
+                this.log('error', `Node ${node.name} timed out after ${schedulingOptions.nodeTimeout}ms`, node.id);
+              }
+            }, schedulingOptions.nodeTimeout);
+            nodeTimeouts.set(node.id, nodeTimeoutId);
+
             // Special handling for last node with streaming
             if (shouldStreamLastNode && node.id === lastNode.id) {
               this.executeNode(node, true) // Pass stream=true for last node
                 .then(result => {
+                  const timeoutId = nodeTimeouts.get(node.id);
+                  if (timeoutId) {
+                    clearTimeout(timeoutId);
+                    nodeTimeouts.delete(node.id);
+                  }
                   results[node.id] = result;
                   node.status = 'completed';
                   node.result = JSON.stringify(result);
@@ -218,6 +247,11 @@ export class Graph implements IAgentModule {
                   this.log('info', `Node ${node.name} completed (streamed)`, node.id);
                 })
                 .catch(error => {
+                  const timeoutId = nodeTimeouts.get(node.id);
+                  if (timeoutId) {
+                    clearTimeout(timeoutId);
+                    nodeTimeouts.delete(node.id);
+                  }
                   errors[node.id] = error.message;
                   node.status = 'failed';
                   node.error = error.message;
@@ -228,6 +262,11 @@ export class Graph implements IAgentModule {
             } else {
               this.executeNode(node)
                 .then(result => {
+                  const timeoutId = nodeTimeouts.get(node.id);
+                  if (timeoutId) {
+                    clearTimeout(timeoutId);
+                    nodeTimeouts.delete(node.id);
+                  }
                   results[node.id] = result;
                   node.status = 'completed';
                   node.result = JSON.stringify(result);
@@ -239,6 +278,11 @@ export class Graph implements IAgentModule {
                   this.updateDependentNodeSchedules(node.id);
                  })
                  .catch(error => {
+                   const timeoutId = nodeTimeouts.get(node.id);
+                   if (timeoutId) {
+                     clearTimeout(timeoutId);
+                     nodeTimeouts.delete(node.id);
+                   }
                    errors[node.id] = error.message;
                    node.status = 'failed';
                    node.error = error.message;
@@ -291,6 +335,14 @@ export class Graph implements IAgentModule {
     } catch (error) {
       this.graph.status = 'failed';
       this.log('error', `Graph execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      // Clean up all timeouts
+      clearTimeout(overallTimeoutId);
+      for (const [nodeId, timeoutId] of nodeTimeouts.entries()) {
+        clearTimeout(timeoutId);
+        this.log('debug', `Cleaned up timeout for node ${nodeId}`);
+      }
+      nodeTimeouts.clear();
     }
     
     this.graph.completedAt = new Date();

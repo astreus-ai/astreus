@@ -1,8 +1,7 @@
 import { IAgentModule, IAgent } from '../agent/types';
 import { Task } from '../task';
 import { Graph } from '../graph';
-import { Task as TaskType } from '../task/types';
-import { Graph as GraphType } from '../graph/types';
+// TaskType and GraphType imports removed as unused
 import { Logger } from '../logger/types';
 import { getSchedulerStorage, SchedulerStorage } from './storage';
 import {
@@ -13,7 +12,6 @@ import {
   ScheduledGraphRequest,
   ScheduledNodeRequest,
   ScheduleCalculationResult,
-  RecurrenceConfig,
   ScheduleOptions
 } from './types';
 
@@ -246,7 +244,7 @@ export class Scheduler implements IAgentModule {
           await this.executeScheduledGraphNode(item);
           break;
         default:
-          throw new Error(`Unknown scheduled item type: ${(item as any).type}`);
+          throw new Error(`Unknown scheduled item type: ${(item as ScheduledItem & { type: string }).type}`);
       }
 
       // Mark as completed and update execution count
@@ -302,7 +300,7 @@ export class Scheduler implements IAgentModule {
   // Execute a scheduled graph node
   private async executeScheduledGraphNode(item: ScheduledItem): Promise<void> {
     const [graphId, nodeId] = (item.targetId as string).split(':');
-    const options = item.metadata as any; // Use any for now to avoid metadata type issues
+    const options = item.metadata as Record<string, unknown>; // Use flexible type for metadata
 
     // Load the graph
     const graph = await Graph.findById(parseInt(graphId));
@@ -312,7 +310,7 @@ export class Scheduler implements IAgentModule {
 
     // Find the specific node
     const nodes = graph.getNodes();
-    const node = nodes.find((n: any) => n.id === nodeId);
+    const node = nodes.find((n: { id: string }) => n.id === nodeId);
     if (!node) {
       throw new Error(`Node not found: ${nodeId} in graph ${graphId}`);
     }
@@ -320,7 +318,7 @@ export class Scheduler implements IAgentModule {
     // Check dependencies if required
     if (options?.respectDependencies) {
       const dependenciesCompleted = node.dependencies.every((depId: string) => {
-        const depNode = nodes.find((n: any) => n.id === depId);
+        const depNode = nodes.find((n: { id: string }) => n.id === depId);
         return depNode?.status === 'completed';
       });
 
