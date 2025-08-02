@@ -13,8 +13,12 @@ import {
   GraphExecutionLogEntry,
   AddAgentNodeOptions,
   AddTaskNodeOptions,
-  GraphExecutionStatus 
+  AddScheduledTaskNodeOptions,
+  GraphExecutionStatus,
+  GraphSchedulingOptions
 } from './types';
+import { Scheduler } from '../scheduler';
+import { Schedule, ScheduleOptions, ScheduledItem } from '../scheduler/types';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
 
@@ -156,9 +160,9 @@ export class Graph implements IAgentModule {
   }
 
   // Execution
-  async run(options?: { stream?: boolean }): Promise<GraphExecutionResult> {
+  async run(options?: { stream?: boolean } & GraphSchedulingOptions): Promise<GraphExecutionResult> {
     await this.initialize();
-    this.log('info', 'Starting graph execution');
+    this.log('info', 'Starting graph execution with scheduling support');
     this.graph.status = 'running';
     this.graph.startedAt = new Date();
     
@@ -167,9 +171,20 @@ export class Graph implements IAgentModule {
     let completedNodes = 0;
     let failedNodes = 0;
     
+    // Default scheduling options
+    const schedulingOptions = {
+      respectSchedules: true,
+      waitForScheduled: true,
+      schedulingCheckInterval: 1000,
+      ...options
+    };
+    
     try {
+      // Calculate initial node schedules
+      await this.calculateNodeSchedules();
+      
       const sortedNodes = this.topologicalSort();
-      this.log('debug', `Execution plan: ${sortedNodes.length} nodes, max concurrency: ${this.graph.config.maxConcurrency || 1}`);
+      this.log('debug', `Execution plan: ${sortedNodes.length} nodes, max concurrency: ${this.graph.config.maxConcurrency || 1}, scheduling enabled: ${schedulingOptions.respectSchedules}`);
       
       const maxConcurrency = this.graph.config.maxConcurrency || 1;
       const executing = new Set<string>();
@@ -180,12 +195,14 @@ export class Graph implements IAgentModule {
       const shouldStreamLastNode = options?.stream && lastNode?.type === 'task';
       
       while (currentIndex < sortedNodes.length || executing.size > 0) {
+        const now = new Date();
+        
         // Start new nodes if we have capacity
         while (executing.size < maxConcurrency && currentIndex < sortedNodes.length) {
           const node = sortedNodes[currentIndex];
           
-          // Check if all dependencies are completed
-          if (this.areDependenciesCompleted(node)) {
+          // Check if node is ready to execute (dependencies + schedule)
+          if (this.isNodeReadyToExecute(node, now, schedulingOptions)) {
             this.log('debug', `Node ${node.name} ready to execute - all dependencies completed`, node.id);
             executing.add(node.id);
             
@@ -217,26 +234,38 @@ export class Graph implements IAgentModule {
                   completedNodes++;
                   executing.delete(node.id);
                   this.log('info', `Node ${node.name} completed`, node.id);
-                })
-                .catch(error => {
-                  errors[node.id] = error.message;
-                  node.status = 'failed';
-                  node.error = error.message;
-                  failedNodes++;
-                  executing.delete(node.id);
-                  this.log('error', `Node ${node.name} failed: ${error.message}`, node.id);
-                });
-            }
-            currentIndex++;
-          } else {
-            break;
-          }
-        }
-        
-        // Wait a bit before checking again
-        if (executing.size > 0) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
+                   
+                  // Update dependent nodes' schedules
+                  this.updateDependentNodeSchedules(node.id);
+                 })
+                 .catch(error => {
+                   errors[node.id] = error.message;
+                   node.status = 'failed';
+                   node.error = error.message;
+                   failedNodes++;
+                   executing.delete(node.id);
+                   this.log('error', `Node ${node.name} failed: ${error.message}`, node.id);
+                 });
+             }
+             currentIndex++;
+           } else {
+             // Check if node is waiting for schedule
+             if (schedulingOptions.respectSchedules && node.isScheduled && node.scheduledFor && node.scheduledFor > now) {
+               node.status = 'scheduled';
+               this.log('info', `Node ${node.name} scheduled for ${node.scheduledFor.toISOString()}`, node.id);
+             }
+             break;
+           }
+         }
+         
+         // Wait a bit before checking again (longer for scheduled nodes)
+         const waitTime = schedulingOptions.waitForScheduled && this.hasScheduledNodes() 
+           ? schedulingOptions.schedulingCheckInterval! 
+           : 100;
+         
+         if (executing.size > 0 || (schedulingOptions.waitForScheduled && this.hasScheduledNodes())) {
+           await new Promise(resolve => setTimeout(resolve, waitTime));
+         }
         
         // Skip nodes that have failed dependencies (not running/pending ones)
         while (currentIndex < sortedNodes.length && this.hasFailedDependencies(sortedNodes[currentIndex])) {
@@ -570,6 +599,166 @@ export class Graph implements IAgentModule {
     }
     const storage = getGraphStorage();
     return await storage.deleteGraph(parseInt(this.graph.id));
+  }
+
+  // Scheduling methods
+
+  // Add a scheduled task node to the graph
+  addScheduledTaskNode(name: string, options: AddScheduledTaskNodeOptions): string {
+    const nodeId = this.addTaskNode({
+      ...options,
+      metadata: { ...options.metadata, name }
+    });
+    const node = this.graph.nodes.find(n => n.id === nodeId);
+    
+    if (node) {
+      node.schedule = options.schedule;
+      node.isScheduled = true;
+      node.scheduleOptions = options.scheduleOptions;
+      node.status = 'scheduled';
+      
+      this.log('info', `Added scheduled task node: ${name} (scheduled for ${options.schedule.executeAt.toISOString()})`, nodeId);
+    }
+    
+    return nodeId;
+  }
+
+  // Calculate when each node should execute based on schedule + dependencies
+  private async calculateNodeSchedules(): Promise<void> {
+    const now = new Date();
+    
+    for (const node of this.graph.nodes) {
+      if (node.isScheduled && node.schedule) {
+        // Set earliest possible time from schedule
+        const earliestPossibleAt = new Date(Math.max(node.schedule.executeAt.getTime(), now.getTime()));
+        
+        // Calculate actual scheduled time considering dependencies
+        node.scheduledFor = this.calculateNodeExecutionTime(node, earliestPossibleAt);
+        
+        this.log('debug', `Node ${node.name} scheduled for ${node.scheduledFor.toISOString()}`, node.id);
+      } else {
+        // Non-scheduled nodes can execute immediately (subject to dependencies)
+        node.scheduledFor = now;
+      }
+    }
+  }
+
+  // Calculate when a node can actually execute (considering dependencies + schedule)
+  private calculateNodeExecutionTime(node: GraphNode, earliestPossibleAt: Date): Date {
+    const now = new Date();
+    let latestDependencyTime = now;
+    
+    // Find the latest completion time among dependencies
+    for (const depId of node.dependencies) {
+      const depNode = this.graph.nodes.find(n => n.id === depId);
+      if (depNode) {
+        // If dependency has a schedule, use that. Otherwise assume it runs immediately
+        const depExecutionTime = depNode.scheduledFor || depNode.schedule?.executeAt || now;
+        
+        // Estimate dependency completion time (could be made more sophisticated)
+        const estimatedCompletionTime = new Date(depExecutionTime.getTime() + (5 * 60 * 1000)); // +5 minutes estimate
+        
+        if (estimatedCompletionTime > latestDependencyTime) {
+          latestDependencyTime = estimatedCompletionTime;
+        }
+      }
+    }
+    
+    // Node can execute at the later of: its schedule time OR latest dependency completion
+    return new Date(Math.max(earliestPossibleAt.getTime(), latestDependencyTime.getTime()));
+  }
+
+  // Check if node is ready to execute right now
+  private isNodeReadyToExecute(node: GraphNode, now: Date, options: GraphSchedulingOptions): boolean {
+    // Check dependencies first (always respected)
+    if (!this.areDependenciesCompleted(node)) {
+      return false;
+    }
+    
+    // Check schedule if enabled
+    if (options.respectSchedules && node.isScheduled && node.scheduledFor && node.scheduledFor > now) {
+      return false;
+    }
+    
+    return node.status === 'pending' || node.status === 'scheduled';
+  }
+
+  // Update dependent nodes' schedules when a node completes
+  private updateDependentNodeSchedules(completedNodeId: string): void {
+    const dependentNodes = this.graph.nodes.filter(node => 
+      node.dependencies.includes(completedNodeId)
+    );
+    
+    for (const node of dependentNodes) {
+      if (node.isScheduled && node.schedule) {
+        // Recalculate schedule now that dependency is complete
+        const earliestPossibleAt = new Date(Math.max(node.schedule.executeAt.getTime(), new Date().getTime()));
+        node.scheduledFor = this.calculateNodeExecutionTime(node, earliestPossibleAt);
+        
+        this.log('debug', `Updated schedule for dependent node ${node.name}: ${node.scheduledFor.toISOString()}`, node.id);
+      }
+    }
+  }
+
+  // Check if there are nodes waiting for their scheduled time
+  private hasScheduledNodes(): boolean {
+    const now = new Date();
+    return this.graph.nodes.some(node => 
+      node.status === 'scheduled' && 
+      node.scheduledFor && 
+      node.scheduledFor <= now &&
+      this.areDependenciesCompleted(node)
+    );
+  }
+
+  // Schedule the entire graph for future execution
+  async scheduleGraph(schedule: Schedule, options?: ScheduleOptions): Promise<ScheduledItem> {
+    const scheduler = new Scheduler(this.agent!);
+    await scheduler.initialize();
+
+    if (!this.graph.id) {
+      throw new Error('Graph must be saved before scheduling');
+    }
+
+    return await scheduler.scheduleGraph({
+      graphId: this.graph.id,
+      schedule,
+      options
+    });
+  }
+
+  // Schedule a specific node within this graph
+  async scheduleGraphNode(nodeId: string, schedule: Schedule, options?: ScheduleOptions): Promise<ScheduledItem> {
+    const scheduler = new Scheduler(this.agent!);
+    await scheduler.initialize();
+
+    if (!this.graph.id) {
+      throw new Error('Graph must be saved before scheduling nodes');
+    }
+
+    const node = this.graph.nodes.find(n => n.id === nodeId);
+    if (!node) {
+      throw new Error(`Node not found: ${nodeId}`);
+    }
+
+    return await scheduler.scheduleGraphNode({
+      graphId: this.graph.id,
+      nodeId,
+      schedule,
+      options
+    });
+  }
+
+  // Get scheduled items for this graph
+  async getScheduledItems(): Promise<ScheduledItem[]> {
+    const scheduler = new Scheduler(this.agent!);
+    await scheduler.initialize();
+
+    const allScheduled = await scheduler.listScheduledItems();
+    return allScheduled.filter(item => 
+      item.type === 'graph' && item.targetId === this.graph.id ||
+      item.type === 'graph_node' && String(item.targetId).startsWith(`${this.graph.id}:`)
+    );
   }
 
   // Static methods

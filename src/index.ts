@@ -1,6 +1,6 @@
 // Main exports  
 export { Agent } from './agent';
-export { AgentConfig } from './agent/types';
+export type { AgentConfig } from './agent/types';
 
 // Common types
 export type { MetadataObject } from './types';
@@ -67,6 +67,18 @@ export type {
 // Knowledge exports
 export { Knowledge, knowledgeSearchTool, knowledgeTools } from './knowledge';
 export type { KnowledgeConfig } from './knowledge';
+
+// Scheduler exports
+export { Scheduler } from './scheduler';
+export type { 
+  Schedule, 
+  ScheduledItem, 
+  SchedulerConfig, 
+  ScheduledTaskRequest, 
+  ScheduledGraphRequest, 
+  ScheduledNodeRequest,
+  ScheduleOptions 
+} from './scheduler/types';
 
 // Default export
 export { default } from './agent';

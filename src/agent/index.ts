@@ -11,6 +11,7 @@ import { Plugin } from '../plugin';
 import { MCP } from '../mcp';
 import { Knowledge } from '../knowledge';
 import { Vision } from '../vision';
+import { Scheduler } from '../scheduler';
 import { getDatabase } from '../database';
 import { getProviderForModel } from '../llm/models';
 import { getLLM } from '../llm';
@@ -158,6 +159,7 @@ export class Agent extends BaseAgent {
 
   private modules: {
     task: Task;
+    scheduler: Scheduler;
     memory?: Memory;
     graph?: Graph;
     plugin?: Plugin;
@@ -171,7 +173,8 @@ export class Agent extends BaseAgent {
     
     // Initialize modules
     this.modules = {
-      task: new Task(this)
+      task: new Task(this),
+      scheduler: new Scheduler(this)
     };
     
     if (data.memory) {
@@ -202,6 +205,9 @@ export class Agent extends BaseAgent {
   private bindModuleMethods(): void {
     // Task methods (always available)
     this.bindAllMethods(this.modules.task);
+    
+    // Scheduler methods (always available)
+    this.bindAllMethods(this.modules.scheduler);
     
     // Conditional bindings
     if (this.modules.memory) {
@@ -271,6 +277,9 @@ export class Agent extends BaseAgent {
     });
     
     await this.modules.task.initialize();
+    
+    // Initialize scheduler (always available)
+    await this.modules.scheduler.initialize();
     
     if (this.modules.memory) {
       await this.modules.memory.initialize();
