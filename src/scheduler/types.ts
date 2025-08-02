@@ -1,4 +1,5 @@
 import { MetadataObject } from '../types';
+import { Plugin, PluginConfig } from '../plugin/types';
 
 export type ScheduleType = 'once' | 'recurring';
 export type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
@@ -48,9 +49,9 @@ export interface ScheduledTaskRequest {
   prompt: string;
   schedule: Schedule;
   useTools?: boolean;
-  mcpServers?: any[];
-  plugins?: any[];
-  attachments?: any[];
+  mcpServers?: Array<{ name: string; command?: string; args?: string[]; url?: string; cwd?: string }>;
+  plugins?: Array<{ plugin: Plugin; config?: PluginConfig }>;
+  attachments?: Array<{ type: 'image' | 'pdf' | 'text' | 'markdown' | 'code' | 'json' | 'file'; path: string; name?: string; language?: string }>;
   metadata?: MetadataObject;
   options?: ScheduleOptions;
 }

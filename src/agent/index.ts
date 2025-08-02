@@ -1,5 +1,6 @@
 import { AgentConfig, IAgent, RunOptions } from './types';
-import { ToolDefinition } from '../plugin/types';
+import { ToolDefinition, Plugin as IPlugin, ToolParameterValue } from '../plugin/types';
+import { convertToolParametersToJsonSchema } from '../plugin';
 
 // Interface for dynamic method binding - use intersection types
 type DynamicModule = Record<string, (...args: never[]) => unknown>;
@@ -15,7 +16,7 @@ import { Scheduler } from '../scheduler';
 import { getDatabase } from '../database';
 import { getProviderForModel } from '../llm/models';
 import { getLLM } from '../llm';
-import { LLMRequestOptions, Tool } from '../llm/types';
+import { LLMRequestOptions, Tool, ToolCall } from '../llm/types';
 import { Logger } from '../logger';
 
 /**
@@ -47,10 +48,16 @@ export abstract class BaseAgent implements IAgent {
 
   // Getters for IAgent interface
   get id(): number {
-    return this.data.id!;
+    if (this.data.id === undefined || this.data.id === null) {
+      throw new Error(`Agent ${this.data.name || 'unknown'} has no ID - agent may not be saved to database`);
+    }
+    return this.data.id;
   }
 
   get name(): string {
+    if (!this.data.name) {
+      throw new Error('Agent name is required but not provided');
+    }
     return this.data.name;
   }
 
@@ -78,33 +85,47 @@ export abstract class BaseAgent implements IAgent {
 
   // Instance methods
   async update(updates: Partial<AgentConfig>): Promise<void> {
+    if (!this.data.id) {
+      throw new Error('Cannot update agent: agent has no ID');
+    }
+    
     const db = await getDatabase();
-    const updatedData = await db.updateAgent(this.data.id!, updates);
-    if (updatedData) {
-      this.data = updatedData;
-      
-      // Update logger debug mode if changed
-      if (updates.debug !== undefined) {
-        const debugMode = updates.debug === true;
-        this.logger = new Logger({
-          level: debugMode ? 'debug' : 'info',
-          debug: debugMode,
-          enableConsole: true,
-          enableFile: false,
-          agentName: this.data.name
-        });
-      }
+    const updatedData = await db.updateAgent(this.data.id, updates);
+    if (!updatedData) {
+      throw new Error(`Failed to update agent ${this.data.name}: database returned null`);
+    }
+    
+    this.data = updatedData;
+    
+    // Update logger debug mode if changed
+    if (updates.debug !== undefined) {
+      const debugMode = updates.debug === true;
+      const agentName = this.data.name || 'unknown';
+      this.logger = new Logger({
+        level: debugMode ? 'debug' : 'info',
+        debug: debugMode,
+        enableConsole: true,
+        enableFile: false,
+        agentName
+      });
     }
   }
 
   async delete(): Promise<boolean> {
+    if (!this.data.id) {
+      throw new Error('Cannot delete agent: agent has no ID');
+    }
+    
     const db = await getDatabase();
-    return db.deleteAgent(this.data.id!);
+    return db.deleteAgent(this.data.id);
   }
 
   // Utility methods from original
   getId(): number {
-    return this.data.id!;
+    if (!this.data.id) {
+      throw new Error('Agent has no ID');
+    }
+    return this.data.id;
   }
 
   getName(): string {
@@ -470,49 +491,61 @@ export class Agent extends BaseAgent {
     }>;
   }): Promise<string> {
     let enhancedPrompt = prompt;
-    const messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
+    const messages: Array<{ role: 'user' | 'assistant' | 'system' | 'tool'; content: string; tool_call_id?: string; tool_calls?: ToolCall[] }> = [];
     
     // Add system prompt if available
-    if (this.getSystemPrompt()) {
-      messages.push({ role: 'system', content: this.getSystemPrompt()! });
+    const systemPrompt = this.getSystemPrompt();
+    if (systemPrompt) {
+      messages.push({ role: 'system', content: systemPrompt });
     }
     
     // Process attachments if provided
     if (options?.attachments && options.attachments.length > 0) {
       const attachmentDescriptions = await Promise.all(
         options.attachments.map(async (attachment) => {
-          const displayName = attachment.name || attachment.path.split('/').pop();
-          let description = `${attachment.type}: ${displayName} (${attachment.path})`;
-          
-          if (attachment.language) {
-            description += ` [Language: ${attachment.language}]`;
+          if (!attachment || !attachment.path || !attachment.type) {
+            return `[Invalid attachment: missing required fields]`;
           }
           
-          // For image files, use vision if available
-          if (attachment.type === 'image' && this.hasVision() && this.modules.vision) {
-            try {
-              const analysis = await (this.modules.vision as Vision).analyzeImage(attachment.path, {
-                prompt: 'Describe this image',
-                maxTokens: 500
-              });
-              description += `\nImage content: ${analysis}`;
-            } catch (error) {
-              description += ` [Vision analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}]`;
+          try {
+            const displayName = attachment.name || attachment.path.split('/').pop() || 'unknown';
+            let description = `${attachment.type}: ${displayName} (${attachment.path})`;
+            
+            if (attachment.language) {
+              description += ` [Language: ${attachment.language}]`;
             }
-          }
-          // For text-based files, include content preview
-          else if (['text', 'markdown', 'code', 'json'].includes(attachment.type)) {
-            try {
-              const fs = await import('fs/promises');
-              const content = await fs.readFile(attachment.path, 'utf-8');
-              const preview = content.length > 500 ? content.slice(0, 500) + '...' : content;
-              description += `\nContent:\n${preview}`;
-            } catch (error) {
-              description += ` [File read error: ${error instanceof Error ? error.message : 'Unknown error'}]`;
+            
+            // For image files, use vision if available
+            if (attachment.type === 'image' && this.hasVision() && this.modules?.vision) {
+              try {
+                const visionModule = this.modules.vision as Vision;
+                if (visionModule && typeof visionModule.analyzeImage === 'function') {
+                  const analysis = await visionModule.analyzeImage(attachment.path, {
+                    prompt: 'Describe this image',
+                    maxTokens: 500
+                  });
+                  description += `\nImage content: ${analysis}`;
+                }
+              } catch (error) {
+                description += ` [Vision analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}]`;
+              }
             }
+            // For text-based files, include content preview
+            else if (['text', 'markdown', 'code', 'json'].includes(attachment.type)) {
+              try {
+                const fs = await import('fs/promises');
+                const content = await fs.readFile(attachment.path, 'utf-8');
+                const preview = content.length > 500 ? content.slice(0, 500) + '...' : content;
+                description += `\nContent:\n${preview}`;
+              } catch (error) {
+                description += ` [File read error: ${error instanceof Error ? error.message : 'Unknown error'}]`;
+              }
+            }
+            
+            return description;
+          } catch (error) {
+            return `[Error processing attachment ${attachment.path}: ${error instanceof Error ? error.message : 'Unknown error'}]`;
           }
-          
-          return description;
         })
       );
       
@@ -521,21 +554,28 @@ export class Agent extends BaseAgent {
     
 
     // Add memory context if available
-    if (this.hasMemory() && this.modules.memory) {
+    if (this.hasMemory() && this.modules?.memory) {
       try {
-        const recentMemories = await (this.modules.memory as Memory).listMemories({
-          limit: 10,
-          orderBy: 'createdAt',
-          order: 'asc'
-        });
-        
-        // Add memories as conversation history
-        for (const mem of recentMemories) {
-          const memTyped = mem as MemoryType;
-          if (memTyped.metadata?.type === 'user_message') {
-            messages.push({ role: 'user', content: memTyped.content });
-          } else if (memTyped.metadata?.type === 'assistant_response') {
-            messages.push({ role: 'assistant', content: memTyped.content });
+        const memoryModule = this.modules.memory as Memory;
+        if (memoryModule && typeof memoryModule.listMemories === 'function') {
+          const recentMemories = await memoryModule.listMemories({
+            limit: 10,
+            orderBy: 'createdAt',
+            order: 'asc'
+          });
+          
+          // Add memories as conversation history
+          if (Array.isArray(recentMemories)) {
+            for (const mem of recentMemories) {
+              if (mem && typeof mem === 'object') {
+                const memTyped = mem as MemoryType;
+                if (memTyped.content && memTyped.metadata?.type === 'user_message') {
+                  messages.push({ role: 'user', content: memTyped.content });
+                } else if (memTyped.content && memTyped.metadata?.type === 'assistant_response') {
+                  messages.push({ role: 'assistant', content: memTyped.content });
+                }
+              }
+            }
           }
         }
       } catch (error) {
@@ -544,14 +584,20 @@ export class Agent extends BaseAgent {
     }
     
     // Add knowledge context if query seems to need it
-    if (this.hasKnowledge() && this.modules.knowledge) {
+    if (this.hasKnowledge() && this.modules?.knowledge) {
       try {
-        const relevantKnowledge = await (this.modules.knowledge as Knowledge).searchKnowledge(prompt, 3, 0.7);
-        if (relevantKnowledge.length > 0) {
-          const knowledgeContext = relevantKnowledge
-            .map((k) => k.content)
-            .join('\n\n---\n\n');
-          enhancedPrompt = `Relevant context from knowledge base:\n${knowledgeContext}\n\nUser question: ${enhancedPrompt}`;
+        const knowledgeModule = this.modules.knowledge as Knowledge;
+        if (knowledgeModule && typeof knowledgeModule.searchKnowledge === 'function') {
+          const relevantKnowledge = await knowledgeModule.searchKnowledge(prompt, 3, 0.7);
+          if (Array.isArray(relevantKnowledge) && relevantKnowledge.length > 0) {
+            const knowledgeContext = relevantKnowledge
+              .filter(k => k && k.content)
+              .map((k) => k.content)
+              .join('\n\n---\n\n');
+            if (knowledgeContext.trim()) {
+              enhancedPrompt = `Relevant context from knowledge base:\n${knowledgeContext}\n\nUser question: ${enhancedPrompt}`;
+            }
+          }
         }
       } catch (error) {
         this.logger.warn('Failed to search knowledge:', error instanceof Error ? error.message : String(error));
@@ -559,18 +605,48 @@ export class Agent extends BaseAgent {
     }
     
     // Add temporary MCP servers if provided
-    if (options?.mcpServers && this.modules.mcp) {
-      for (const server of options.mcpServers) {
-        try {
-          await (this.modules.mcp as MCP).addMCPServer(server);
-        } catch (error) {
-          this.logger.warn(`Failed to add MCP server ${server.name}:`, error instanceof Error ? error.message : String(error));
+    if (options?.mcpServers && Array.isArray(options.mcpServers) && this.modules?.mcp) {
+      const mcpModule = this.modules.mcp as MCP;
+      if (mcpModule && typeof mcpModule.addMCPServer === 'function') {
+        for (const server of options.mcpServers) {
+          if (server && server.name) {
+            try {
+              await mcpModule.addMCPServer(server);
+            } catch (error) {
+              this.logger.warn(`Failed to add MCP server ${server.name}:`, error instanceof Error ? error.message : String(error));
+            }
+          }
         }
       }
     }
     
     // Add temporary plugins if provided
-    // Plugin registration will be implemented in future updates
+    if (options?.plugins && Array.isArray(options.plugins) && this.modules?.plugin) {
+      const pluginModule = this.modules.plugin as Plugin;
+      if (pluginModule && typeof pluginModule.registerPlugin === 'function') {
+        for (const pluginDef of options.plugins) {
+          if (pluginDef && pluginDef.plugin) {
+            try {
+              // Create a temporary plugin instance
+              const tempPlugin: IPlugin = {
+                name: pluginDef.plugin.name,
+                version: pluginDef.plugin.version,
+                description: pluginDef.plugin.description || '',
+                tools: pluginDef.plugin.tools || []
+              };
+              
+              await pluginModule.registerPlugin(tempPlugin, {
+                name: pluginDef.plugin.name,
+                enabled: true,
+                config: pluginDef.config || {}
+              });
+            } catch (error) {
+              this.logger.warn(`Failed to register temporary plugin ${pluginDef.plugin.name}:`, error instanceof Error ? error.message : String(error));
+            }
+          }
+        }
+      }
+    }
     
     // Add current prompt
     messages.push({ role: 'user', content: enhancedPrompt });
@@ -584,7 +660,7 @@ export class Agent extends BaseAgent {
     const llm = getLLM(this.logger);
     
     // Collect all available tools
-    let tools: Tool[] = [];
+    const tools: Tool[] = [];
     
     if (shouldUseTools) {
       // Add MCP tools
@@ -602,11 +678,20 @@ export class Agent extends BaseAgent {
         }
       }
       
-      // Add plugin tools (future implementation)
-      // if (this.modules.plugin) {
-      //   const pluginTools = this.modules.plugin.getTools();
-      //   // Add plugin tools to tools array
-      // }
+      // Add plugin tools
+      if (this.modules.plugin) {
+        const pluginTools = this.modules.plugin.getTools();
+        for (const pluginTool of pluginTools) {
+          tools.push({
+            type: 'function',
+            function: {
+              name: `plugin_${pluginTool.name}`,
+              description: pluginTool.description,
+              parameters: convertToolParametersToJsonSchema(pluginTool.parameters)
+            }
+          });
+        }
+      }
       
       this.logger.info(`Prepared ${tools.length} tools for LLM: ${tools.map(t => t.function.name).join(', ')}`);
       this.logger.debug('Tools prepared for LLM', {
@@ -659,22 +744,12 @@ export class Agent extends BaseAgent {
           toolNames: llmResponse.toolCalls.map(tc => tc.function.name)
         });
         
-        // Add assistant message with tool calls (ensure arguments are strings for OpenAI)
-        const formattedToolCalls = llmResponse.toolCalls.map(tc => ({
-          ...tc,
-          function: {
-            ...tc.function,
-            arguments: typeof tc.function.arguments === 'string' 
-              ? tc.function.arguments 
-              : JSON.stringify(tc.function.arguments)
-          }
-        }));
-        
+        // Add assistant message with tool calls
         messages.push({
           role: 'assistant',
           content: llmResponse.content || '',
-          tool_calls: formattedToolCalls
-        } as any);
+          tool_calls: llmResponse.toolCalls
+        });
         
         // Execute each tool call
         for (const toolCall of llmResponse.toolCalls) {
@@ -695,8 +770,32 @@ export class Agent extends BaseAgent {
               
               const mcpResult = await this.modules.mcp!.callMCPTool(mcpToolName, mcpArgs as Record<string, import('../mcp/types').MCPValue>);
               toolResult = mcpResult.content.map(c => c.text || '').join('\n');
+            } else if (toolCall.function.name.startsWith('plugin_')) {
+              // Handle plugin tool call
+              const pluginToolName = toolCall.function.name.substring(8); // Remove 'plugin_' prefix
+              
+              // Ensure arguments are properly formatted for plugin tools
+              let pluginArgs: Record<string, unknown>;
+              if (typeof toolCall.function.arguments === 'string') {
+                pluginArgs = JSON.parse(toolCall.function.arguments);
+              } else {
+                pluginArgs = toolCall.function.arguments as Record<string, unknown>;
+              }
+              
+              if (this.modules.plugin) {
+                const pluginResult = await this.modules.plugin.executeTool({
+                  id: toolCall.id,
+                  name: pluginToolName,
+                  parameters: pluginArgs as Record<string, ToolParameterValue>
+                });
+                toolResult = pluginResult.result.success ? 
+                  (typeof pluginResult.result.data === 'string' ? pluginResult.result.data : JSON.stringify(pluginResult.result.data)) :
+                  `Error: ${pluginResult.result.error || 'Unknown error'}`;
+              } else {
+                toolResult = `Plugin module not available`;
+              }
             } else {
-              // Handle other tool types (plugins, etc.)
+              // Handle other tool types (future implementations)
               toolResult = `Tool ${toolCall.function.name} not implemented yet`;
             }
             
@@ -705,7 +804,7 @@ export class Agent extends BaseAgent {
               role: 'tool',
               content: toolResult,
               tool_call_id: toolCall.id
-            } as any);
+            });
             
             this.logger.debug('Tool call executed', {
               toolName: toolCall.function.name,
@@ -722,7 +821,7 @@ export class Agent extends BaseAgent {
               role: 'tool',
               content: `Error: ${errorMessage}`,
               tool_call_id: toolCall.id
-            } as any);
+            });
           }
         }
         
@@ -774,7 +873,17 @@ export class Agent extends BaseAgent {
     }
     
     // Clean up temporary plugins
-    // Cleanup will be implemented in future updates
+    if (options?.plugins && Array.isArray(options.plugins) && this.modules?.plugin) {
+      for (const pluginDef of options.plugins) {
+        if (pluginDef && pluginDef.plugin) {
+          try {
+            await (this.modules.plugin as Plugin).unregisterPlugin(pluginDef.plugin.name);
+          } catch (error) {
+            this.logger.warn(`Failed to unregister temporary plugin ${pluginDef.plugin.name}:`, error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
+    }
     
     return response;
   }
@@ -814,6 +923,8 @@ export class Agent extends BaseAgent {
     // Re-bind methods after module changes
     this.bindModuleMethods();
   }
+
+
 }
 
 

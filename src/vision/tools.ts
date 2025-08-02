@@ -93,7 +93,9 @@ export const analyzeImageTool: ToolDefinition = {
 
       const visionService = new Vision();
       
-      if (!fs.existsSync(normalizedPath)) {
+      try {
+        await fs.promises.access(normalizedPath);
+      } catch {
         return {
           success: false,
           data: null,
@@ -180,7 +182,9 @@ export const describeImageTool: ToolDefinition = {
 
       const visionService = new Vision();
       
-      if (!fs.existsSync(normalizedPath)) {
+      try {
+        await fs.promises.access(normalizedPath);
+      } catch {
         return {
           success: false,
           data: null,
@@ -275,7 +279,9 @@ export const extractTextFromImageTool: ToolDefinition = {
 
       const visionService = new Vision();
       
-      if (!fs.existsSync(normalizedPath)) {
+      try {
+        await fs.promises.access(normalizedPath);
+      } catch {
         return {
           success: false,
           data: null,

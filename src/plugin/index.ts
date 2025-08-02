@@ -14,18 +14,21 @@ import { Logger } from '../logger/types';
 
 // Type for LLM function calling tool schema property
 interface LLMToolProperty {
-  type: string;
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
   description?: string;
   enum?: Array<string | number>;
-  items?: { type: string; description?: string };
-  properties?: Record<string, LLMToolProperty>;
+  items?: { type: string };
+  properties?: Record<string, {
+    type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+    description?: string;
+  }>;
 }
 
 // Type for LLM function calling tool schema
 interface LLMToolSchema {
-  type: string;
+  type: 'object';
   properties: Record<string, LLMToolProperty>;
-  required: string[];
+  required?: string[];
 }
 
 export class Plugin implements IAgentModule, IPluginManager {
@@ -518,12 +521,12 @@ export class Plugin implements IAgentModule, IPluginManager {
     }
   }
 
-  private convertParametersToJsonSchema(parameters: Record<string, ToolParameter>): LLMToolSchema {
+  public convertParametersToJsonSchema(parameters: Record<string, ToolParameter>): LLMToolSchema {
     const properties: Record<string, LLMToolProperty> = {};
     
     for (const [name, param] of Object.entries(parameters)) {
       properties[name] = {
-        type: param.type,
+        type: param.type as 'string' | 'number' | 'boolean' | 'object' | 'array',
         description: param.description
       };
 
@@ -566,3 +569,37 @@ export function getPlugin(agent?: IAgent): Plugin {
 }
 
 export * from './types';
+
+// Export utility function for converting tool parameters to JSON schema
+export function convertToolParametersToJsonSchema(parameters: Record<string, ToolParameter>): LLMToolSchema {
+  const properties: Record<string, LLMToolProperty> = {};
+  
+  for (const [name, param] of Object.entries(parameters)) {
+    properties[name] = {
+      type: param.type as 'string' | 'number' | 'boolean' | 'object' | 'array',
+      description: param.description
+    };
+
+    if (param.enum) {
+      properties[name].enum = param.enum;
+    }
+
+    if (param.properties) {
+      properties[name].properties = convertToolParametersToJsonSchema(param.properties).properties;
+    }
+
+    if (param.items) {
+      properties[name].items = {
+        type: param.items.type
+      };
+    }
+  }
+
+  return {
+    type: 'object',
+    properties,
+    required: Object.entries(parameters)
+      .filter(([, param]) => param.required)
+      .map(([name]) => name)
+  };
+}

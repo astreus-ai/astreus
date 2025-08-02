@@ -6,6 +6,7 @@ import { Memory } from '../memory';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
 import { Logger } from '../logger/types';
+import { getEncryptionService } from '../database/encryption';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -41,6 +42,7 @@ export class Task implements IAgentModule {
   readonly name = 'task';
   private knex: Knex | null = null;
   private logger: Logger;
+  private encryption = getEncryptionService();
 
   constructor(private agent: IAgent) {
     this.logger = agent.logger;
@@ -62,6 +64,56 @@ export class Task implements IAgentModule {
   private async initializeTaskTable(): Promise<void> {
     // Tasks table is now shared and initialized in the main database module
     // This method is kept for compatibility but does nothing
+  }
+
+  /**
+   * Encrypt sensitive task fields before storing
+   */
+  private async encryptTaskData(data: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (!this.encryption.isEnabled()) {
+      return data;
+    }
+
+    const encrypted = { ...data };
+    
+    if (encrypted.prompt !== undefined && encrypted.prompt !== null) {
+      encrypted.prompt = await this.encryption.encrypt(String(encrypted.prompt), 'tasks.prompt');
+    }
+    
+    if (encrypted.response !== undefined && encrypted.response !== null) {
+      encrypted.response = await this.encryption.encrypt(String(encrypted.response), 'tasks.response');
+    }
+    
+    if (encrypted.metadata !== undefined && encrypted.metadata !== null) {
+      encrypted.metadata = await this.encryption.encryptJSON(encrypted.metadata, 'tasks.metadata');
+    }
+
+    return encrypted;
+  }
+
+  /**
+   * Decrypt sensitive task fields after retrieving
+   */
+  private async decryptTaskData(data: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (!this.encryption.isEnabled() || !data) {
+      return data;
+    }
+
+    const decrypted = { ...data };
+    
+    if (decrypted.prompt !== undefined && decrypted.prompt !== null) {
+      decrypted.prompt = await this.encryption.decrypt(String(decrypted.prompt), 'tasks.prompt');
+    }
+    
+    if (decrypted.response !== undefined && decrypted.response !== null) {
+      decrypted.response = await this.encryption.decrypt(String(decrypted.response), 'tasks.response');
+    }
+    
+    if (decrypted.metadata !== undefined && decrypted.metadata !== null) {
+      decrypted.metadata = await this.encryption.decryptJSON(String(decrypted.metadata), 'tasks.metadata');
+    }
+
+    return decrypted;
   }
 
   async createTask(request: TaskRequest): Promise<TaskType> {
@@ -132,17 +184,25 @@ export class Task implements IAgentModule {
       }
     }
 
+    // Prepare data for encryption
+    const insertData = {
+      agentId: this.agent.id,
+      prompt: enhancedPrompt,
+      response: null,
+      status: 'pending',
+      metadata: Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null
+    };
+
+    // Encrypt sensitive fields
+    const encryptedData = await this.encryptTaskData(insertData);
+
     const [task] = await this.knex!(tableName)
-      .insert({
-        agentId: this.agent.id,
-        prompt: enhancedPrompt,
-        response: null,
-        status: 'pending',
-        metadata: Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null
-      })
+      .insert(encryptedData)
       .returning('*');
     
-    const formattedTask = this.formatTask(task);
+    // Decrypt for response
+    const decryptedTask = await this.decryptTaskData(task as Record<string, unknown>);
+    const formattedTask = this.formatTask(decryptedTask as unknown as TaskDbRow);
     
     // User-facing success message
     this.logger.info(`Task created with ID: ${formattedTask.id}`);
@@ -452,7 +512,11 @@ export class Task implements IAgentModule {
       .where({ id, agentId: this.agent.id })
       .first();
     
-    return task ? this.formatTask(task) : null;
+    if (!task) return null;
+    
+    // Decrypt sensitive fields
+    const decryptedTask = await this.decryptTaskData(task as Record<string, unknown>);
+    return this.formatTask(decryptedTask as unknown as TaskDbRow);
   }
 
   async listTasks(options: TaskSearchOptions = {}): Promise<TaskType[]> {
@@ -493,7 +557,25 @@ export class Task implements IAgentModule {
     }
 
     const tasks = await query;
-    return tasks.map(task => this.formatTask(task));
+    
+    // Decrypt tasks if encryption is enabled
+    if (this.encryption.isEnabled()) {
+      const decryptedTasks = await Promise.all(
+        tasks.map(async (task) => {
+          try {
+            const decrypted = await this.decryptTaskData(task as Record<string, unknown>);
+            return this.formatTask(decrypted as unknown as TaskDbRow);
+          } catch {
+            // If decryption fails, return original task (might be unencrypted legacy data)
+            this.logger.debug('Failed to decrypt task during list', { taskId: task.id });
+            return this.formatTask(task);
+          }
+        })
+      );
+      return decryptedTasks;
+    } else {
+      return tasks.map(task => this.formatTask(task));
+    }
   }
 
   async updateTask(id: number, updates: Partial<TaskType>): Promise<TaskType | null> {
@@ -512,12 +594,19 @@ export class Task implements IAgentModule {
       return this.getTask(id);
     }
     
+    // Encrypt sensitive fields in update data
+    const encryptedUpdateData = await this.encryptTaskData(updateData);
+    
     const [task] = await this.knex!(tableName)
       .where({ id, agentId: this.agent.id })
-      .update(updateData)
+      .update(encryptedUpdateData)
       .returning('*');
     
-    return task ? this.formatTask(task) : null;
+    if (!task) return null;
+    
+    // Decrypt for response
+    const decryptedTask = await this.decryptTaskData(task as Record<string, unknown>);
+    return this.formatTask(decryptedTask as unknown as TaskDbRow);
   }
 
   private async updateTaskStatus(id: number, status: TaskStatus): Promise<TaskType | null> {

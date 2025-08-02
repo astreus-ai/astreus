@@ -314,7 +314,9 @@ export class OpenAIProvider implements LLMProvider {
     });
 
     // Validate image file
-    if (!fs.existsSync(imagePath)) {
+    try {
+      await fs.promises.access(imagePath);
+    } catch {
       this.logger.error(`Image file not found: ${imagePath}`);
       throw new Error(`Image file not found: ${imagePath}`);
     }
@@ -327,7 +329,7 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     // Read and encode image
-    const imageBuffer = fs.readFileSync(imagePath);
+    const imageBuffer = await fs.promises.readFile(imagePath);
     const base64Image = imageBuffer.toString('base64');
     const mimeType = this.getMimeType(ext);
     const dataUrl = `data:${mimeType};base64,${base64Image}`;

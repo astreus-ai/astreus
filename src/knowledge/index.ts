@@ -507,17 +507,19 @@ export class Knowledge implements IAgentModule {
   async addKnowledgeFromDirectory(dirPath: string, metadata?: MetadataObject): Promise<void> {
     this.logger.info(`Adding knowledge from directory: ${dirPath}`);
     
-    if (!fs.existsSync(dirPath)) {
+    try {
+      await fs.promises.access(dirPath);
+    } catch {
       throw new Error(`Directory does not exist: ${dirPath}`);
     }
 
-    const files = fs.readdirSync(dirPath);
+    const files = await fs.promises.readdir(dirPath);
     const supportedExtensions = ['.txt', '.md', '.json', '.pdf'];
     let processedCount = 0;
 
     for (const file of files) {
       const fullPath = path.join(dirPath, file);
-      const stat = fs.statSync(fullPath);
+      const stat = await fs.promises.stat(fullPath);
 
       if (stat.isFile()) {
         const ext = path.extname(file).toLowerCase();
@@ -607,15 +609,15 @@ export type EmbeddingConfig = {
 };
 
 export class EmbeddingService {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   constructor(_config?: EmbeddingConfig) {
     // Legacy compatibility wrapper - functionality moved to LLM providers
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const config = _config;
+    // Config parameter kept for backward compatibility
   }
   
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async embedSingle(_text: string): Promise<number[]> {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const text = _text;
+    // Text parameter kept for backward compatibility
     throw new Error('EmbeddingService is deprecated. Use LLM provider embeddings instead.');
   }
 }

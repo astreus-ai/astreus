@@ -1,6 +1,6 @@
 import { Knex } from 'knex';
 import { getDatabase } from '../database/index';
-import { ScheduledItem, Schedule, ScheduleOptions } from './types';
+import { ScheduledItem, Schedule } from './types';
 
 // Database row interface for scheduled_items table
 interface ScheduledItemDbRow {
