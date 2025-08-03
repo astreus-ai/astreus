@@ -1,5 +1,4 @@
 import { MetadataObject } from '../types';
-import { Plugin, PluginConfig } from '../plugin/types';
 
 export type ScheduleType = 'once' | 'recurring';
 export type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
@@ -45,29 +44,6 @@ export interface ScheduleOptions {
   timeout?: number; // Execution timeout in milliseconds
 }
 
-export interface ScheduledTaskRequest {
-  prompt: string;
-  schedule: Schedule;
-  useTools?: boolean;
-  mcpServers?: Array<{ name: string; command?: string; args?: string[]; url?: string; cwd?: string }>;
-  plugins?: Array<{ plugin: Plugin; config?: PluginConfig }>;
-  attachments?: Array<{ type: 'image' | 'pdf' | 'text' | 'markdown' | 'code' | 'json' | 'file'; path: string; name?: string; language?: string }>;
-  metadata?: MetadataObject;
-  options?: ScheduleOptions;
-}
-
-export interface ScheduledGraphRequest {
-  graphId: string;
-  schedule: Schedule;
-  options?: ScheduleOptions;
-}
-
-export interface ScheduledNodeRequest {
-  graphId: string;
-  nodeId: string;
-  schedule: Schedule;
-  options?: ScheduleOptions;
-}
 
 export interface SchedulerConfig {
   checkInterval?: number; // How often to check for scheduled items (ms)

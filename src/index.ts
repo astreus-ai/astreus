@@ -68,15 +68,12 @@ export type {
 export { Knowledge, knowledgeSearchTool, knowledgeTools } from './knowledge';
 export type { KnowledgeConfig } from './knowledge';
 
-// Scheduler exports
-export { Scheduler } from './scheduler';
+// Scheduler exports - simplified utilities only
+export { parseScheduleString } from './scheduler';
 export type { 
   Schedule, 
   ScheduledItem, 
-  SchedulerConfig, 
-  ScheduledTaskRequest, 
-  ScheduledGraphRequest, 
-  ScheduledNodeRequest,
+  SchedulerConfig,
   ScheduleOptions 
 } from './scheduler/types';
 
