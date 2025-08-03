@@ -149,6 +149,19 @@ export class Task implements IAgentModule {
     if (request.schedule) {
       metadata.schedule = request.schedule;
     }
+    // Store sub-agent delegation options
+    if (request.useSubAgents !== undefined) {
+      metadata.useSubAgents = request.useSubAgents;
+    }
+    if (request.subAgentDelegation) {
+      metadata.subAgentDelegation = request.subAgentDelegation;
+    }
+    if (request.subAgentCoordination) {
+      metadata.subAgentCoordination = request.subAgentCoordination;
+    }
+    if (request.taskAssignment) {
+      metadata.taskAssignment = JSON.stringify(request.taskAssignment);
+    }
 
     // Process attachments and enhance prompt
     let enhancedPrompt = request.prompt;
@@ -282,8 +295,51 @@ export class Task implements IAgentModule {
         }
       }
 
-      // If agent has tools support and this task should use tools
-      if (shouldUseTools && this.agent && 'executeTaskWithTools' in this.agent && typeof this.agent.executeTaskWithTools === 'function') {
+      // Check for sub-agent delegation options
+      const taskUseSubAgents = task.metadata?.useSubAgents;
+      const hasSubAgents = this.agent && 'config' in this.agent && this.agent.config.subAgents && this.agent.config.subAgents.length > 0;
+      
+      // If task should use sub-agents and agent has sub-agents, use agent.ask() for delegation
+      if (taskUseSubAgents && hasSubAgents && this.agent && 'ask' in this.agent && typeof this.agent.ask === 'function') {
+        
+        // Prepare sub-agent options from task metadata
+        const subAgentOptions: any = {
+          useSubAgents: true,
+          delegation: task.metadata?.subAgentDelegation || 'auto',
+          coordination: task.metadata?.subAgentCoordination || 'sequential'
+        };
+        
+        // Add task assignment if specified
+        if (task.metadata?.taskAssignment && typeof task.metadata.taskAssignment === 'string') {
+          try {
+            subAgentOptions.taskAssignment = JSON.parse(task.metadata.taskAssignment);
+          } catch (error) {
+            this.logger.debug('Failed to parse taskAssignment metadata', { 
+              error: error instanceof Error ? error.message : String(error) 
+            });
+          }
+        }
+        
+        // Add other options
+        if (options?.model) {
+          subAgentOptions.model = options.model;
+        }
+        if (options?.stream) {
+          subAgentOptions.stream = options.stream;
+        }
+        if (shouldUseTools !== undefined) {
+          subAgentOptions.useTools = shouldUseTools;
+        }
+        
+        // Execute task with sub-agent delegation using agent.ask()
+        const response = await this.agent.ask(task.prompt, subAgentOptions);
+        
+        llmResponse = {
+          content: response,
+          model: options?.model || agentData?.model || 'gpt-4o'
+        };
+        
+      } else if (shouldUseTools && this.agent && 'executeTaskWithTools' in this.agent && typeof this.agent.executeTaskWithTools === 'function') {
         
         // Build the prompt with context and memory if needed
         let contextualPrompt = task.prompt;
