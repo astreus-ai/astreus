@@ -146,6 +146,9 @@ export class Task implements IAgentModule {
     if (request.plugins) {
       metadata.plugins = JSON.stringify(request.plugins);
     }
+    if (request.schedule) {
+      metadata.schedule = request.schedule;
+    }
 
     // Process attachments and enhance prompt
     let enhancedPrompt = request.prompt;
@@ -232,6 +235,11 @@ export class Task implements IAgentModule {
     const task = await this.getTask(taskId);
     if (!task) {
       throw new Error(`Task ${taskId} not found`);
+    }
+
+    // Auto-detect scheduled task and log info
+    if (task.metadata?.schedule) {
+      this.logger.info(`Task has schedule: ${task.metadata.schedule} - this will be handled by the graph system when used in graphs`);
     }
 
     // Update status to in_progress

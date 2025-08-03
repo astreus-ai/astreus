@@ -35,6 +35,7 @@ export interface TaskRequest {
     name?: string;
     language?: string; // For code files
   }>;
+  schedule?: string; // Simple schedule string (e.g., 'daily@07:00', 'weekly@monday@09:00')
   metadata?: MetadataObject;
 }
 

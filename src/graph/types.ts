@@ -1,6 +1,5 @@
 import { Agent } from '../agent';
 import { MetadataObject } from '../types';
-import { Schedule, ScheduleOptions } from '../scheduler/types';
 
 /**
  * Primitive values that can be returned as node results
@@ -39,10 +38,7 @@ export interface GraphNode {
   dependencies: string[]; // Node IDs that must complete first
   
   // Scheduling properties
-  schedule?: Schedule;
-  scheduledFor?: Date; // Calculated execution time (considers both schedule + dependencies)
-  isScheduled?: boolean; // Whether this node has scheduling enabled
-  scheduleOptions?: ScheduleOptions;
+  schedule?: string; // Simple schedule string (e.g., 'daily@07:00')
   
   // Results
   result?: GraphResultValue;
@@ -118,16 +114,15 @@ export interface AddAgentNodeOptions extends AddNodeOptions {
 }
 
 export interface AddTaskNodeOptions extends AddNodeOptions {
+  name?: string; // Optional name for the task
   prompt: string;
   model?: string;
   agentId?: number; // Override default agent
   stream?: boolean; // Enable streaming for this task
+  schedule?: string; // Simple schedule string (e.g., 'daily@07:00', 'weekly@monday@09:00')
+  dependsOn?: string[]; // Node names that must complete first (alternative to dependencies)
 }
 
-export interface AddScheduledTaskNodeOptions extends AddTaskNodeOptions {
-  schedule: Schedule;
-  scheduleOptions?: ScheduleOptions;
-}
 
 export interface GraphSchedulingOptions {
   respectSchedules?: boolean; // Whether to respect node schedules during execution
