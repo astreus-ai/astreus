@@ -1,6 +1,15 @@
 // Main exports  
 export { Agent } from './agent';
-export type { AgentConfig } from './agent/types';
+export type { AgentConfig, AskOptions } from './agent/types';
+
+// Sub-agent exports
+export { SubAgent } from './sub-agent';
+export type { 
+  SubAgentTask, 
+  SubAgentResult, 
+  SubAgentCoordinationResult,
+  DelegationStrategy
+} from './sub-agent/types';
 
 // Common types
 export type { MetadataObject } from './types';

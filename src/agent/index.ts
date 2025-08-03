@@ -1,4 +1,4 @@
-import { AgentConfig, IAgent, RunOptions } from './types';
+import { AgentConfig, IAgent, RunOptions, AskOptions } from './types';
 import { ToolDefinition, Plugin as IPlugin, ToolParameterValue } from '../plugin/types';
 import { convertToolParametersToJsonSchema } from '../plugin';
 
@@ -12,6 +12,7 @@ import { Plugin } from '../plugin';
 import { MCP } from '../mcp';
 import { Knowledge } from '../knowledge';
 import { Vision } from '../vision';
+import { SubAgent } from '../sub-agent';
 import { getDatabase } from '../database';
 import { getProviderForModel } from '../llm/models';
 import { getLLM } from '../llm';
@@ -185,6 +186,7 @@ export class Agent extends BaseAgent {
     mcp?: MCP;
     knowledge?: Knowledge;
     vision?: Vision;
+    subAgent?: SubAgent;
   };
 
   constructor(data: AgentConfig) {
@@ -212,6 +214,9 @@ export class Agent extends BaseAgent {
     if (data.vision) {
       this.modules.vision = new Vision(this);
     }
+    
+    // Always initialize SubAgent module for potential sub-agent usage
+    this.modules.subAgent = new SubAgent(this.logger);
     
     // Auto-bind module methods to agent instance
     this.bindModuleMethods();
@@ -244,6 +249,10 @@ export class Agent extends BaseAgent {
     
     if (this.modules.vision) {
       this.bindAllMethods(this.modules.vision);
+    }
+    
+    if (this.modules.subAgent) {
+      this.bindAllMethods(this.modules.subAgent);
     }
   }
 
@@ -314,6 +323,10 @@ export class Agent extends BaseAgent {
     
     if (this.modules.vision) {
       await this.modules.vision.initialize();
+    }
+    
+    if (this.modules.subAgent) {
+      await this.modules.subAgent.initialize();
     }
     
     // Re-bind methods after initialization
@@ -459,30 +472,29 @@ export class Agent extends BaseAgent {
   /**
    * Ask method - direct conversation with the agent (task-independent)
    */
-  async ask(prompt: string, options?: RunOptions & {
-    attachments?: Array<{
-      type: 'image' | 'pdf' | 'text' | 'markdown' | 'code' | 'json' | 'file';
-      path: string;
-      name?: string;
-      language?: string;
-    }>;
-    mcpServers?: Array<{
-      name: string;
-      command?: string;
-      args?: string[];
-      url?: string;
-      cwd?: string;
-    }>;
-    plugins?: Array<{
-      plugin: {
-        name: string;
-        version: string;
-        description?: string;
-        tools?: ToolDefinition[];
-      };
-      config?: Record<string, string | number | boolean | null>;
-    }>;
-  }): Promise<string> {
+  async ask(prompt: string, options?: AskOptions): Promise<string> {
+    // Check if sub-agents should be used
+    if (options?.useSubAgents && this.data.subAgents && this.data.subAgents.length > 0) {
+      this.logger.info(`Using sub-agents for task delegation`, {
+        subAgentCount: this.data.subAgents.length,
+        delegation: options.delegation || 'auto'
+      });
+      
+      try {
+        const result = await this.modules.subAgent!.executeWithSubAgents(
+          prompt,
+          this.data.subAgents,
+          options,
+          this.getModel() // Pass main agent's model for delegation
+        );
+        return result;
+      } catch (error) {
+        this.logger.warn('Sub-agent execution failed, falling back to main agent', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        // Fall through to regular agent execution
+      }
+    }
     let enhancedPrompt = prompt;
     const messages: Array<{ role: 'user' | 'assistant' | 'system' | 'tool'; content: string; tool_call_id?: string; tool_calls?: ToolCall[] }> = [];
     
@@ -625,7 +637,7 @@ export class Agent extends BaseAgent {
                 name: pluginDef.plugin.name,
                 version: pluginDef.plugin.version,
                 description: pluginDef.plugin.description || '',
-                tools: pluginDef.plugin.tools || []
+                tools: (pluginDef.plugin.tools || []) as ToolDefinition[]
               };
               
               await pluginModule.registerPlugin(tempPlugin, {
