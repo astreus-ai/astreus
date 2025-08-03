@@ -46,6 +46,11 @@ export abstract class BaseAgent implements IAgent {
    */
   abstract run(prompt: string, options?: RunOptions): Promise<string>;
 
+  /**
+   * Abstract method that must be implemented by concrete agent classes
+   */
+  abstract ask(prompt: string, options?: AskOptions): Promise<string>;
+
   // Getters for IAgent interface
   get id(): number {
     if (this.data.id === undefined || this.data.id === null) {

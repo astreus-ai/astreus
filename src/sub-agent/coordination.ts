@@ -1,7 +1,7 @@
 /**
  * Sub-agent coordination and result management
  */
-import { AgentInterface } from '../agent/types';
+import { IAgent } from '../agent/types';
 import { SubAgentTask, SubAgentResult, SubAgentCoordinationResult } from './types';
 import { Logger } from '../logger/types';
 
@@ -20,7 +20,7 @@ export class SubAgentCoordinator {
    */
   async executeSubAgentTasks(
     tasks: SubAgentTask[],
-    subAgents: AgentInterface[],
+    subAgents: IAgent[],
     coordination: 'parallel' | 'sequential' = 'parallel'
   ): Promise<SubAgentCoordinationResult> {
     const startTime = Date.now();
@@ -73,7 +73,7 @@ export class SubAgentCoordinator {
    */
   private async executeParallel(
     tasks: SubAgentTask[],
-    subAgents: AgentInterface[],
+    subAgents: IAgent[],
     results: SubAgentResult[],
     errors: string[]
   ): Promise<void> {
@@ -101,7 +101,7 @@ export class SubAgentCoordinator {
    */
   private async executeSequential(
     tasks: SubAgentTask[],
-    subAgents: AgentInterface[],
+    subAgents: IAgent[],
     results: SubAgentResult[],
     errors: string[]
   ): Promise<void> {
@@ -136,7 +136,7 @@ export class SubAgentCoordinator {
   /**
    * Execute a single sub-agent task
    */
-  private async executeTask(task: SubAgentTask, subAgents: AgentInterface[]): Promise<SubAgentResult> {
+  private async executeTask(task: SubAgentTask, subAgents: IAgent[]): Promise<SubAgentResult> {
     const startTime = Date.now();
     
     const agent = subAgents.find(a => a.id === task.agentId);

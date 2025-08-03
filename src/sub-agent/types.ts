@@ -1,7 +1,7 @@
 /**
  * Types for the SubAgent system
  */
-import { AgentInterface } from '../agent/types';
+import { IAgent } from '../agent/types';
 import { RunOptions } from '../agent/types';
 
 /**
@@ -42,7 +42,7 @@ export interface SubAgentResult {
  */
 export interface DelegationStrategy {
   name: 'auto' | 'manual' | 'sequential';
-  delegate(prompt: string, subAgents: AgentInterface[], options?: SubAgentRunOptions, model?: string): Promise<SubAgentTask[]>;
+  delegate(prompt: string, subAgents: IAgent[], options?: SubAgentRunOptions, model?: string): Promise<SubAgentTask[]>;
 }
 
 /**
