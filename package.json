@@ -1,6 +1,6 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Open-source AI agent framework for building autonomous systems that solve real-world tasks effectively.",
   "author": "Berke Kiran",
   "license": "MIT",
@@ -10,7 +10,6 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsup",
-    "test": "jest",
     "lint": "eslint src --ext .ts",
     "prepublishOnly": "npm run build"
   },

@@ -1,7 +1,7 @@
 /**
  * Task delegation strategies for sub-agents
  */
-import { AgentInterface } from '../agent/types';
+import { IAgent } from '../agent/types';
 import { SubAgentTask, DelegationStrategy, SubAgentRunOptions } from './types';
 import { getLLM } from '../llm';
 import { Logger } from '../logger/types';
@@ -17,7 +17,7 @@ export class AutoDelegationStrategy implements DelegationStrategy {
     this.logger = logger;
   }
 
-  async delegate(prompt: string, subAgents: AgentInterface[], options?: SubAgentRunOptions, model?: string): Promise<SubAgentTask[]> {
+  async delegate(prompt: string, subAgents: IAgent[], options?: SubAgentRunOptions, model?: string): Promise<SubAgentTask[]> {
     if (subAgents.length === 0) {
       return [];
     }
@@ -49,7 +49,7 @@ export class AutoDelegationStrategy implements DelegationStrategy {
     }
   }
 
-  private async createDelegationPlan(prompt: string, subAgents: AgentInterface[], model?: string): Promise<SubAgentTask[]> {
+  private async createDelegationPlan(prompt: string, subAgents: IAgent[], model?: string): Promise<SubAgentTask[]> {
     const llm = getLLM(this.logger);
 
     // Build sub-agent information for the LLM
@@ -172,7 +172,7 @@ Example response:
 export class ManualDelegationStrategy implements DelegationStrategy {
   name = 'manual' as const;
 
-  async delegate(_prompt: string, subAgents: AgentInterface[], options?: SubAgentRunOptions): Promise<SubAgentTask[]> {
+  async delegate(_prompt: string, subAgents: IAgent[], options?: SubAgentRunOptions): Promise<SubAgentTask[]> {
     const tasks: SubAgentTask[] = [];
     
     if (!options?.taskAssignment) {
@@ -205,7 +205,7 @@ export class ManualDelegationStrategy implements DelegationStrategy {
 export class SequentialDelegationStrategy implements DelegationStrategy {
   name = 'sequential' as const;
 
-  async delegate(prompt: string, subAgents: AgentInterface[]): Promise<SubAgentTask[]> {
+  async delegate(prompt: string, subAgents: IAgent[]): Promise<SubAgentTask[]> {
     const tasks: SubAgentTask[] = [];
     
     if (subAgents.length === 0) {

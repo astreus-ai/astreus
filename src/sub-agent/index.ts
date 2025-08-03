@@ -1,7 +1,7 @@
 /**
  * SubAgent module - Manages sub-agent coordination and delegation
  */
-import { IAgentModule, AgentInterface, AskOptions } from '../agent/types';
+import { IAgentModule, IAgent, AskOptions } from '../agent/types';
 import { SubAgentCoordinator } from './coordination';
 import { getDelegationStrategy } from './delegation';
 import { SubAgentCoordinationResult } from './types';
@@ -26,7 +26,7 @@ export class SubAgent implements IAgentModule {
    */
   async executeWithSubAgents(
     prompt: string,
-    subAgents: AgentInterface[],
+    subAgents: IAgent[],
     options: AskOptions = {},
     mainAgentModel?: string
   ): Promise<string> {
@@ -82,7 +82,7 @@ export class SubAgent implements IAgentModule {
    */
   async executeWithSubAgentsDetailed(
     prompt: string,
-    subAgents: AgentInterface[],
+    subAgents: IAgent[],
     options: AskOptions = {},
     mainAgentModel?: string
   ): Promise<SubAgentCoordinationResult> {
@@ -109,14 +109,14 @@ export class SubAgent implements IAgentModule {
   /**
    * Check if an agent has sub-agents
    */
-  hasSubAgents(agent: AgentInterface): boolean {
+  hasSubAgents(agent: IAgent): boolean {
     return !!(agent.config.subAgents && agent.config.subAgents.length > 0);
   }
   
   /**
    * Get sub-agents for an agent
    */
-  getSubAgents(agent: AgentInterface): AgentInterface[] {
+  getSubAgents(agent: IAgent): IAgent[] {
     return agent.config.subAgents || [];
   }
 }

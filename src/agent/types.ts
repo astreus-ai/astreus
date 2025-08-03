@@ -3,13 +3,7 @@
  */
 import { Logger } from '../logger/types';
 
-// Forward declaration for sub-agents - will be implemented by concrete Agent class
-export interface AgentInterface {
-  id: number;
-  name: string;
-  config: AgentConfig;
-  ask(prompt: string, options?: AskOptions): Promise<string>;
-}
+// Forward declaration for sub-agents - using IAgent interface
 
 export type Constructor<T = object> = new (...args: never[]) => T;
 
@@ -22,6 +16,7 @@ export interface IAgent {
   config: AgentConfig;
   logger: Logger;
   run(prompt: string, options?: RunOptions): Promise<string>;
+  ask(prompt: string, options?: AskOptions): Promise<string>;
   canUseTools(): boolean;
   hasMemory(): boolean;
   hasKnowledge(): boolean;
@@ -56,7 +51,7 @@ export interface AgentConfig {
   useTools?: boolean;
   contextCompression?: boolean; // Enable smart context management for long conversations
   debug?: boolean; // Enable debug logging
-  subAgents?: AgentInterface[]; // Sub-agents for this agent
+  subAgents?: IAgent[]; // Sub-agents for this agent
   createdAt?: Date;
   updatedAt?: Date;
 }
