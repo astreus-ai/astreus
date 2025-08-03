@@ -1,4 +1,5 @@
 import { IAgentModule, IAgent } from '../agent/types';
+import { SubAgentRunOptions } from '../sub-agent/types';
 import { Task as TaskType, TaskSearchOptions, TaskStatus, TaskRequest, TaskResponse } from './types';
 import { getDatabase } from '../database';
 import { getLLM, LLMResponse, LLMStreamChunk, LLMMessage, LLMMessageContent, LLMMessageContentPart } from '../llm';
@@ -303,10 +304,17 @@ export class Task implements IAgentModule {
       if (taskUseSubAgents && hasSubAgents && this.agent && 'ask' in this.agent && typeof this.agent.ask === 'function') {
         
         // Prepare sub-agent options from task metadata
-        const subAgentOptions: any = {
+        const delegation = task.metadata?.subAgentDelegation;
+        const coordination = task.metadata?.subAgentCoordination;
+        
+        const subAgentOptions: SubAgentRunOptions = {
           useSubAgents: true,
-          delegation: task.metadata?.subAgentDelegation || 'auto',
-          coordination: task.metadata?.subAgentCoordination || 'sequential'
+          delegation: (typeof delegation === 'string' && ['auto', 'manual', 'sequential'].includes(delegation)) 
+            ? delegation as 'auto' | 'manual' | 'sequential' 
+            : 'auto',
+          coordination: (typeof coordination === 'string' && ['parallel', 'sequential'].includes(coordination)) 
+            ? coordination as 'parallel' | 'sequential' 
+            : 'sequential'
         };
         
         // Add task assignment if specified
@@ -327,7 +335,7 @@ export class Task implements IAgentModule {
         if (options?.stream) {
           subAgentOptions.stream = options.stream;
         }
-        if (shouldUseTools !== undefined) {
+        if (typeof shouldUseTools === 'boolean') {
           subAgentOptions.useTools = shouldUseTools;
         }
         
