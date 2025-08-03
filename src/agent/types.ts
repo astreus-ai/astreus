@@ -3,6 +3,14 @@
  */
 import { Logger } from '../logger/types';
 
+// Forward declaration for sub-agents - will be implemented by concrete Agent class
+export interface AgentInterface {
+  id: number;
+  name: string;
+  config: AgentConfig;
+  ask(prompt: string, options?: AskOptions): Promise<string>;
+}
+
 export type Constructor<T = object> = new (...args: never[]) => T;
 
 /**
@@ -48,6 +56,7 @@ export interface AgentConfig {
   useTools?: boolean;
   contextCompression?: boolean; // Enable smart context management for long conversations
   debug?: boolean; // Enable debug logging
+  subAgents?: AgentInterface[]; // Sub-agents for this agent
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -73,6 +82,12 @@ export interface AskOptions {
   maxTokens?: number;
   stream?: boolean;
   useTools?: boolean;
+  onChunk?: (chunk: string) => void;
+  // Sub-agent specific options
+  useSubAgents?: boolean;
+  delegation?: 'auto' | 'manual' | 'sequential';
+  taskAssignment?: Record<number, string>; // agentId -> task mapping
+  coordination?: 'parallel' | 'sequential'; // How to coordinate sub-agent execution
   attachments?: Array<{
     type: 'image' | 'pdf' | 'text' | 'markdown' | 'code' | 'json' | 'file';
     path: string;
@@ -100,13 +115,13 @@ export interface AskOptions {
           description: string;
           required?: boolean;
         }>;
-        handler: (params: Record<string, string | number | boolean>) => Promise<{
+        handler: (params: Record<string, string | number | boolean | null>) => Promise<{
           success: boolean;
           data?: string | number | boolean | object;
           error?: string;
         }>;
       }>;
     };
-    config?: Record<string, string | number | boolean>;
+    config?: Record<string, string | number | boolean | null>;
   }>;
 }
