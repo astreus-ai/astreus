@@ -44,6 +44,8 @@ coverage/
 *.swp
 *.swo
 .DS_Store
+.claude
+.cursor
 
 # OS generated files
 .DS_Store

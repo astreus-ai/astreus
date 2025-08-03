@@ -4,6 +4,8 @@ node_modules
 
 .gitignore
 .vscode
+.claude/
+.cursor/
 
 tsconfig.json
 tsup.config.ts
