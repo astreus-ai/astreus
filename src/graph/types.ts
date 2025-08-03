@@ -32,6 +32,11 @@ export interface GraphNode {
   model?: string;
   stream?: boolean;
   
+  // Sub-agent delegation properties
+  useSubAgents?: boolean; // Whether this node should use sub-agents
+  subAgentDelegation?: 'auto' | 'manual' | 'sequential'; // Delegation strategy
+  subAgentCoordination?: 'parallel' | 'sequential'; // Coordination pattern
+  
   // Execution properties
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'scheduled';
   priority: number;
@@ -66,6 +71,10 @@ export interface GraphConfig {
   maxConcurrency?: number; // Max parallel execution
   timeout?: number; // Execution timeout in ms
   retryAttempts?: number;
+  // Sub-agent integration options
+  subAgentAware?: boolean; // Enable sub-agent awareness and optimization
+  optimizeSubAgentUsage?: boolean; // Optimize sub-agent delegation patterns
+  subAgentCoordination?: 'parallel' | 'sequential' | 'adaptive'; // Default sub-agent coordination
   metadata?: MetadataObject;
 }
 
@@ -121,6 +130,10 @@ export interface AddTaskNodeOptions extends AddNodeOptions {
   stream?: boolean; // Enable streaming for this task
   schedule?: string; // Simple schedule string (e.g., 'daily@07:00', 'weekly@monday@09:00')
   dependsOn?: string[]; // Node names that must complete first (alternative to dependencies)
+  // Sub-agent delegation options
+  useSubAgents?: boolean; // Force enable/disable sub-agent usage for this task
+  subAgentDelegation?: 'auto' | 'manual' | 'sequential'; // Sub-agent delegation strategy
+  subAgentCoordination?: 'parallel' | 'sequential'; // Sub-agent coordination pattern
 }
 
 

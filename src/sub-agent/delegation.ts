@@ -10,7 +10,7 @@ import { Logger } from '../logger/types';
  * Auto delegation strategy - uses LLM to intelligently analyze task and assign to sub-agents
  */
 export class AutoDelegationStrategy implements DelegationStrategy {
-  name: 'auto' = 'auto';
+  name = 'auto' as const;
   private logger?: Logger;
 
   constructor(logger?: Logger) {
@@ -127,7 +127,7 @@ Example response:
 
       // Convert to SubAgentTask format and validate
       const tasks: SubAgentTask[] = delegationResult.tasks
-        .filter((task: any) => {
+        .filter((task: { agentId: unknown; task: unknown; priority?: unknown }) => {
           // Validate each task
           const hasValidAgentId = typeof task.agentId === 'number' && 
             subAgents.some(agent => agent.id === task.agentId);
@@ -142,7 +142,7 @@ Example response:
           
           return hasValidAgentId && hasValidTask;
         })
-        .map((task: any) => ({
+        .map((task: { agentId: number; task: string; priority?: number }) => ({
           agentId: task.agentId,
           task: task.task.trim(),
           priority: typeof task.priority === 'number' ? task.priority : 5
@@ -170,9 +170,9 @@ Example response:
  * Manual delegation strategy - uses provided task assignments
  */
 export class ManualDelegationStrategy implements DelegationStrategy {
-  name: 'manual' = 'manual';
+  name = 'manual' as const;
 
-  async delegate(_prompt: string, subAgents: AgentInterface[], options?: SubAgentRunOptions, _model?: string): Promise<SubAgentTask[]> {
+  async delegate(_prompt: string, subAgents: AgentInterface[], options?: SubAgentRunOptions): Promise<SubAgentTask[]> {
     const tasks: SubAgentTask[] = [];
     
     if (!options?.taskAssignment) {
@@ -203,9 +203,9 @@ export class ManualDelegationStrategy implements DelegationStrategy {
  * Sequential delegation strategy - assigns tasks in order to available sub-agents
  */
 export class SequentialDelegationStrategy implements DelegationStrategy {
-  name: 'sequential' = 'sequential';
+  name = 'sequential' as const;
 
-  async delegate(prompt: string, subAgents: AgentInterface[], _options?: SubAgentRunOptions, _model?: string): Promise<SubAgentTask[]> {
+  async delegate(prompt: string, subAgents: AgentInterface[]): Promise<SubAgentTask[]> {
     const tasks: SubAgentTask[] = [];
     
     if (subAgents.length === 0) {
