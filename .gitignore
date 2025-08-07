@@ -59,3 +59,6 @@ Thumbs.db
 example.ts
 old/
 product/
+
+#Ignore cursor AI rules
+.cursor/rules/codacy.mdc
