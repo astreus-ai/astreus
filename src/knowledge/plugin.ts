@@ -1,4 +1,5 @@
 import { ToolDefinition, ToolResult, ToolContext, ToolParameterValue } from '../plugin/types';
+import { DEFAULT_KNOWLEDGE_CONFIG } from './defaults';
 
 interface KnowledgeResult {
   content: string;
@@ -42,8 +43,8 @@ export const knowledgeSearchTool: ToolDefinition = {
   ): Promise<ToolResult> => {
     // Extract and validate parameters
     const query = params.query as string;
-    const limit = (params.limit as number) || 5;
-    const threshold = (params.threshold as number) || 0.7;
+    const limit = (params.limit as number) || DEFAULT_KNOWLEDGE_CONFIG.searchLimit;
+    const threshold = (params.threshold as number) || DEFAULT_KNOWLEDGE_CONFIG.searchThreshold;
 
     // Get agent instance from context
     const agent = (context as KnowledgeToolContext)?.agent;

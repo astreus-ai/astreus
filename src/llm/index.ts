@@ -6,6 +6,7 @@ import { GeminiProvider } from './providers/gemini';
 import { OllamaProvider } from './providers/ollama';
 import { Logger } from '../logger/types';
 import { getLogger } from '../logger';
+import { DEFAULT_LLM_CONFIG } from './defaults';
 
 export class LLM {
   private providers: Map<string, LLMProvider> = new Map();
@@ -91,8 +92,8 @@ export class LLM {
     this.logger.debug('Generating LLM response', {
       model: options.model,
       messageCount: options.messages.length,
-      temperature: options.temperature || 0.7,
-      maxTokens: options.maxTokens || 2000,
+      temperature: options.temperature || DEFAULT_LLM_CONFIG.defaultTemperature,
+      maxTokens: options.maxTokens || DEFAULT_LLM_CONFIG.defaultMaxTokens,
       stream: !!options.stream,
       hasSystemPrompt: !!options.systemPrompt,
     });
@@ -122,8 +123,8 @@ export class LLM {
     this.logger.debug('Generating streaming LLM response', {
       model: options.model,
       messageCount: options.messages.length,
-      temperature: options.temperature || 0.7,
-      maxTokens: options.maxTokens || 2000,
+      temperature: options.temperature || DEFAULT_LLM_CONFIG.defaultTemperature,
+      maxTokens: options.maxTokens || DEFAULT_LLM_CONFIG.defaultMaxTokens,
       hasSystemPrompt: !!options.systemPrompt,
     });
 

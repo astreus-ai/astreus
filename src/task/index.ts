@@ -23,6 +23,8 @@ import { Logger } from '../logger/types';
 import { getEncryptionService } from '../database/encryption';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { DEFAULT_AGENT_CONFIG } from '../agent/defaults';
+import { DEFAULT_TASK_CONFIG } from './defaults';
 
 // Database row interfaces
 interface TaskDbRow {
@@ -35,19 +37,6 @@ interface TaskDbRow {
   created_at: string;
   updated_at: string;
   completedAt: string | null;
-}
-
-interface AgentDbRow {
-  id: number;
-  name: string;
-  systemPrompt?: string;
-  model?: string;
-  embeddingModel?: string;
-  visionModel?: string;
-  temperature?: number;
-  maxTokens?: number;
-  useTools?: boolean;
-  memory?: boolean;
 }
 
 export class Task implements IAgentModule {
@@ -281,20 +270,15 @@ export class Task implements IAgentModule {
     await this.updateTaskStatus(taskId, 'in_progress');
 
     try {
-      // Get agent info for system prompt
-      const agentData: AgentDbRow | undefined = await this.knex!('agents')
-        .where({ id: this.agent.id })
-        .first();
-
       // Check if tools should be used for this specific task
       const taskUseTools = task.metadata?.useTools;
-      const agentUseTools = agentData?.useTools;
+      const agentUseTools = this.agent.config.useTools;
       const shouldUseTools = taskUseTools !== undefined ? taskUseTools : agentUseTools !== false;
 
       let llmResponse: LLMResponse;
 
       // Add memory context if agent has memory enabled
-      const agentHasMemory = agentData?.memory || false;
+      const agentHasMemory = this.agent.config.memory || false;
 
       // Add task-level MCP servers if specified
       if (
@@ -387,7 +371,7 @@ export class Task implements IAgentModule {
 
         llmResponse = {
           content: response,
-          model: options?.model || agentData?.model || 'gpt-4o',
+          model: options?.model || this.agent.config.model || DEFAULT_AGENT_CONFIG.model,
         };
       } else if (
         shouldUseTools &&
@@ -431,7 +415,8 @@ export class Task implements IAgentModule {
 
         llmResponse = {
           content: result.response,
-          model: result.model || options?.model || agentData?.model || 'gpt-4o',
+          model:
+            result.model || options?.model || this.agent.config.model || DEFAULT_AGENT_CONFIG.model,
           usage: result.usage,
           toolCalls: result.toolCalls,
         };
@@ -537,7 +522,7 @@ export class Task implements IAgentModule {
         const modelToUse =
           hasImages && this.agent.config.visionModel
             ? this.agent.config.visionModel
-            : options?.model || this.agent.config.model || 'gpt-4o';
+            : options?.model || this.agent.config.model || DEFAULT_AGENT_CONFIG.model;
 
         this.logger.debug('Model selection for task execution', {
           hasImages: !!hasImages,
@@ -551,9 +536,9 @@ export class Task implements IAgentModule {
         const llmOptions = {
           model: modelToUse,
           messages: llmMessages,
-          temperature: agentData?.temperature || 0.7,
-          maxTokens: agentData?.maxTokens || 4096,
-          systemPrompt: agentData?.systemPrompt,
+          temperature: this.agent.config.temperature || DEFAULT_AGENT_CONFIG.temperature,
+          maxTokens: this.agent.config.maxTokens || DEFAULT_AGENT_CONFIG.maxTokens,
+          systemPrompt: this.agent.config.systemPrompt,
         };
 
         if (options?.stream) {
@@ -568,7 +553,11 @@ export class Task implements IAgentModule {
 
           llmResponse = {
             content: fullContent,
-            model: chunks[0]?.model || options?.model || agentData?.model || 'gpt-4o',
+            model:
+              chunks[0]?.model ||
+              options?.model ||
+              this.agent.config.model ||
+              DEFAULT_AGENT_CONFIG.model,
           };
         } else {
           // Generate response using LLM
@@ -649,11 +638,11 @@ export class Task implements IAgentModule {
     this.logger.info('Listing tasks');
 
     this.logger.debug('Listing tasks with options', {
-      limit: options.limit || 100,
-      offset: options.offset || 0,
-      status: options.status || 'all',
-      orderBy: options.orderBy || 'createdAt',
-      order: options.order || 'desc',
+      limit: options.limit || DEFAULT_TASK_CONFIG.searchLimit,
+      offset: options.offset || DEFAULT_TASK_CONFIG.searchOffset,
+      status: options.status || DEFAULT_TASK_CONFIG.logStatus,
+      orderBy: options.orderBy || DEFAULT_TASK_CONFIG.searchOrderBy,
+      order: options.order || DEFAULT_TASK_CONFIG.searchOrder,
       agentId: this.agent.id,
     });
 
@@ -796,7 +785,7 @@ function getMimeType(extension: string): string {
     '.webp': 'image/webp',
   };
 
-  return mimeTypes[extension.toLowerCase()] || 'image/jpeg';
+  return mimeTypes[extension.toLowerCase()] || DEFAULT_TASK_CONFIG.defaultMimeType;
 }
 
 // Export types

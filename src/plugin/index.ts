@@ -11,6 +11,7 @@ import {
   ToolParameterValue,
 } from './types';
 import { Logger } from '../logger/types';
+import { DEFAULT_PLUGIN_CONFIG } from './defaults';
 
 // Type for LLM function calling tool schema property
 interface LLMToolProperty {
@@ -223,7 +224,7 @@ export class Plugin implements IAgentModule, IPluginManager {
     this.logger.debug('Plugin lookup', {
       pluginName: name,
       found: !!plugin,
-      version: plugin?.version || 'unknown',
+      version: plugin?.version || DEFAULT_PLUGIN_CONFIG.defaultVersion,
     });
 
     return plugin;
@@ -246,7 +247,7 @@ export class Plugin implements IAgentModule, IPluginManager {
     this.logger.debug('Tool lookup', {
       toolName: name,
       found: !!tool,
-      description: tool?.description || 'none',
+      description: tool?.description || DEFAULT_PLUGIN_CONFIG.defaultDescription,
     });
 
     return tool;
@@ -411,7 +412,7 @@ export class Plugin implements IAgentModule, IPluginManager {
 
     if (!plugin.name || !plugin.version) {
       this.logger.debug('Plugin validation failed - missing name or version', {
-        pluginName: plugin.name || '[missing]',
+        pluginName: plugin.name || DEFAULT_PLUGIN_CONFIG.missingName,
         hasName: !!plugin.name,
         hasVersion: !!plugin.version,
       });
@@ -440,7 +441,7 @@ export class Plugin implements IAgentModule, IPluginManager {
       if (!tool.name || !tool.description || !tool.handler) {
         this.logger.debug('Tool validation failed', {
           pluginName: plugin.name,
-          toolName: tool.name || '[missing]',
+          toolName: tool.name || DEFAULT_PLUGIN_CONFIG.missingName,
           hasName: !!tool.name,
           hasDescription: !!tool.description,
           hasHandler: !!tool.handler,
