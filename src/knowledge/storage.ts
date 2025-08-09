@@ -295,12 +295,38 @@ export class KnowledgeDatabase {
         ON knowledge_chunks (document_id)
       `);
 
-      await client.query(`
-        CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx 
-        ON knowledge_chunks 
-        USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100)
-      `);
+      // Try HNSW index first (better for high dimensions), fallback to IVFFlat
+      try {
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx 
+          ON knowledge_chunks 
+          USING hnsw (embedding vector_cosine_ops)
+          WITH (m = 16, ef_construction = 64)
+        `);
+      } catch (hnswError) {
+        this.logger.warn('HNSW index creation failed, falling back to IVFFlat');
+        this.logger.debug('HNSW error details', {
+          error: hnswError instanceof Error ? hnswError.message : String(hnswError),
+        });
+
+        // Fallback to IVFFlat with dimension check
+        if (this.embeddingDimensions && this.embeddingDimensions > 2000) {
+          this.logger.error(
+            `Cannot create IVFFlat index: embedding dimensions (${this.embeddingDimensions}) exceed 2000 limit`
+          );
+          throw new Error(
+            `Embedding dimensions (${this.embeddingDimensions}) exceed IVFFlat limit of 2000. ` +
+              'Please use a smaller embedding model or upgrade to PostgreSQL with HNSW support (pgvector 0.5.0+)'
+          );
+        }
+
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx 
+          ON knowledge_chunks 
+          USING ivfflat (embedding vector_cosine_ops)
+          WITH (lists = 100)
+        `);
+      }
 
       // Knowledge database initialized successfully
     } catch (error) {

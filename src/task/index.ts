@@ -473,7 +473,10 @@ export class Task implements IAgentModule {
             if (imageAttachments.length > 0) {
               // Use visionModel if specified, otherwise fall back to main model
               const visionModel =
-                agentData?.visionModel || options?.model || agentData?.model || 'gpt-4o';
+                this.agent.config.visionModel ||
+                options?.model ||
+                this.agent.config.model ||
+                'gpt-4o';
               const visionCapableModels = [
                 'gpt-4o',
                 'gpt-4o-mini',
@@ -532,14 +535,14 @@ export class Task implements IAgentModule {
             (att: { type: string }) => att.type === 'image'
           );
         const modelToUse =
-          hasImages && agentData?.visionModel
-            ? agentData.visionModel
-            : options?.model || agentData?.model || 'gpt-4o';
+          hasImages && this.agent.config.visionModel
+            ? this.agent.config.visionModel
+            : options?.model || this.agent.config.model || 'gpt-4o';
 
         this.logger.debug('Model selection for task execution', {
           hasImages: !!hasImages,
-          agentVisionModel: agentData?.visionModel || 'none',
-          agentMainModel: agentData?.model || 'none',
+          agentVisionModel: this.agent.config.visionModel || 'none',
+          agentMainModel: this.agent.config.model || 'none',
           optionsModel: options?.model || 'none',
           modelToUse: modelToUse,
           taskId: taskId,
