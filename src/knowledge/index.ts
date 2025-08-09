@@ -8,7 +8,6 @@ import { MetadataObject } from '../types';
 import { knowledgeTools } from './plugin';
 import { ToolDefinition } from '../plugin/types';
 import { Logger } from '../logger/types';
-import * as pdfjs from 'pdfjs-dist';
 import type { TextItem, TextMarkedContent } from 'pdfjs-dist/types/src/display/api';
 import { getFileSize } from '../database/utils';
 import * as fs from 'fs';
@@ -591,6 +590,9 @@ export class Knowledge implements IAgentModule {
   private async readPdfFile(filePath: string): Promise<string> {
     try {
       const pdfBuffer = await fs.promises.readFile(filePath);
+
+      // Dynamic import for ES Module compatibility
+      const pdfjs = await import('pdfjs-dist');
 
       // Load PDF document
       const loadingTask = pdfjs.getDocument({
