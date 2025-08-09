@@ -3,6 +3,7 @@ import { Memory as MemoryType, MemorySearchOptions } from './types';
 import { getDatabase } from '../database';
 import { MetadataObject } from '../types';
 import { Logger } from '../logger/types';
+import { DEFAULT_MEMORY_CONFIG } from './defaults';
 import { Knex } from 'knex';
 import { getEncryptionService } from '../database/encryption';
 import { getLLM } from '../llm';
@@ -109,10 +110,7 @@ export class Memory implements IAgentModule {
       // Import knowledge system to access embedding generation
 
       // Check if agent has knowledge/embedding capabilities
-      if (
-        !this.agent ||
-        typeof (this.agent as { embeddingModel?: string }).embeddingModel !== 'string'
-      ) {
+      if (!this.agent || typeof this.agent.config.embeddingModel !== 'string') {
         this.logger.debug('No embedding model configured for agent, skipping embedding generation');
         return null;
       }
@@ -120,15 +118,11 @@ export class Memory implements IAgentModule {
       // Get embedding provider from knowledge system
       // This is a bit indirect but reuses existing embedding infrastructure
       const embeddingProvider = {
-        name:
-          (this.agent as { embeddingModel?: string }).embeddingModel || 'text-embedding-ada-002',
+        name: this.agent.config.embeddingModel || DEFAULT_MEMORY_CONFIG.defaultEmbeddingModel,
         generateEmbedding: async (text: string) => {
           // Import and use the same embedding logic as knowledge system
           const llm = getLLM(this.logger);
-          const result = await llm.generateEmbedding(
-            text,
-            (this.agent as { embeddingModel?: string }).embeddingModel
-          );
+          const result = await llm.generateEmbedding(text, this.agent.config.embeddingModel);
           return result;
         },
       };

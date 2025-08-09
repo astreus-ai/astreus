@@ -1,6 +1,6 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.5.13",
+  "version": "0.5.15",
   "description": "Open-source AI agent framework for building autonomous systems that solve real-world tasks effectively.",
   "author": "Berke Kiran",
   "license": "MIT",

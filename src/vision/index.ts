@@ -6,6 +6,7 @@ import { getLogger } from '../logger';
 import { getLLMProvider } from '../llm';
 import { VisionAnalysisOptions } from '../llm/types';
 import * as path from 'path';
+import { DEFAULT_VISION_CONFIG } from './defaults';
 
 export interface VisionConfig {
   provider?: 'openai' | 'claude' | 'gemini' | 'ollama';
@@ -97,7 +98,7 @@ export class Vision implements IAgentModule {
       // Use dedicated vision API key if available
       return {
         provider: 'openai',
-        model: 'gpt-4o-mini',
+        model: DEFAULT_VISION_CONFIG.defaultModel,
         apiKey: process.env.OPENAI_VISION_API_KEY,
       };
     }
@@ -106,7 +107,7 @@ export class Vision implements IAgentModule {
     if (process.env.OPENAI_API_KEY && !process.env.OPENAI_BASE_URL) {
       return {
         provider: 'openai',
-        model: 'gpt-4o-mini',
+        model: DEFAULT_VISION_CONFIG.defaultModel,
         apiKey: process.env.OPENAI_API_KEY,
       };
     }
@@ -130,8 +131,8 @@ export class Vision implements IAgentModule {
     // Default to Ollama (local)
     return {
       provider: 'ollama',
-      model: 'llava',
-      baseURL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+      model: DEFAULT_VISION_CONFIG.fallbackModel,
+      baseURL: process.env.OLLAMA_BASE_URL || DEFAULT_VISION_CONFIG.ollamaBaseURL,
     };
   }
 

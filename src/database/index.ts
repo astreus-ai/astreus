@@ -1,6 +1,7 @@
 import knex, { Knex } from 'knex';
 import { DatabaseConfig } from './types';
 import { AgentConfig } from '../agent/types';
+import { DEFAULT_DATABASE_CONFIG } from './defaults';
 import { createKnexConfig } from './knex';
 import { Logger } from '../logger/types';
 import { getLogger } from '../logger';
@@ -382,8 +383,8 @@ export class Database {
       model: data.model || 'default',
       embeddingModel: data.embeddingModel || 'none',
       visionModel: data.visionModel || 'none',
-      temperature: data.temperature || 0.7,
-      maxTokens: data.maxTokens || 2000,
+      temperature: data.temperature || DEFAULT_DATABASE_CONFIG.defaultTemperature,
+      maxTokens: data.maxTokens || DEFAULT_DATABASE_CONFIG.defaultMaxTokens,
       memory: !!data.memory,
       knowledge: !!data.knowledge,
       vision: !!data.vision,

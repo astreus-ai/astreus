@@ -1,4 +1,5 @@
 import { AgentConfig, IAgent, IAgentWithModules, RunOptions, AskOptions } from './types';
+import { DEFAULT_AGENT_CONFIG } from './defaults';
 import { Task as TaskType, TaskRequest, TaskSearchOptions, TaskResponse } from '../task/types';
 import { Memory as MemoryType, MemorySearchOptions } from '../memory/types';
 import { MCPServerDefinition, MCPValue, MCPTool } from '../mcp/types';
@@ -84,19 +85,19 @@ export abstract class BaseAgent implements IAgent {
 
   // Feature checks
   canUseTools(): boolean {
-    return this.data.useTools !== false;
+    return this.config.useTools !== false;
   }
 
   hasMemory(): boolean {
-    return this.data.memory === true;
+    return this.config.memory === true;
   }
 
   hasKnowledge(): boolean {
-    return this.data.knowledge === true;
+    return this.config.knowledge === true;
   }
 
   hasVision(): boolean {
-    return this.data.vision === true;
+    return this.config.vision === true;
   }
 
   // Instance methods
@@ -153,19 +154,19 @@ export abstract class BaseAgent implements IAgent {
   }
 
   getModel(): string {
-    return this.data.model || 'gpt-4';
+    return this.config.model || DEFAULT_AGENT_CONFIG.model;
   }
 
   getTemperature(): number {
-    return this.data.temperature || 0.7;
+    return this.config.temperature || DEFAULT_AGENT_CONFIG.temperature;
   }
 
   getMaxTokens(): number {
-    return this.data.maxTokens || 2000;
+    return this.config.maxTokens || DEFAULT_AGENT_CONFIG.maxTokens;
   }
 
   getSystemPrompt(): string | null {
-    return this.data.systemPrompt || null;
+    return this.config.systemPrompt || null;
   }
 
   /**
@@ -699,16 +700,16 @@ export class Agent extends BaseAgent implements IAgentWithModules {
    */
   async ask(prompt: string, options?: AskOptions): Promise<string> {
     // Check if sub-agents should be used
-    if (options?.useSubAgents && this.data.subAgents && this.data.subAgents.length > 0) {
+    if (options?.useSubAgents && this.config.subAgents && this.config.subAgents.length > 0) {
       this.logger.info(`Using sub-agents for task delegation`, {
-        subAgentCount: this.data.subAgents.length,
+        subAgentCount: this.config.subAgents.length,
         delegation: options.delegation || 'auto',
       });
 
       try {
         const result = await this.modules.subAgent!.executeWithSubAgents(
           prompt,
-          this.data.subAgents,
+          this.config.subAgents,
           options,
           this.getModel() // Pass main agent's model for delegation
         );

@@ -4,6 +4,7 @@
 import { IAgent } from '../agent/types';
 import { SubAgentTask, DelegationStrategy, SubAgentRunOptions } from './types';
 import { getLLM } from '../llm';
+import { DEFAULT_SUBAGENT_CONFIG } from './defaults';
 import { Logger } from '../logger/types';
 
 /**
@@ -116,7 +117,7 @@ Example response:
 }`;
 
     const response = await llm.generateResponse({
-      model: model || 'gpt-4o-mini', // Use provided model or fallback to fast model
+      model: model || DEFAULT_SUBAGENT_CONFIG.fallbackModel, // Use provided model or fallback to fast model
       messages: [{ role: 'user', content: delegationPrompt }],
       temperature: 0.3, // Low temperature for consistent delegation
       maxTokens: 1000,

@@ -8,6 +8,7 @@ import { MetadataObject } from '../types';
 import { knowledgeTools } from './plugin';
 import { ToolDefinition } from '../plugin/types';
 import { Logger } from '../logger/types';
+import { DEFAULT_KNOWLEDGE_CONFIG } from './defaults';
 import type { TextItem, TextMarkedContent } from 'pdfjs-dist/types/src/display/api';
 import { getFileSize } from '../database/utils';
 import * as fs from 'fs';
@@ -40,10 +41,11 @@ export class Knowledge implements IAgentModule {
     config?: KnowledgeConfig
   ) {
     this.config = config || {};
-    this.chunkSize = config?.chunkSize || 1000;
-    this.chunkOverlap = config?.chunkOverlap || 200;
+    this.chunkSize = config?.chunkSize || DEFAULT_KNOWLEDGE_CONFIG.chunkSize;
+    this.chunkOverlap = config?.chunkOverlap || DEFAULT_KNOWLEDGE_CONFIG.chunkOverlap;
     this.logger = agent.logger;
-    this.embeddingModel = '';
+    // Initialize embedding model from agent config or config parameter
+    this.embeddingModel = this.agent.config.embeddingModel || config?.embeddingModel || '';
   }
 
   async initialize(): Promise<void> {
@@ -80,8 +82,13 @@ export class Knowledge implements IAgentModule {
 
   private async initializeEmbeddingProvider(): Promise<void> {
     // Use agent's embeddingModel if specified
+    this.logger.debug(
+      `Initializing embedding provider. Config model: ${this.agent.config.embeddingModel || 'none'}`
+    );
+
     if (this.agent.config.embeddingModel) {
       this.embeddingModel = this.agent.config.embeddingModel;
+      this.logger.info(`Using specified embedding model: ${this.embeddingModel}`);
       // Auto-detect provider based on model
       const providerConfig = this.detectProviderFromModel(this.embeddingModel);
 
@@ -96,6 +103,7 @@ export class Knowledge implements IAgentModule {
       this.embeddingProvider = mainProvider.getEmbeddingProvider?.() || mainProvider;
     } else {
       // Auto-detect based on available API keys and config
+      this.logger.warn('No embeddingModel specified, using auto-detection');
       const providerConfig = this.autoDetectEmbeddingProvider();
 
       // Create provider with dedicated embedding configuration - NEVER use main OPENAI_BASE_URL
@@ -294,7 +302,9 @@ export class Knowledge implements IAgentModule {
     const startTime = Date.now();
 
     // User-facing info log
-    this.logger.info(`Creating knowledge document: ${title || 'Untitled Document'}`);
+    this.logger.info(
+      `Creating knowledge document: ${title || DEFAULT_KNOWLEDGE_CONFIG.defaultTitle}`
+    );
 
     // Detailed debug log with all data
     this.logger.debug('Creating knowledge document', {
