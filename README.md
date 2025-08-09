@@ -3,6 +3,7 @@
 Open-source AI agent framework for building autonomous systems that solve real-world tasks effectively.
 
 [![npm version](https://badge.fury.io/js/@astreus-ai%2Fastreus.svg)](https://badge.fury.io/js/@astreus-ai%2Fastreus)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org/)
 [![code style: prettier](https://img.shields.io/badge/code_style-prettier-ff69b4.svg)](https://github.com/prettier/prettier)
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
