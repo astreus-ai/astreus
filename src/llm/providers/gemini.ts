@@ -1,4 +1,14 @@
-import { LLMProvider, LLMRequestOptions, LLMResponse, LLMStreamChunk, LLMConfig, VisionAnalysisOptions, VisionAnalysisResult, EmbeddingResult, isStringContent } from '../types';
+import {
+  LLMProvider,
+  LLMRequestOptions,
+  LLMResponse,
+  LLMStreamChunk,
+  LLMConfig,
+  VisionAnalysisOptions,
+  VisionAnalysisResult,
+  EmbeddingResult,
+  isStringContent,
+} from '../types';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getLogger } from '../../logger';
 import { Logger } from '../../logger/types';
@@ -30,10 +40,10 @@ export class GeminiProvider implements LLMProvider {
 
   constructor(config?: LLMConfig) {
     const apiKey = config?.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-    
+
     // Use provided logger or fallback to global logger
     this.logger = config?.logger || getLogger();
-    
+
     if (!apiKey) {
       throw new Error('Gemini API key is required. Set GEMINI_API_KEY environment variable.');
     }
@@ -46,7 +56,7 @@ export class GeminiProvider implements LLMProvider {
       hasVisionApiKey: !!process.env.GEMINI_VISION_API_KEY,
       hasCustomBaseUrl: !!config?.baseUrl,
       supportsEmbeddings: true,
-      supportsVision: true
+      supportsVision: true,
     });
 
     // Main client for chat completions
@@ -74,7 +84,7 @@ export class GeminiProvider implements LLMProvider {
       'gemini-1.5-pro',
       'gemini-1.5-flash',
       'gemini-1.5-flash-8b',
-      'gemini-pro'
+      'gemini-pro',
     ];
   }
 
@@ -83,114 +93,126 @@ export class GeminiProvider implements LLMProvider {
       'gemini-1.5-pro',
       'gemini-1.5-flash',
       'gemini-1.0-pro-vision-latest',
-      'gemini-pro-vision'
+      'gemini-pro-vision',
     ];
   }
 
   getEmbeddingModels(): string[] {
-    return [
-      'text-embedding-004',
-      'embedding-001'
-    ];
+    return ['text-embedding-004', 'embedding-001'];
   }
 
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const { systemInstruction, contents } = this.prepareMessages(options);
-    
+
     const model = this.client.getGenerativeModel({
       model: options.model,
-      ...(systemInstruction && { systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] } }),
+      ...(systemInstruction && {
+        systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] },
+      }),
       generationConfig: {
         temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 4096
-      }
+        maxOutputTokens: options.maxTokens ?? 4096,
+      },
     });
 
     const result = await model.generateContent({
       contents,
       generationConfig: {
         temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 4096
-      }
+        maxOutputTokens: options.maxTokens ?? 4096,
+      },
     });
-    
+
     const response = result.response;
     const text = response.text() || '';
-    
+
     return {
       content: text,
       model: options.model,
       usage: {
         promptTokens: 0, // Gemini doesn't provide detailed usage in basic response
         completionTokens: 0,
-        totalTokens: 0
-      }
+        totalTokens: 0,
+      },
     };
   }
 
-  async* generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
+  async *generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const { systemInstruction, contents } = this.prepareMessages(options);
-    
+
     const model = this.client.getGenerativeModel({
       model: options.model,
-      ...(systemInstruction && { systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] } }),
+      ...(systemInstruction && {
+        systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] },
+      }),
       generationConfig: {
         temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 4096
-      }
+        maxOutputTokens: options.maxTokens ?? 4096,
+      },
     });
 
     const result = await model.generateContentStream({
       contents,
       generationConfig: {
         temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 4096
-      }
+        maxOutputTokens: options.maxTokens ?? 4096,
+      },
     });
 
     try {
       for await (const chunk of result.stream) {
         const text = chunk.text();
-        
+
         if (text) {
           yield { content: text, done: false, model: options.model };
         }
       }
-      
+
       yield { content: '', done: true, model: options.model };
     } catch (error) {
-      throw new Error(`Gemini streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Gemini streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
-  private prepareMessages(options: LLMRequestOptions): { systemInstruction?: string; contents: Array<{ role: string; parts: Array<{ text: string }> }> } {
+  private prepareMessages(options: LLMRequestOptions): {
+    systemInstruction?: string;
+    contents: Array<{ role: string; parts: Array<{ text: string }> }>;
+  } {
     let systemInstruction = options.systemPrompt;
-    const messages = options.messages.filter(m => m.role !== 'system');
-    
+    const messages = options.messages.filter((m) => m.role !== 'system');
+
     // Find system message if no explicit system prompt
     if (!systemInstruction) {
-      const systemMessage = options.messages.find(m => m.role === 'system');
+      const systemMessage = options.messages.find((m) => m.role === 'system');
       if (systemMessage) {
         systemInstruction = isStringContent(systemMessage.content) ? systemMessage.content : '';
       }
     }
-    
+
     // Convert messages to Gemini format
-    const contents = messages.map(msg => ({
+    const contents = messages.map((msg) => ({
       role: msg.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: isStringContent(msg.content) ? msg.content : 'Multi-modal content not fully supported by Gemini provider' }]
+      parts: [
+        {
+          text: isStringContent(msg.content)
+            ? msg.content
+            : 'Multi-modal content not fully supported by Gemini provider',
+        },
+      ],
     }));
-    
+
     return { systemInstruction, contents };
   }
 
   async generateEmbedding(text: string, model?: string): Promise<EmbeddingResult> {
     const embeddingModel = model || this.getEmbeddingModels()[0]; // Use provided model or fallback to first available
-    
+
     this.logger.info(`Generating embedding with model: ${embeddingModel}`);
     this.logger.debug('Gemini embedding request', {
       model: embeddingModel,
-      textLength: text.length
+      textLength: text.length,
     });
 
     try {
@@ -202,14 +224,14 @@ export class GeminiProvider implements LLMProvider {
         model: embeddingModel,
         usage: {
           promptTokens: 0, // Gemini doesn't provide detailed usage for embeddings
-          totalTokens: 0
-        }
+          totalTokens: 0,
+        },
       };
 
       this.logger.info('Embedding generated successfully');
       this.logger.debug('Gemini embedding result', {
         model: embeddingModel,
-        dimensions: embeddingResult.embedding.length
+        dimensions: embeddingResult.embedding.length,
       });
 
       return embeddingResult;
@@ -219,21 +241,24 @@ export class GeminiProvider implements LLMProvider {
       this.logger.debug('Gemini embedding error', {
         model: embeddingModel,
         error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack
+        hasStack: error instanceof Error && !!error.stack,
       });
       throw new Error(`Gemini embedding generation failed: ${errorMessage}`);
     }
   }
 
-  async analyzeImage(imagePath: string, options: VisionAnalysisOptions = {}): Promise<VisionAnalysisResult> {
+  async analyzeImage(
+    imagePath: string,
+    options: VisionAnalysisOptions = {}
+  ): Promise<VisionAnalysisResult> {
     const fileName = path.basename(imagePath);
-    
+
     this.logger.info(`Analyzing image: ${fileName}`);
     this.logger.debug('Gemini image analysis started', {
       imagePath,
       fileName,
       hasPrompt: !!options.prompt,
-      maxTokens: options.maxTokens || 1000
+      maxTokens: options.maxTokens || 1000,
     });
 
     // Validate image file
@@ -246,7 +271,9 @@ export class GeminiProvider implements LLMProvider {
     const supportedFormats = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
     if (!supportedFormats.includes(ext)) {
       this.logger.error(`Unsupported image format: ${ext}`);
-      throw new Error(`Unsupported image format: ${ext}. Supported: ${supportedFormats.join(', ')}`);
+      throw new Error(
+        `Unsupported image format: ${ext}. Supported: ${supportedFormats.join(', ')}`
+      );
     }
 
     // Read and encode image
@@ -257,15 +284,18 @@ export class GeminiProvider implements LLMProvider {
     return this.analyzeImageFromBase64(base64Image, { ...options, mimeType });
   }
 
-  async analyzeImageFromBase64(base64Data: string, options: VisionAnalysisOptions & { mimeType?: string } = {}): Promise<VisionAnalysisResult> {
+  async analyzeImageFromBase64(
+    base64Data: string,
+    options: VisionAnalysisOptions & { mimeType?: string } = {}
+  ): Promise<VisionAnalysisResult> {
     const startTime = Date.now();
-    
+
     this.logger.info('Analyzing base64 image');
     this.logger.debug('Gemini base64 image analysis started', {
       base64Length: base64Data.length,
       hasPrompt: !!options.prompt,
       maxTokens: options.maxTokens || 1000,
-      mimeType: options.mimeType || 'image/jpeg'
+      mimeType: options.mimeType || 'image/jpeg',
     });
 
     try {
@@ -276,12 +306,12 @@ export class GeminiProvider implements LLMProvider {
       // Remove data URL prefix if present
       const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
 
-      const genModel = this.visionClient.getGenerativeModel({ 
+      const genModel = this.visionClient.getGenerativeModel({
         model,
         generationConfig: {
           maxOutputTokens: options.maxTokens || 1000,
           temperature: options.temperature || 0.1,
-        }
+        },
       });
 
       const imagePart = {
@@ -304,12 +334,15 @@ export class GeminiProvider implements LLMProvider {
           model,
           provider: this.name,
           processingTime,
-          tokenUsage: hasUsageMetadata(response) && response.usageMetadata ? {
-            promptTokens: response.usageMetadata.promptTokenCount || 0,
-            completionTokens: response.usageMetadata.candidatesTokenCount || 0,
-            totalTokens: response.usageMetadata.totalTokenCount || 0,
-          } : undefined,
-        }
+          tokenUsage:
+            hasUsageMetadata(response) && response.usageMetadata
+              ? {
+                  promptTokens: response.usageMetadata.promptTokenCount || 0,
+                  completionTokens: response.usageMetadata.candidatesTokenCount || 0,
+                  totalTokens: response.usageMetadata.totalTokenCount || 0,
+                }
+              : undefined,
+        },
       };
 
       this.logger.info('Image analysis completed');
@@ -317,9 +350,13 @@ export class GeminiProvider implements LLMProvider {
         model,
         processingTime,
         contentLength: content.length,
-        promptTokens: hasUsageMetadata(response) ? (response.usageMetadata?.promptTokenCount || 0) : 0,
-        candidatesTokens: hasUsageMetadata(response) ? (response.usageMetadata?.candidatesTokenCount || 0) : 0,
-        totalTokens: hasUsageMetadata(response) ? (response.usageMetadata?.totalTokenCount || 0) : 0
+        promptTokens: hasUsageMetadata(response)
+          ? response.usageMetadata?.promptTokenCount || 0
+          : 0,
+        candidatesTokens: hasUsageMetadata(response)
+          ? response.usageMetadata?.candidatesTokenCount || 0
+          : 0,
+        totalTokens: hasUsageMetadata(response) ? response.usageMetadata?.totalTokenCount || 0 : 0,
       });
 
       return analysisResult;
@@ -331,7 +368,7 @@ export class GeminiProvider implements LLMProvider {
       this.logger.debug('Gemini image analysis error', {
         processingTime,
         error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack
+        hasStack: error instanceof Error && !!error.stack,
       });
 
       throw new Error(`Gemini vision analysis failed: ${errorMessage}`);
@@ -344,9 +381,9 @@ export class GeminiProvider implements LLMProvider {
       '.jpeg': 'image/jpeg',
       '.png': 'image/png',
       '.gif': 'image/gif',
-      '.webp': 'image/webp'
+      '.webp': 'image/webp',
     };
-    
+
     return mimeTypes[extension.toLowerCase()] || 'image/jpeg';
   }
 
@@ -360,10 +397,10 @@ export class GeminiProvider implements LLMProvider {
       getEmbeddingModels: this.getEmbeddingModels.bind(this),
       generateEmbedding: async (text: string, model?: string) => {
         const embeddingModel = model || this.getEmbeddingModels()[0]; // Use provided model or fallback to first available
-        
+
         this.logger.debug('Using dedicated embedding client', {
           model: embeddingModel,
-          textLength: text.length
+          textLength: text.length,
         });
 
         const genModel = this.embeddingClient.getGenerativeModel({ model: embeddingModel });
@@ -374,10 +411,10 @@ export class GeminiProvider implements LLMProvider {
           model: embeddingModel,
           usage: {
             promptTokens: 0,
-            totalTokens: 0
-          }
+            totalTokens: 0,
+          },
         };
-      }
+      },
     };
   }
 
@@ -394,22 +431,30 @@ export class GeminiProvider implements LLMProvider {
         const base64Image = imageBuffer.toString('base64');
         const ext = path.extname(imagePath).toLowerCase();
         const mimeType = this.getMimeType(ext);
-        
-        return this.analyzeImageFromBase64WithClient(base64Image, { ...options, mimeType }, this.visionClient);
+
+        return this.analyzeImageFromBase64WithClient(
+          base64Image,
+          { ...options, mimeType },
+          this.visionClient
+        );
       },
       analyzeImageFromBase64: async (base64Data: string, options?: VisionAnalysisOptions) => {
         return this.analyzeImageFromBase64WithClient(base64Data, options, this.visionClient);
-      }
+      },
     };
   }
 
-  private async analyzeImageFromBase64WithClient(base64Data: string, options: VisionAnalysisOptions & { mimeType?: string } = {}, client: GoogleGenerativeAI): Promise<VisionAnalysisResult> {
+  private async analyzeImageFromBase64WithClient(
+    base64Data: string,
+    options: VisionAnalysisOptions & { mimeType?: string } = {},
+    client: GoogleGenerativeAI
+  ): Promise<VisionAnalysisResult> {
     const startTime = Date.now();
-    
+
     this.logger.debug('Using dedicated vision client', {
       base64Length: base64Data.length,
       hasPrompt: !!options.prompt,
-      mimeType: options.mimeType || 'image/jpeg'
+      mimeType: options.mimeType || 'image/jpeg',
     });
 
     try {
@@ -420,12 +465,12 @@ export class GeminiProvider implements LLMProvider {
       // Remove data URL prefix if present
       const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
 
-      const genModel = client.getGenerativeModel({ 
+      const genModel = client.getGenerativeModel({
         model,
         generationConfig: {
           maxOutputTokens: options.maxTokens || 1000,
           temperature: options.temperature || 0.1,
-        }
+        },
       });
 
       const imagePart = {
@@ -448,12 +493,15 @@ export class GeminiProvider implements LLMProvider {
           model,
           provider: this.name,
           processingTime,
-          tokenUsage: hasUsageMetadata(response) && response.usageMetadata ? {
-            promptTokens: response.usageMetadata.promptTokenCount || 0,
-            completionTokens: response.usageMetadata.candidatesTokenCount || 0,
-            totalTokens: response.usageMetadata.totalTokenCount || 0,
-          } : undefined,
-        }
+          tokenUsage:
+            hasUsageMetadata(response) && response.usageMetadata
+              ? {
+                  promptTokens: response.usageMetadata.promptTokenCount || 0,
+                  completionTokens: response.usageMetadata.candidatesTokenCount || 0,
+                  totalTokens: response.usageMetadata.totalTokenCount || 0,
+                }
+              : undefined,
+        },
       };
     } catch (error) {
       const processingTime = Date.now() - startTime;
@@ -463,7 +511,7 @@ export class GeminiProvider implements LLMProvider {
       this.logger.debug('Gemini image analysis error', {
         processingTime,
         error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack
+        hasStack: error instanceof Error && !!error.stack,
       });
 
       throw new Error(`Gemini vision analysis failed: ${errorMessage}`);

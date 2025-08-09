@@ -3,6 +3,7 @@ import { MetadataObject } from '../types';
 import { getLogger } from '../logger';
 import { getEncryptionService } from '../database/encryption';
 import { getSensitiveFields } from '../database/sensitive-fields';
+import { countTokens } from '../database/utils';
 
 interface KnowledgeSearchResult {
   id: number;
@@ -47,13 +48,19 @@ interface KnowledgeChunk {
 
 export interface KnowledgeDatabaseConfig {
   url?: string;
-  embeddingProvider?: { name: string; generateEmbedding?: (text: string, model?: string) => Promise<{ embedding: number[] }> };
+  embeddingProvider?: {
+    name: string;
+    generateEmbedding?: (text: string, model?: string) => Promise<{ embedding: number[] }>;
+  };
 }
 
 export class KnowledgeDatabase {
   private pool: Pool;
   private tableName: string = 'knowledge_vectors';
-  private embeddingProvider: { name: string; generateEmbedding?: (text: string, model?: string) => Promise<{ embedding: number[] }> } | null = null;
+  private embeddingProvider: {
+    name: string;
+    generateEmbedding?: (text: string, model?: string) => Promise<{ embedding: number[] }>;
+  } | null = null;
   private embeddingDimensions: number | null = null;
   private tableDimensions: number | null = null;
   private logger = getLogger();
@@ -61,16 +68,16 @@ export class KnowledgeDatabase {
 
   constructor(config?: KnowledgeDatabaseConfig) {
     const connectionString = config?.url || process.env.KNOWLEDGE_DB_URL;
-    
+
     if (!connectionString) {
       throw new Error('KNOWLEDGE_DB_URL environment variable is required for knowledge features');
     }
 
     this.pool = new Pool({
       connectionString,
-      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
     });
-    
+
     this.embeddingProvider = config?.embeddingProvider || null;
     if (!this.embeddingProvider) {
       throw new Error('Embedding provider is required for knowledge database');
@@ -80,24 +87,33 @@ export class KnowledgeDatabase {
   /**
    * Encrypt sensitive knowledge fields before storing
    */
-  private async encryptKnowledgeData(data: Record<string, unknown>, tableName: string): Promise<Record<string, unknown>> {
+  private async encryptKnowledgeData(
+    data: Record<string, unknown>,
+    tableName: string
+  ): Promise<Record<string, unknown>> {
     if (!this.encryption.isEnabled()) {
       return data;
     }
 
     const encrypted = { ...data };
-    
+
     // Get sensitive fields from centralized configuration
     const fieldsToEncrypt = getSensitiveFields(tableName);
-    
+
     for (const field of fieldsToEncrypt) {
       if (encrypted[field] !== undefined && encrypted[field] !== null) {
         if (field === 'metadata' && typeof encrypted[field] === 'object') {
           // Handle JSON metadata fields
-          encrypted[field] = await this.encryption.encryptJSON(encrypted[field], `${tableName}.${field}`);
+          encrypted[field] = await this.encryption.encryptJSON(
+            encrypted[field],
+            `${tableName}.${field}`
+          );
         } else {
           // Handle string fields
-          encrypted[field] = await this.encryption.encrypt(String(encrypted[field]), `${tableName}.${field}`);
+          encrypted[field] = await this.encryption.encrypt(
+            String(encrypted[field]),
+            `${tableName}.${field}`
+          );
         }
       }
     }
@@ -108,24 +124,33 @@ export class KnowledgeDatabase {
   /**
    * Decrypt sensitive knowledge fields after retrieving
    */
-  private async decryptKnowledgeData(data: Record<string, unknown>, tableName: string): Promise<Record<string, unknown>> {
+  private async decryptKnowledgeData(
+    data: Record<string, unknown>,
+    tableName: string
+  ): Promise<Record<string, unknown>> {
     if (!this.encryption.isEnabled() || !data) {
       return data;
     }
 
     const decrypted = { ...data };
-    
+
     // Get sensitive fields from centralized configuration
     const fieldsToDecrypt = getSensitiveFields(tableName);
-    
+
     for (const field of fieldsToDecrypt) {
       if (decrypted[field] !== undefined && decrypted[field] !== null) {
         if (field === 'metadata') {
           // Handle JSON metadata fields
-          decrypted[field] = await this.encryption.decryptJSON(String(decrypted[field]), `${tableName}.${field}`);
+          decrypted[field] = await this.encryption.decryptJSON(
+            String(decrypted[field]),
+            `${tableName}.${field}`
+          );
         } else {
           // Handle string fields
-          decrypted[field] = await this.encryption.decrypt(String(decrypted[field]), `${tableName}.${field}`);
+          decrypted[field] = await this.encryption.decrypt(
+            String(decrypted[field]),
+            `${tableName}.${field}`
+          );
         }
       }
     }
@@ -144,12 +169,12 @@ export class KnowledgeDatabase {
       this.embeddingDimensions = testResult.embedding.length;
       this.logger.debug('Detected embedding dimensions', { dimensions: this.embeddingDimensions });
     }
-    
+
     const client = await this.pool.connect();
     try {
       // Enable vector extension
       await client.query('CREATE EXTENSION IF NOT EXISTS vector');
-      
+
       // Create documents table
       await client.query(`
         CREATE TABLE IF NOT EXISTS knowledge_documents (
@@ -175,7 +200,7 @@ export class KnowledgeDatabase {
           WHERE table_name = 'knowledge_chunks'
         )
       `);
-      
+
       if (chunksTableExists.rows[0].exists) {
         // Check if existing table has correct dimensions
         const columnInfo = await client.query(`
@@ -184,24 +209,30 @@ export class KnowledgeDatabase {
           WHERE attrelid = 'knowledge_chunks'::regclass 
           AND attname = 'embedding'
         `);
-        
+
         const existingDimensions = columnInfo.rows[0]?.atttypmod;
         this.tableDimensions = existingDimensions;
-        
+
         if (existingDimensions && existingDimensions !== this.embeddingDimensions) {
-          this.logger.warn(`Dimension mismatch: knowledge_chunks table has ${existingDimensions} dimensions but embedding provider uses ${this.embeddingDimensions} dimensions`);
+          this.logger.warn(
+            `Dimension mismatch: knowledge_chunks table has ${existingDimensions} dimensions but embedding provider uses ${this.embeddingDimensions} dimensions`
+          );
           this.logger.warn('This will cause embedding insertion errors. Consider:');
           this.logger.warn('1. Switch to an embedding provider with matching dimensions');
           this.logger.warn('2. Or backup data and recreate table with new dimensions');
           this.logger.warn('3. Or regenerate embeddings with new provider');
-          
+
           // Check if table has any data
           const dataCount = await client.query('SELECT COUNT(*) FROM knowledge_chunks');
           const hasData = parseInt(dataCount.rows[0].count) > 0;
-          
+
           if (hasData) {
-            this.logger.info(`Table contains ${dataCount.rows[0].count} records. Data will be preserved.`);
-            this.logger.info('To force recreation with data loss, you can manually drop the table.');
+            this.logger.info(
+              `Table contains ${dataCount.rows[0].count} records. Data will be preserved.`
+            );
+            this.logger.info(
+              'To force recreation with data loss, you can manually drop the table.'
+            );
             // Don't auto-drop if there's data - let user decide
             return;
           } else {
@@ -281,9 +312,9 @@ export class KnowledgeDatabase {
   }
 
   async addDocument(
-    agentId: number, 
+    agentId: number,
     title: string,
-    content: string, 
+    content: string,
     filePath?: string,
     fileType?: string,
     fileSize?: number,
@@ -291,9 +322,8 @@ export class KnowledgeDatabase {
   ): Promise<number> {
     const client = await this.pool.connect();
     try {
-      const { countTokens } = await import('../database/utils');
       const tokenCount = countTokens(content);
-      
+
       // Prepare data for encryption
       const documentData = {
         agent_id: agentId,
@@ -303,12 +333,12 @@ export class KnowledgeDatabase {
         file_type: fileType,
         file_size: fileSize,
         metadata: metadata || {},
-        token_count: tokenCount
+        token_count: tokenCount,
       };
 
       // Encrypt sensitive fields
       const encryptedData = await this.encryptKnowledgeData(documentData, 'knowledge_documents');
-      
+
       const result = await client.query(
         `INSERT INTO knowledge_documents (agent_id, title, content, file_path, file_type, file_size, metadata, token_count) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
@@ -321,7 +351,7 @@ export class KnowledgeDatabase {
           encryptedData.file_type,
           encryptedData.file_size,
           encryptedData.metadata,
-          encryptedData.token_count
+          encryptedData.token_count,
         ]
       );
       return result.rows[0].id;
@@ -342,14 +372,13 @@ export class KnowledgeDatabase {
     if (this.tableDimensions && embedding.length !== this.tableDimensions) {
       throw new Error(
         `Embedding dimension mismatch: got ${embedding.length} dimensions but table expects ${this.tableDimensions}. ` +
-        `Current embedding provider: ${this.embeddingProvider?.name || 'unknown'} (${this.embeddingDimensions} dimensions). ` +
-        `Please ensure embedding provider matches table schema or recreate table.`
+          `Current embedding provider: ${this.embeddingProvider?.name || 'unknown'} (${this.embeddingDimensions} dimensions). ` +
+          `Please ensure embedding provider matches table schema or recreate table.`
       );
     }
-    
+
     const client = await this.pool.connect();
     try {
-      const { countTokens } = await import('../database/utils');
       const tokenCount = countTokens(content);
 
       // Prepare data for encryption
@@ -360,7 +389,7 @@ export class KnowledgeDatabase {
         token_count: tokenCount,
         chunk_index: chunkIndex,
         embedding: `[${embedding.join(',')}]`, // Keep embedding as is - it's not sensitive
-        metadata: metadata || {}
+        metadata: metadata || {},
       };
 
       // Encrypt sensitive fields (not embedding)
@@ -377,10 +406,10 @@ export class KnowledgeDatabase {
           encryptedData.token_count,
           encryptedData.chunk_index,
           encryptedData.embedding,
-          encryptedData.metadata
+          encryptedData.metadata,
         ]
       );
-      
+
       // Update document chunk count
       await client.query(
         `UPDATE knowledge_documents 
@@ -396,7 +425,12 @@ export class KnowledgeDatabase {
     }
   }
 
-  async searchKnowledge(agentId: number, embedding: number[], limit: number = 10, threshold: number = 0.7): Promise<KnowledgeSearchResult[]> {
+  async searchKnowledge(
+    agentId: number,
+    embedding: number[],
+    limit: number = 10,
+    threshold: number = 0.7
+  ): Promise<KnowledgeSearchResult[]> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
@@ -420,7 +454,7 @@ export class KnowledgeDatabase {
          LIMIT $4`,
         [`[${embedding.join(',')}]`, agentId, threshold, limit]
       );
-      
+
       // Decrypt sensitive fields in search results
       if (this.encryption.isEnabled()) {
         const decryptedResults = await Promise.all(
@@ -431,26 +465,30 @@ export class KnowledgeDatabase {
                 { content: row.content, metadata: row.chunk_metadata },
                 'knowledge_chunks'
               );
-              
+
               // Decrypt document title, file_path and metadata
               const decryptedDoc = await this.decryptKnowledgeData(
-                { title: row.document_title, file_path: row.file_path, metadata: row.document_metadata },
+                {
+                  title: row.document_title,
+                  file_path: row.file_path,
+                  metadata: row.document_metadata,
+                },
                 'knowledge_documents'
               );
-              
+
               return {
                 ...row,
                 content: decryptedChunk.content,
                 chunk_metadata: decryptedChunk.metadata,
                 document_title: decryptedDoc.title,
                 file_path: decryptedDoc.file_path,
-                document_metadata: decryptedDoc.metadata
+                document_metadata: decryptedDoc.metadata,
               };
             } catch {
               // If decryption fails, return original row (might be unencrypted legacy data)
-              this.logger.debug('Failed to decrypt knowledge search result', { 
+              this.logger.debug('Failed to decrypt knowledge search result', {
                 chunkId: row.id,
-                documentId: row.document_id 
+                documentId: row.document_id,
               });
               return row;
             }
@@ -458,7 +496,7 @@ export class KnowledgeDatabase {
         );
         return decryptedResults;
       }
-      
+
       return result.rows;
     } finally {
       client.release();
@@ -474,7 +512,7 @@ export class KnowledgeDatabase {
          ORDER BY created_at DESC`,
         [agentId]
       );
-      
+
       // Decrypt sensitive fields in documents
       if (this.encryption.isEnabled()) {
         const decryptedDocuments = await Promise.all(
@@ -490,7 +528,7 @@ export class KnowledgeDatabase {
         );
         return decryptedDocuments;
       }
-      
+
       return result.rows;
     } finally {
       client.release();
@@ -506,7 +544,7 @@ export class KnowledgeDatabase {
          ORDER BY chunk_index`,
         [documentId]
       );
-      
+
       // Decrypt sensitive fields in chunks
       if (this.encryption.isEnabled()) {
         const decryptedChunks = await Promise.all(
@@ -522,7 +560,7 @@ export class KnowledgeDatabase {
         );
         return decryptedChunks;
       }
-      
+
       return result.rows;
     } finally {
       client.release();
@@ -532,10 +570,9 @@ export class KnowledgeDatabase {
   async deleteDocument(documentId: number): Promise<boolean> {
     const client = await this.pool.connect();
     try {
-      const result = await client.query(
-        `DELETE FROM knowledge_documents WHERE id = $1`,
-        [documentId]
-      );
+      const result = await client.query(`DELETE FROM knowledge_documents WHERE id = $1`, [
+        documentId,
+      ]);
       return (result.rowCount || 0) > 0;
     } finally {
       client.release();
@@ -545,10 +582,7 @@ export class KnowledgeDatabase {
   async deleteChunk(chunkId: number): Promise<boolean> {
     const client = await this.pool.connect();
     try {
-      const result = await client.query(
-        `DELETE FROM knowledge_chunks WHERE id = $1`,
-        [chunkId]
-      );
+      const result = await client.query(`DELETE FROM knowledge_chunks WHERE id = $1`, [chunkId]);
       return (result.rowCount || 0) > 0;
     } finally {
       client.release();
@@ -558,10 +592,7 @@ export class KnowledgeDatabase {
   async clearAgentKnowledge(agentId: number): Promise<void> {
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `DELETE FROM knowledge_documents WHERE agent_id = $1`,
-        [agentId]
-      );
+      await client.query(`DELETE FROM knowledge_documents WHERE agent_id = $1`, [agentId]);
     } finally {
       client.release();
     }
@@ -575,7 +606,9 @@ export class KnowledgeDatabase {
 // Singleton instance
 let knowledgeDb: KnowledgeDatabase | null = null;
 
-export async function getKnowledgeDatabase(config?: KnowledgeDatabaseConfig): Promise<KnowledgeDatabase> {
+export async function getKnowledgeDatabase(
+  config?: KnowledgeDatabaseConfig
+): Promise<KnowledgeDatabase> {
   if (!knowledgeDb) {
     knowledgeDb = new KnowledgeDatabase(config);
     await knowledgeDb.initialize();

@@ -8,10 +8,7 @@ export type MCPPrimitive = string | number | boolean | null;
 /**
  * Complex MCP values that can contain primitives, arrays, or nested objects
  */
-export type MCPValue = 
-  | MCPPrimitive
-  | MCPPrimitive[]
-  | { [key: string]: MCPValue };
+export type MCPValue = MCPPrimitive | MCPPrimitive[] | { [key: string]: MCPValue };
 
 /**
  * JSON Schema representation for MCP tools

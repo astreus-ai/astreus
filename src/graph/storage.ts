@@ -50,7 +50,12 @@ export class GraphStorage {
     if (!hasNodesTable) {
       await this.knex.schema.createTable('graph_nodes', (table) => {
         table.increments('id').primary();
-        table.integer('graphId').notNullable().references('id').inTable('graphs').onDelete('CASCADE');
+        table
+          .integer('graphId')
+          .notNullable()
+          .references('id')
+          .inTable('graphs')
+          .onDelete('CASCADE');
         table.string('nodeId').notNullable();
         table.enu('type', ['agent', 'task']).notNullable();
         table.string('name').notNullable();
@@ -59,7 +64,9 @@ export class GraphStorage {
         table.text('prompt').nullable();
         table.string('model').nullable();
         table.boolean('stream').defaultTo(false);
-        table.enu('status', ['pending', 'running', 'completed', 'failed', 'skipped']).defaultTo('pending');
+        table
+          .enu('status', ['pending', 'running', 'completed', 'failed', 'skipped'])
+          .defaultTo('pending');
         table.integer('priority').defaultTo(0);
         table.json('dependencies').nullable();
         table.json('result').nullable();
@@ -78,7 +85,12 @@ export class GraphStorage {
     if (!hasEdgesTable) {
       await this.knex.schema.createTable('graph_edges', (table) => {
         table.increments('id').primary();
-        table.integer('graphId').notNullable().references('id').inTable('graphs').onDelete('CASCADE');
+        table
+          .integer('graphId')
+          .notNullable()
+          .references('id')
+          .inTable('graphs')
+          .onDelete('CASCADE');
         table.string('edgeId').notNullable();
         table.string('fromNodeId').notNullable();
         table.string('toNodeId').notNullable();
@@ -149,25 +161,19 @@ export class GraphStorage {
   async loadGraph(graphId: number): Promise<Graph | null> {
     await this.initialize();
     // Load graph config
-    const graphData = await this.knex('graphs')
-      .where({ id: graphId })
-      .first();
+    const graphData = await this.knex('graphs').where({ id: graphId }).first();
 
     if (!graphData) {
       return null;
     }
 
     // Load nodes
-    const nodesData = await this.knex('graph_nodes')
-      .where({ graphId })
-      .orderBy('id');
+    const nodesData = await this.knex('graph_nodes').where({ graphId }).orderBy('id');
 
     // Load edges
-    const edgesData = await this.knex('graph_edges')
-      .where({ graphId })
-      .orderBy('id');
+    const edgesData = await this.knex('graph_edges').where({ graphId }).orderBy('id');
 
-    const nodes: GraphNode[] = nodesData.map(node => ({
+    const nodes: GraphNode[] = nodesData.map((node) => ({
       id: node.nodeId,
       type: node.type,
       name: node.name,
@@ -186,7 +192,7 @@ export class GraphStorage {
       updatedAt: new Date(node.updated_at),
     }));
 
-    const edges: GraphEdge[] = edgesData.map(edge => ({
+    const edges: GraphEdge[] = edgesData.map((edge) => ({
       id: edge.edgeId,
       fromNodeId: edge.fromNodeId,
       toNodeId: edge.toNodeId,
@@ -222,13 +228,11 @@ export class GraphStorage {
   async updateGraph(graphId: number, graph: Graph): Promise<void> {
     await this.initialize();
     // Update graph
-    await this.knex('graphs')
-      .where({ id: graphId })
-      .update({
-        status: graph.status,
-        startedAt: graph.startedAt,
-        completedAt: graph.completedAt,
-      });
+    await this.knex('graphs').where({ id: graphId }).update({
+      status: graph.status,
+      startedAt: graph.startedAt,
+      completedAt: graph.completedAt,
+    });
 
     // Update nodes
     for (const node of graph.nodes) {
@@ -244,9 +248,7 @@ export class GraphStorage {
 
   async deleteGraph(graphId: number): Promise<boolean> {
     await this.initialize();
-    const deleted = await this.knex('graphs')
-      .where({ id: graphId })
-      .delete();
+    const deleted = await this.knex('graphs').where({ id: graphId }).delete();
 
     return deleted > 0;
   }
@@ -257,7 +259,7 @@ export class GraphStorage {
       .select('id', 'name', 'status', 'created_at')
       .orderBy('created_at', 'desc');
 
-    return graphs.map(g => ({
+    return graphs.map((g) => ({
       id: g.id,
       name: g.name,
       status: g.status,

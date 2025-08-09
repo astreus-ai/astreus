@@ -20,49 +20,63 @@ interface ExtractTextParams {
 }
 
 // Type guard functions for vision tool parameters
-function isAnalysisParams(params: Record<string, ToolParameterValue>): params is Record<string, ToolParameterValue> & AnalysisParams {
-  return typeof params.image_path === 'string' && 
-         (params.prompt === undefined || typeof params.prompt === 'string') &&
-         (params.detail === undefined || typeof params.detail === 'string');
+function isAnalysisParams(
+  params: Record<string, ToolParameterValue>
+): params is Record<string, ToolParameterValue> & AnalysisParams {
+  return (
+    typeof params.image_path === 'string' &&
+    (params.prompt === undefined || typeof params.prompt === 'string') &&
+    (params.detail === undefined || typeof params.detail === 'string')
+  );
 }
 
-function isDescriptionParams(params: Record<string, ToolParameterValue>): params is Record<string, ToolParameterValue> & DescriptionParams {
-  return typeof params.image_path === 'string' && 
-         (params.style === undefined || typeof params.style === 'string');
+function isDescriptionParams(
+  params: Record<string, ToolParameterValue>
+): params is Record<string, ToolParameterValue> & DescriptionParams {
+  return (
+    typeof params.image_path === 'string' &&
+    (params.style === undefined || typeof params.style === 'string')
+  );
 }
 
-function isExtractTextParams(params: Record<string, ToolParameterValue>): params is Record<string, ToolParameterValue> & ExtractTextParams {
-  return typeof params.image_path === 'string' && 
-         (params.language === undefined || typeof params.language === 'string');
+function isExtractTextParams(
+  params: Record<string, ToolParameterValue>
+): params is Record<string, ToolParameterValue> & ExtractTextParams {
+  return (
+    typeof params.image_path === 'string' &&
+    (params.language === undefined || typeof params.language === 'string')
+  );
 }
 
 export const analyzeImageTool: ToolDefinition = {
   name: 'analyze_image',
-  description: 'Analyze an image using computer vision to extract information, describe contents, read text, etc.',
+  description:
+    'Analyze an image using computer vision to extract information, describe contents, read text, etc.',
   parameters: {
     image_path: {
       name: 'image_path',
       type: 'string',
       description: 'Path to the image file to analyze',
-      required: true
+      required: true,
     },
     prompt: {
       name: 'prompt',
       type: 'string',
-      description: 'Specific analysis prompt (optional). If not provided, will do general image analysis'
+      description:
+        'Specific analysis prompt (optional). If not provided, will do general image analysis',
     },
     detail: {
       name: 'detail',
       type: 'string',
-      description: 'Analysis detail level: "low" or "high" (default: auto)'
-    }
+      description: 'Analysis detail level: "low" or "high" (default: auto)',
+    },
   },
   handler: async (params: Record<string, ToolParameterValue>): Promise<ToolResult> => {
     if (!isAnalysisParams(params)) {
       return {
         success: false,
         data: null,
-        error: 'Invalid parameters for image analysis'
+        error: 'Invalid parameters for image analysis',
       };
     }
 
@@ -74,7 +88,7 @@ export const analyzeImageTool: ToolDefinition = {
         return {
           success: false,
           data: null,
-          error: 'Invalid image path provided'
+          error: 'Invalid image path provided',
         };
       }
 
@@ -82,76 +96,77 @@ export const analyzeImageTool: ToolDefinition = {
       const normalizedPath = path.resolve(path.normalize(image_path));
       const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
       const fileExtension = path.extname(normalizedPath).toLowerCase();
-      
+
       if (!allowedExtensions.includes(fileExtension)) {
         return {
           success: false,
           data: null,
-          error: `Unsupported image format: ${fileExtension}`
+          error: `Unsupported image format: ${fileExtension}`,
         };
       }
 
       const visionService = new Vision();
-      
+
       try {
         await fs.promises.access(normalizedPath);
       } catch {
         return {
           success: false,
           data: null,
-          error: `Image file not found: ${normalizedPath}`
+          error: `Image file not found: ${normalizedPath}`,
         };
       }
 
       const analysis = await visionService.analyzeImage(normalizedPath, {
         prompt,
         detail: detail as 'low' | 'high',
-        maxTokens: 1000
+        maxTokens: 1000,
       });
 
       const fileName = path.basename(normalizedPath);
-      
+
       return {
         success: true,
         data: {
           fileName,
           filePath: normalizedPath,
           analysis,
-          prompt: prompt || 'General image analysis'
-        }
+          prompt: prompt || 'General image analysis',
+        },
       };
     } catch (error) {
       return {
         success: false,
         data: null,
-        error: `Image analysis failed: ${error}`
+        error: `Image analysis failed: ${error}`,
       };
     }
-  }
+  },
 };
 
 export const describeImageTool: ToolDefinition = {
   name: 'describe_image',
-  description: 'Generate a detailed description of an image for accessibility or documentation purposes',
+  description:
+    'Generate a detailed description of an image for accessibility or documentation purposes',
   parameters: {
     image_path: {
       name: 'image_path',
       type: 'string',
       description: 'Path to the image file to describe',
-      required: true
+      required: true,
     },
     style: {
       name: 'style',
       type: 'string',
-      description: 'Description style: "detailed", "concise", "accessibility", or "technical"'
-    }
+      description: 'Description style: "detailed", "concise", "accessibility", or "technical"',
+    },
   },
   handler: async (params: Record<string, ToolParameterValue>): Promise<ToolResult> => {
     if (!isDescriptionParams(params)) {
       return {
         success: false,
         data: null,
-        error: 'Invalid parameters for image description'
+        error: 'Invalid parameters for image description',
       };
     }
 
@@ -163,7 +178,7 @@ export const describeImageTool: ToolDefinition = {
         return {
           success: false,
           data: null,
-          error: 'Invalid image path provided'
+          error: 'Invalid image path provided',
         };
       }
 
@@ -171,60 +186,63 @@ export const describeImageTool: ToolDefinition = {
       const normalizedPath = path.resolve(path.normalize(image_path));
       const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
       const fileExtension = path.extname(normalizedPath).toLowerCase();
-      
+
       if (!allowedExtensions.includes(fileExtension)) {
         return {
           success: false,
           data: null,
-          error: `Unsupported image format: ${fileExtension}`
+          error: `Unsupported image format: ${fileExtension}`,
         };
       }
 
       const visionService = new Vision();
-      
+
       try {
         await fs.promises.access(normalizedPath);
       } catch {
         return {
           success: false,
           data: null,
-          error: `Image file not found: ${normalizedPath}`
+          error: `Image file not found: ${normalizedPath}`,
         };
       }
 
       const prompts = {
-        detailed: 'Provide a detailed description of this image, including all visual elements, colors, objects, people, text, and context.',
+        detailed:
+          'Provide a detailed description of this image, including all visual elements, colors, objects, people, text, and context.',
         concise: 'Provide a brief, concise description of the main elements in this image.',
-        accessibility: 'Create an accessibility-friendly description of this image for visually impaired users, focusing on the most important visual information.',
-        technical: 'Provide a technical analysis of this image including composition, lighting, objects, text, and any technical elements visible.'
+        accessibility:
+          'Create an accessibility-friendly description of this image for visually impaired users, focusing on the most important visual information.',
+        technical:
+          'Provide a technical analysis of this image including composition, lighting, objects, text, and any technical elements visible.',
       };
 
       const prompt = prompts[style as keyof typeof prompts] || prompts.detailed;
-      
+
       const description = await visionService.analyzeImage(normalizedPath, {
         prompt,
-        maxTokens: 800
+        maxTokens: 800,
       });
 
       const fileName = path.basename(normalizedPath);
-      
+
       return {
         success: true,
         data: {
           fileName,
           filePath: normalizedPath,
           style,
-          description
-        }
+          description,
+        },
       };
     } catch (error) {
       return {
         success: false,
         data: null,
-        error: `Image description failed: ${error}`
+        error: `Image description failed: ${error}`,
       };
     }
-  }
+  },
 };
 
 export const extractTextFromImageTool: ToolDefinition = {
@@ -235,20 +253,20 @@ export const extractTextFromImageTool: ToolDefinition = {
       name: 'image_path',
       type: 'string',
       description: 'Path to the image file containing text',
-      required: true
+      required: true,
     },
     language: {
       name: 'language',
       type: 'string',
-      description: 'Expected language of the text (optional, helps with accuracy)'
-    }
+      description: 'Expected language of the text (optional, helps with accuracy)',
+    },
   },
   handler: async (params: Record<string, ToolParameterValue>): Promise<ToolResult> => {
     if (!isExtractTextParams(params)) {
       return {
         success: false,
         data: null,
-        error: 'Invalid parameters for text extraction'
+        error: 'Invalid parameters for text extraction',
       };
     }
 
@@ -260,7 +278,7 @@ export const extractTextFromImageTool: ToolDefinition = {
         return {
           success: false,
           data: null,
-          error: 'Invalid image path provided'
+          error: 'Invalid image path provided',
         };
       }
 
@@ -268,54 +286,54 @@ export const extractTextFromImageTool: ToolDefinition = {
       const normalizedPath = path.resolve(path.normalize(image_path));
       const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
       const fileExtension = path.extname(normalizedPath).toLowerCase();
-      
+
       if (!allowedExtensions.includes(fileExtension)) {
         return {
           success: false,
           data: null,
-          error: `Unsupported image format: ${fileExtension}`
+          error: `Unsupported image format: ${fileExtension}`,
         };
       }
 
       const visionService = new Vision();
-      
+
       try {
         await fs.promises.access(normalizedPath);
       } catch {
         return {
           success: false,
           data: null,
-          error: `Image file not found: ${normalizedPath}`
+          error: `Image file not found: ${normalizedPath}`,
         };
       }
 
       const languageHint = language ? ` The text is likely in ${language}.` : '';
       const prompt = `Extract and transcribe all text from this image. Maintain the original formatting, line breaks, and structure as much as possible.${languageHint} Only return the extracted text, no additional commentary.`;
-      
+
       const extractedText = await visionService.analyzeImage(normalizedPath, {
         prompt,
-        maxTokens: 1500
+        maxTokens: 1500,
       });
 
       const fileName = path.basename(normalizedPath);
-      
+
       return {
         success: true,
         data: {
           fileName,
           filePath: normalizedPath,
           language: language || 'auto-detect',
-          extractedText
-        }
+          extractedText,
+        },
       };
     } catch (error) {
       return {
         success: false,
         data: null,
-        error: `Text extraction failed: ${error}`
+        error: `Text extraction failed: ${error}`,
       };
     }
-  }
+  },
 };
 
 // Function to create vision tools with a specific Vision instance
@@ -327,7 +345,7 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
         return {
           success: false,
           data: null,
-          error: 'Invalid parameters for image analysis'
+          error: 'Invalid parameters for image analysis',
         };
       }
 
@@ -339,7 +357,7 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           return {
             success: false,
             data: null,
-            error: 'Invalid image path provided'
+            error: 'Invalid image path provided',
           };
         }
 
@@ -347,12 +365,12 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
         const normalizedPath = path.resolve(path.normalize(image_path));
         const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
         const fileExtension = path.extname(normalizedPath).toLowerCase();
-        
+
         if (!allowedExtensions.includes(fileExtension)) {
           return {
             success: false,
             data: null,
-            error: `Unsupported image format: ${fileExtension}`
+            error: `Unsupported image format: ${fileExtension}`,
           };
         }
 
@@ -360,35 +378,35 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           return {
             success: false,
             data: null,
-            error: `Image file not found: ${normalizedPath}`
+            error: `Image file not found: ${normalizedPath}`,
           };
         }
 
         const analysis = await visionInstance.analyzeImage(normalizedPath, {
           prompt,
           detail: detail as 'low' | 'high',
-          maxTokens: 1000
+          maxTokens: 1000,
         });
 
         const fileName = path.basename(normalizedPath);
-        
+
         return {
           success: true,
           data: {
             fileName,
             filePath: normalizedPath,
             analysis,
-            prompt: prompt || 'General image analysis'
-          }
+            prompt: prompt || 'General image analysis',
+          },
         };
       } catch (error) {
         return {
           success: false,
           data: null,
-          error: `Image analysis failed: ${error}`
+          error: `Image analysis failed: ${error}`,
         };
       }
-    }
+    },
   };
 
   const describeImageToolWithInstance: ToolDefinition = {
@@ -398,7 +416,7 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
         return {
           success: false,
           data: null,
-          error: 'Invalid parameters for image description'
+          error: 'Invalid parameters for image description',
         };
       }
 
@@ -410,7 +428,7 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           return {
             success: false,
             data: null,
-            error: 'Invalid image path provided'
+            error: 'Invalid image path provided',
           };
         }
 
@@ -418,12 +436,12 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
         const normalizedPath = path.resolve(path.normalize(image_path));
         const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
         const fileExtension = path.extname(normalizedPath).toLowerCase();
-        
+
         if (!allowedExtensions.includes(fileExtension)) {
           return {
             success: false,
             data: null,
-            error: `Unsupported image format: ${fileExtension}`
+            error: `Unsupported image format: ${fileExtension}`,
           };
         }
 
@@ -431,43 +449,46 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           return {
             success: false,
             data: null,
-            error: `Image file not found: ${normalizedPath}`
+            error: `Image file not found: ${normalizedPath}`,
           };
         }
 
         const prompts = {
-          detailed: 'Provide a detailed description of this image, including all visual elements, colors, objects, people, text, and context.',
+          detailed:
+            'Provide a detailed description of this image, including all visual elements, colors, objects, people, text, and context.',
           concise: 'Provide a brief, concise description of the main elements in this image.',
-          accessibility: 'Create an accessibility-friendly description of this image for visually impaired users, focusing on the most important visual information.',
-          technical: 'Provide a technical analysis of this image including composition, lighting, objects, text, and any technical elements visible.'
+          accessibility:
+            'Create an accessibility-friendly description of this image for visually impaired users, focusing on the most important visual information.',
+          technical:
+            'Provide a technical analysis of this image including composition, lighting, objects, text, and any technical elements visible.',
         };
 
         const prompt = prompts[style as keyof typeof prompts] || prompts.detailed;
-        
+
         const description = await visionInstance.analyzeImage(normalizedPath, {
           prompt,
-          maxTokens: 800
+          maxTokens: 800,
         });
 
         const fileName = path.basename(normalizedPath);
-        
+
         return {
           success: true,
           data: {
             fileName,
             filePath: normalizedPath,
             style,
-            description
-          }
+            description,
+          },
         };
       } catch (error) {
         return {
           success: false,
           data: null,
-          error: `Image description failed: ${error}`
+          error: `Image description failed: ${error}`,
         };
       }
-    }
+    },
   };
 
   const extractTextFromImageToolWithInstance: ToolDefinition = {
@@ -477,7 +498,7 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
         return {
           success: false,
           data: null,
-          error: 'Invalid parameters for text extraction'
+          error: 'Invalid parameters for text extraction',
         };
       }
 
@@ -489,7 +510,7 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           return {
             success: false,
             data: null,
-            error: 'Invalid image path provided'
+            error: 'Invalid image path provided',
           };
         }
 
@@ -497,12 +518,12 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
         const normalizedPath = path.resolve(path.normalize(image_path));
         const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
         const fileExtension = path.extname(normalizedPath).toLowerCase();
-        
+
         if (!allowedExtensions.includes(fileExtension)) {
           return {
             success: false,
             data: null,
-            error: `Unsupported image format: ${fileExtension}`
+            error: `Unsupported image format: ${fileExtension}`,
           };
         }
 
@@ -510,48 +531,44 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           return {
             success: false,
             data: null,
-            error: `Image file not found: ${normalizedPath}`
+            error: `Image file not found: ${normalizedPath}`,
           };
         }
 
         const languageHint = language ? ` The text is likely in ${language}.` : '';
         const prompt = `Extract and transcribe all text from this image. Maintain the original formatting, line breaks, and structure as much as possible.${languageHint} Only return the extracted text, no additional commentary.`;
-        
+
         const extractedText = await visionInstance.analyzeImage(normalizedPath, {
           prompt,
-          maxTokens: 1500
+          maxTokens: 1500,
         });
 
         const fileName = path.basename(normalizedPath);
-        
+
         return {
           success: true,
           data: {
             fileName,
             filePath: normalizedPath,
             language: language || 'auto-detect',
-            extractedText
-          }
+            extractedText,
+          },
         };
       } catch (error) {
         return {
           success: false,
           data: null,
-          error: `Text extraction failed: ${error}`
+          error: `Text extraction failed: ${error}`,
         };
       }
-    }
+    },
   };
 
   return [
     analyzeImageToolWithInstance,
     describeImageToolWithInstance,
-    extractTextFromImageToolWithInstance
+    extractTextFromImageToolWithInstance,
   ];
 }
 
-export const visionTools = [
-  analyzeImageTool,
-  describeImageTool,
-  extractTextFromImageTool
-];
+export const visionTools = [analyzeImageTool, describeImageTool, extractTextFromImageTool];

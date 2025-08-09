@@ -1,21 +1,53 @@
-node_modules
-
-.env
-
-.gitignore
-.vscode
-.claude/
-.cursor/
-
-tsconfig.json
-tsup.config.ts
-eslint.config.js
-jest.config.js
-
+# Development dependencies and configs
+node_modules/
+src/
 __tests__/
 test/
 tests/
 
+# Development configuration files
+tsconfig.json
+tsup.config.ts
+eslint.config.js
+jest.config.js
+.eslintrc*
+.prettierrc*
+
+# Build and development files
+.env*
 *.log
 *.tmp
 *.swp
+
+# IDE and editor files
+.vscode/
+.idea/
+.claude/
+.cursor/
+.DS_Store
+*.swp
+*.swo
+
+# Git files
+.gitignore
+.gitattributes
+
+# CI/CD files
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Documentation source (keep only README.md)
+docs/
+examples/
+old/
+product/
+
+# Coverage and test output
+coverage/
+.nyc_output/
+
+# Lock files (npm users should use their own)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml

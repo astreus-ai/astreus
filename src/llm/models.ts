@@ -11,7 +11,7 @@ function getProviderModels(): Record<ProviderType, string[]> {
     openai: [],
     claude: [],
     gemini: [],
-    ollama: []
+    ollama: [],
   };
 
   try {
@@ -47,15 +47,15 @@ let PROVIDER_MODELS: Record<ProviderType, string[]> = {
   openai: [],
   claude: [],
   gemini: [],
-  ollama: []
+  ollama: [],
 };
 
 function initializeModelMappings() {
   if (Object.keys(MODEL_TO_PROVIDER).length === 0) {
     PROVIDER_MODELS = getProviderModels();
-    
+
     Object.entries(PROVIDER_MODELS).forEach(([provider, models]) => {
-      models.forEach(model => {
+      models.forEach((model) => {
         MODEL_TO_PROVIDER[model] = provider as ProviderType;
       });
     });

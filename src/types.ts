@@ -10,7 +10,7 @@ export type MetadataPrimitive = string | number | boolean | Date | null;
 /**
  * Complex metadata value that can contain primitives, arrays, or nested objects
  */
-export type MetadataValue = 
+export type MetadataValue =
   | MetadataPrimitive
   | MetadataPrimitive[]
   | { [key: string]: MetadataValue };

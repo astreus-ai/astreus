@@ -42,7 +42,12 @@ export interface SubAgentResult {
  */
 export interface DelegationStrategy {
   name: 'auto' | 'manual' | 'sequential';
-  delegate(prompt: string, subAgents: IAgent[], options?: SubAgentRunOptions, model?: string): Promise<SubAgentTask[]>;
+  delegate(
+    prompt: string,
+    subAgents: IAgent[],
+    options?: SubAgentRunOptions,
+    model?: string
+  ): Promise<SubAgentTask[]>;
 }
 
 /**

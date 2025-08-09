@@ -44,7 +44,6 @@ export interface ScheduleOptions {
   timeout?: number; // Execution timeout in milliseconds
 }
 
-
 export interface SchedulerConfig {
   checkInterval?: number; // How often to check for scheduled items (ms)
   maxConcurrentJobs?: number; // Maximum concurrent scheduled executions

@@ -32,16 +32,22 @@ export interface Tool {
     description: string;
     parameters: {
       type: 'object';
-      properties: Record<string, {
-        type: 'string' | 'number' | 'boolean' | 'object' | 'array';
-        description?: string;
-        enum?: Array<string | number>;
-        items?: { type: string };
-        properties?: Record<string, {
+      properties: Record<
+        string,
+        {
           type: 'string' | 'number' | 'boolean' | 'object' | 'array';
           description?: string;
-        }>;
-      }>;
+          enum?: Array<string | number>;
+          items?: { type: string };
+          properties?: Record<
+            string,
+            {
+              type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+              description?: string;
+            }
+          >;
+        }
+      >;
       required?: string[];
     };
   };
@@ -116,7 +122,10 @@ export interface LLMProvider {
   getEmbeddingModels(): string[];
   generateEmbedding?(text: string, model?: string): Promise<EmbeddingResult>;
   analyzeImage?(imagePath: string, options?: VisionAnalysisOptions): Promise<VisionAnalysisResult>;
-  analyzeImageFromBase64?(base64Data: string, options?: VisionAnalysisOptions): Promise<VisionAnalysisResult>;
+  analyzeImageFromBase64?(
+    base64Data: string,
+    options?: VisionAnalysisOptions
+  ): Promise<VisionAnalysisResult>;
   getEmbeddingProvider?(): LLMProvider;
   getVisionProvider?(): LLMProvider;
 }
@@ -133,14 +142,21 @@ export function isStringContent(content: LLMMessageContent): content is string {
   return typeof content === 'string';
 }
 
-export function isMultiModalContent(content: LLMMessageContent): content is LLMMessageContentPart[] {
+export function isMultiModalContent(
+  content: LLMMessageContent
+): content is LLMMessageContentPart[] {
   return Array.isArray(content);
 }
 
-export function isTextContentPart(part: LLMMessageContentPart): part is LLMMessageContentPart & { type: 'text'; text: string } {
+export function isTextContentPart(
+  part: LLMMessageContentPart
+): part is LLMMessageContentPart & { type: 'text'; text: string } {
   return part.type === 'text' && typeof part.text === 'string';
 }
 
-export function isImageContentPart(part: LLMMessageContentPart): part is LLMMessageContentPart & { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } } {
+export function isImageContentPart(part: LLMMessageContentPart): part is LLMMessageContentPart & {
+  type: 'image_url';
+  image_url: { url: string; detail?: 'low' | 'high' | 'auto' };
+} {
   return part.type === 'image_url' && !!part.image_url?.url;
 }
