@@ -8,7 +8,8 @@ import { MetadataObject } from '../types';
 import { knowledgeTools } from './plugin';
 import { ToolDefinition } from '../plugin/types';
 import { Logger } from '../logger/types';
-import { pdfToText } from 'pdf-ts';
+import * as pdfjs from 'pdfjs-dist';
+import type { TextItem, TextMarkedContent } from 'pdfjs-dist/types/src/display/api';
 import { getFileSize } from '../database/utils';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -590,8 +591,29 @@ export class Knowledge implements IAgentModule {
   private async readPdfFile(filePath: string): Promise<string> {
     try {
       const pdfBuffer = await fs.promises.readFile(filePath);
-      const text = await pdfToText(pdfBuffer);
-      return text;
+
+      // Load PDF document
+      const loadingTask = pdfjs.getDocument({
+        data: pdfBuffer,
+        isEvalSupported: false, // Security: disable eval for CVE-2024-4367 mitigation
+      });
+
+      const pdf = await loadingTask.promise;
+      let fullText = '';
+
+      // Extract text from all pages
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const textContent = await page.getTextContent();
+
+        const pageText = textContent.items
+          .map((item: TextItem | TextMarkedContent) => ('str' in item ? item.str : ''))
+          .join(' ');
+
+        fullText += pageText + '\n';
+      }
+
+      return fullText.trim();
     } catch (error) {
       throw new Error(
         `Failed to parse PDF file: ${error instanceof Error ? error.message : 'Unknown error'}`
