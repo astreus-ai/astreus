@@ -37,15 +37,13 @@ export interface TaskRequest {
   }>;
   schedule?: string; // Simple schedule string (e.g., 'daily@07:00', 'weekly@monday@09:00')
   metadata?: MetadataObject;
-  
+
   // Sub-agent delegation options
   useSubAgents?: boolean; // Enable sub-agent delegation for this task
   subAgentDelegation?: 'auto' | 'manual' | 'sequential'; // Delegation strategy
   subAgentCoordination?: 'parallel' | 'sequential'; // How sub-agents coordinate
   taskAssignment?: Record<number, string>; // Manual task assignment (agentId -> task)
 }
-
-
 
 export interface TaskResponse {
   task: Task;

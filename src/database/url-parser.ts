@@ -10,11 +10,13 @@ export function parseDatabaseUrl(url: string): DatabaseConfig {
   try {
     parsed = new URL(url);
   } catch (error) {
-    throw new Error(`Invalid database URL format: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    throw new Error(
+      `Invalid database URL format: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
   }
-  
+
   const protocol = parsed.protocol.replace(':', '');
-  
+
   let client: string;
   switch (protocol) {
     case 'postgres':
@@ -29,8 +31,8 @@ export function parseDatabaseUrl(url: string): DatabaseConfig {
       return {
         client,
         connection: {
-          filename: parsed.pathname
-        }
+          filename: parsed.pathname,
+        },
       };
     default:
       throw new Error(`Unsupported database protocol: ${protocol}`);
@@ -43,16 +45,17 @@ export function parseDatabaseUrl(url: string): DatabaseConfig {
       port: parsed.port ? parseInt(parsed.port) : undefined,
       user: parsed.username || undefined,
       password: parsed.password || undefined,
-      database: parsed.pathname.replace('/', '') || undefined
-    }
+      database: parsed.pathname.replace('/', '') || undefined,
+    },
   };
 
   // Handle query parameters for additional config
   const searchParams = parsed.searchParams;
   if (searchParams.has('ssl')) {
-    (config.connection as DatabaseConfig['connection'] & { ssl?: boolean }).ssl = searchParams.get('ssl') === 'true';
+    (config.connection as DatabaseConfig['connection'] & { ssl?: boolean }).ssl =
+      searchParams.get('ssl') === 'true';
   }
-  
+
   if (searchParams.has('pool_min')) {
     config.pool = config.pool || {};
     const poolMin = parseInt(searchParams.get('pool_min')!);
@@ -61,7 +64,7 @@ export function parseDatabaseUrl(url: string): DatabaseConfig {
     }
     config.pool.min = poolMin;
   }
-  
+
   if (searchParams.has('pool_max')) {
     config.pool = config.pool || {};
     const poolMax = parseInt(searchParams.get('pool_max')!);

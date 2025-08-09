@@ -1,6 +1,5 @@
 import { ToolDefinition, ToolResult, ToolContext, ToolParameterValue } from '../plugin/types';
 
-
 interface KnowledgeResult {
   content: string;
   similarity: number;
@@ -18,31 +17,34 @@ interface KnowledgeToolContext extends ToolContext {
 
 export const knowledgeSearchTool: ToolDefinition = {
   name: 'search_knowledge',
-  description: 'Search through the agent\'s knowledge base for relevant information',
+  description: "Search through the agent's knowledge base for relevant information",
   parameters: {
     query: {
       name: 'query',
       type: 'string',
       description: 'The search query to find relevant information in the knowledge base',
-      required: true
+      required: true,
     },
     limit: {
       name: 'limit',
-      type: 'number', 
-      description: 'Maximum number of results to return (default: 5)'
+      type: 'number',
+      description: 'Maximum number of results to return (default: 5)',
     },
     threshold: {
       name: 'threshold',
       type: 'number',
-      description: 'Similarity threshold for results (default: 0.7)'
-    }
+      description: 'Similarity threshold for results (default: 0.7)',
+    },
   },
-  handler: async (params: Record<string, ToolParameterValue>, context?: ToolContext): Promise<ToolResult> => {
+  handler: async (
+    params: Record<string, ToolParameterValue>,
+    context?: ToolContext
+  ): Promise<ToolResult> => {
     // Extract and validate parameters
     const query = params.query as string;
     const limit = (params.limit as number) || 5;
     const threshold = (params.threshold as number) || 0.7;
-    
+
     // Get agent instance from context
     const agent = (context as KnowledgeToolContext)?.agent;
     if (!agent) {
@@ -54,21 +56,21 @@ export const knowledgeSearchTool: ToolDefinition = {
       return {
         success: false,
         data: null,
-        error: 'Agent does not have knowledge capabilities enabled'
+        error: 'Agent does not have knowledge capabilities enabled',
       };
     }
 
     try {
       const results = await agent.searchKnowledge(query, limit, threshold);
-      
+
       if (results.length === 0) {
         return {
           success: true,
           data: JSON.stringify({
             message: 'No relevant information found in knowledge base',
             results: [],
-            query
-          })
+            query,
+          }),
         };
       }
 
@@ -79,19 +81,19 @@ export const knowledgeSearchTool: ToolDefinition = {
           results: results.map((result: KnowledgeResult) => ({
             content: result.content,
             similarity: result.similarity,
-            metadata: result.metadata
+            metadata: result.metadata,
           })),
-          query
-        })
+          query,
+        }),
       };
     } catch (error) {
       return {
         success: false,
         data: null,
-        error: `Knowledge search failed: ${error}`
+        error: `Knowledge search failed: ${error}`,
       };
     }
-  }
+  },
 };
 
 export const knowledgeTools = [knowledgeSearchTool];

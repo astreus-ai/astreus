@@ -7,29 +7,29 @@ export class Logger implements ILogger {
 
   constructor(config: Partial<LoggerConfig> = {}) {
     const envLevel = process.env.LOG_LEVEL as LogLevel;
-    
+
     this.config = {
       level: envLevel || 'info',
       debug: config.debug || false,
       enableConsole: true,
       enableFile: false,
-      ...config
+      ...config,
     };
 
     // Create pino instance with pretty printing in development
     const isProduction = process.env.NODE_ENV === 'production';
-    
+
     const pinoConfig: pino.LoggerOptions = {
       level: this.config.level === 'success' ? 'info' : this.config.level,
       formatters: {
         level: (label) => {
           return { level: label };
-        }
+        },
       },
       base: {
-        framework: 'Astreus'
+        framework: 'Astreus',
       },
-      timestamp: this.config.debug ? pino.stdTimeFunctions.isoTime : false
+      timestamp: this.config.debug ? pino.stdTimeFunctions.isoTime : false,
     };
 
     // Pretty print in development, JSON in production
@@ -46,21 +46,27 @@ export class Logger implements ILogger {
             customColors: 'info:blue,warn:yellow,error:red,success:green',
             hideObject: true,
             singleLine: false,
-            messageKey: 'msg'
-          }
-        }
+            messageKey: 'msg',
+          },
+        },
       });
     } else {
       this.pino = pino(pinoConfig);
     }
   }
 
-  private formatLogObject(message: string, module: string = 'Core', data?: LogData, error?: Error, agentName?: string): Record<string, unknown> {
+  private formatLogObject(
+    message: string,
+    module: string = 'Core',
+    data?: LogData,
+    error?: Error,
+    agentName?: string
+  ): Record<string, unknown> {
     const logObject: Record<string, unknown> = {
       msg: message,
       module,
       framework: 'Astreus',
-      agent: agentName || this.config.agentName || 'System'
+      agent: agentName || this.config.agentName || 'System',
     };
 
     if (data) {
@@ -71,7 +77,7 @@ export class Logger implements ILogger {
       logObject.err = {
         message: error.message,
         stack: error.stack,
-        name: error.name
+        name: error.name,
       };
     }
 
@@ -106,10 +112,17 @@ export class Logger implements ILogger {
   }
 
   // Add a public log method for custom module names
-  log(level: LogLevel, message: string, module: string = 'Core', data?: LogData, error?: Error, agentName?: string): void {
+  log(
+    level: LogLevel,
+    message: string,
+    module: string = 'Core',
+    data?: LogData,
+    error?: Error,
+    agentName?: string
+  ): void {
     const logObj = this.formatLogObject(message, module, data, error, agentName);
-    
-    switch(level) {
+
+    switch (level) {
       case 'debug':
         this.pino.debug(logObj);
         break;

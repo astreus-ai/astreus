@@ -1,14 +1,14 @@
-// Main exports  
+// Main exports
 export { Agent } from './agent';
 export type { AgentConfig, AskOptions } from './agent/types';
 
 // Sub-agent exports
 export { SubAgent } from './sub-agent';
-export type { 
-  SubAgentTask, 
-  SubAgentResult, 
+export type {
+  SubAgentTask,
+  SubAgentResult,
   SubAgentCoordinationResult,
-  DelegationStrategy
+  DelegationStrategy,
 } from './sub-agent/types';
 
 // Common types
@@ -28,7 +28,13 @@ export type { EmbeddingConfig } from './knowledge';
 export type { Memory as MemoryType, MemorySearchOptions } from './memory/types';
 
 // Task types
-export type { Task as TaskType, TaskRequest, TaskResponse, TaskSearchOptions, TaskStatus } from './task/types';
+export type {
+  Task as TaskType,
+  TaskRequest,
+  TaskResponse,
+  TaskSearchOptions,
+  TaskStatus,
+} from './task/types';
 
 // LLM exports
 export { getLLM } from './llm';
@@ -40,27 +46,26 @@ export type { Logger, LoggerConfig, LogLevel } from './logger/types';
 
 // Graph exports
 export { Graph } from './graph';
-export type { 
-  Graph as GraphType, 
-  GraphNode, 
-  GraphEdge, 
-  GraphConfig, 
+export type {
+  Graph as GraphType,
+  GraphNode,
+  GraphEdge,
+  GraphConfig,
   GraphExecutionResult,
   AddAgentNodeOptions,
-  AddTaskNodeOptions 
+  AddTaskNodeOptions,
 } from './graph/types';
-
 
 // Plugin exports
 export { getPlugin, Plugin } from './plugin';
-export type { 
-  Plugin as PluginDefinition, 
-  ToolDefinition, 
-  ToolCall, 
-  ToolResult, 
+export type {
+  Plugin as PluginDefinition,
+  ToolDefinition,
+  ToolCall,
+  ToolResult,
   ToolContext,
   ToolCallResult,
-  PluginConfig 
+  PluginConfig,
 } from './plugin/types';
 
 // MCP exports
@@ -70,7 +75,7 @@ export type {
   MCPTool,
   MCPToolCall,
   MCPToolResult,
-  MCPServerDefinition
+  MCPServerDefinition,
 } from './mcp/types';
 
 // Knowledge exports
@@ -79,12 +84,7 @@ export type { KnowledgeConfig } from './knowledge';
 
 // Scheduler exports - simplified utilities only
 export { parseScheduleString } from './scheduler';
-export type { 
-  Schedule, 
-  ScheduledItem, 
-  SchedulerConfig,
-  ScheduleOptions 
-} from './scheduler/types';
+export type { Schedule, ScheduledItem, SchedulerConfig, ScheduleOptions } from './scheduler/types';
 
 // Default export
 export { default } from './agent';

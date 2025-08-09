@@ -25,9 +25,12 @@ export class Vision implements IAgentModule {
   private config: VisionConfig;
   private logger: Logger;
 
-  constructor(private agent?: IAgent, config?: VisionConfig) {
+  constructor(
+    private agent?: IAgent,
+    config?: VisionConfig
+  ) {
     this.logger = agent?.logger || getLogger();
-    
+
     // Handle agent-provided config
     if (!config && agent?.config) {
       // Use agent's visionModel if specified
@@ -38,12 +41,12 @@ export class Vision implements IAgentModule {
         config = this.autoDetectVisionConfig();
       }
     }
-    
+
     this.config = config || this.getConfigFromEnv();
 
     // User-facing info log
     this.logger.info('Vision module initialized');
-    
+
     this.logger.debug('Vision module initialized', {
       agentId: agent?.id || 0,
       agentName: agent?.name || 'standalone',
@@ -52,7 +55,7 @@ export class Vision implements IAgentModule {
       hasApiKey: !!this.config.apiKey,
       hasBaseURL: !!this.config.baseURL,
       agentModel: agent?.config?.model || 'none',
-      agentVisionModel: agent?.config?.visionModel || 'none'
+      agentVisionModel: agent?.config?.visionModel || 'none',
     });
   }
 
@@ -62,18 +65,27 @@ export class Vision implements IAgentModule {
       try {
         // Create vision tools with this instance so they have access to agent config
         const toolsWithInstance = createVisionTools(this);
-        
+
         const visionPlugin = {
           name: 'vision-tools',
           version: '1.0.0',
           description: 'Built-in vision analysis tools',
-          tools: toolsWithInstance
+          tools: toolsWithInstance,
         };
-        await (this.agent as IAgent & { registerPlugin: (plugin: { name: string; version: string; description?: string; tools?: ToolDefinition[] }) => Promise<void> }).registerPlugin(visionPlugin);
+        await (
+          this.agent as IAgent & {
+            registerPlugin: (plugin: {
+              name: string;
+              version: string;
+              description?: string;
+              tools?: ToolDefinition[];
+            }) => Promise<void>;
+          }
+        ).registerPlugin(visionPlugin);
       } catch (error) {
         // Plugin registration failed, but vision module can still work
-        this.logger.debug('Failed to register vision tools', { 
-          error: error instanceof Error ? error.message : String(error) 
+        this.logger.debug('Failed to register vision tools', {
+          error: error instanceof Error ? error.message : String(error),
         });
       }
     }
@@ -86,40 +98,40 @@ export class Vision implements IAgentModule {
       return {
         provider: 'openai',
         model: 'gpt-4o-mini',
-        apiKey: process.env.OPENAI_VISION_API_KEY
+        apiKey: process.env.OPENAI_VISION_API_KEY,
       };
     }
-    
+
     // Only use main OPENAI_API_KEY if it's not an OpenRouter key (which would have a base URL set)
     if (process.env.OPENAI_API_KEY && !process.env.OPENAI_BASE_URL) {
       return {
         provider: 'openai',
         model: 'gpt-4o-mini',
-        apiKey: process.env.OPENAI_API_KEY
+        apiKey: process.env.OPENAI_API_KEY,
       };
     }
-    
+
     if (process.env.ANTHROPIC_VISION_API_KEY || process.env.ANTHROPIC_API_KEY) {
       return {
         provider: 'claude',
         model: 'claude-3-5-sonnet-20241022',
-        apiKey: process.env.ANTHROPIC_VISION_API_KEY || process.env.ANTHROPIC_API_KEY
+        apiKey: process.env.ANTHROPIC_VISION_API_KEY || process.env.ANTHROPIC_API_KEY,
       };
     }
-    
+
     if (process.env.GEMINI_VISION_API_KEY || process.env.GEMINI_API_KEY) {
       return {
         provider: 'gemini',
         model: 'gemini-1.5-pro',
-        apiKey: process.env.GEMINI_VISION_API_KEY || process.env.GEMINI_API_KEY
+        apiKey: process.env.GEMINI_VISION_API_KEY || process.env.GEMINI_API_KEY,
       };
     }
-    
+
     // Default to Ollama (local)
     return {
       provider: 'ollama',
       model: 'llava',
-      baseURL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
+      baseURL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     };
   }
 
@@ -142,70 +154,86 @@ export class Vision implements IAgentModule {
     }
   }
 
-  private async getProviderForVision(): Promise<{ provider: { name: string; analyzeImage?: (imagePath: string, options?: VisionAnalysisOptions) => Promise<{ content: string }>; analyzeImageFromBase64?: (base64Data: string, options?: VisionAnalysisOptions) => Promise<{ content: string }>; getVisionModels: () => string[] }; model: string }> {
+  private async getProviderForVision(): Promise<{
+    provider: {
+      name: string;
+      analyzeImage?: (
+        imagePath: string,
+        options?: VisionAnalysisOptions
+      ) => Promise<{ content: string }>;
+      analyzeImageFromBase64?: (
+        base64Data: string,
+        options?: VisionAnalysisOptions
+      ) => Promise<{ content: string }>;
+      getVisionModels: () => string[];
+    };
+    model: string;
+  }> {
     const model = this.config.model;
     const providerType = this.config.provider;
-    
+
     this.logger.debug('Getting provider for vision', {
       configModel: model || 'undefined',
       configProvider: providerType || 'undefined',
       hasApiKey: !!this.config.apiKey,
-      hasBaseURL: !!this.config.baseURL
+      hasBaseURL: !!this.config.baseURL,
     });
-    
+
     if (providerType && model) {
       // Use specified provider and model - NEVER use main base URL for vision
       const mainProvider = await getLLMProvider(providerType, {
         apiKey: this.config.apiKey,
         baseUrl: this.config.baseURL || null, // Explicitly set to null to prevent fallback to main base URL
-        logger: this.logger
+        logger: this.logger,
       });
-      
+
       // Use dedicated vision provider if available
       const provider = mainProvider.getVisionProvider?.() || mainProvider;
-      
+
       // Check if provider supports vision
       if (!provider.analyzeImage) {
         throw new Error(`Provider ${providerType} does not support vision analysis`);
       }
-      
+
       // Check if model is supported
       const visionModels = mainProvider.getVisionModels();
       if (!visionModels.includes(model)) {
-        this.logger.warn(`Model ${model} is not in provider's vision models list. Proceeding anyway.`);
+        this.logger.warn(
+          `Model ${model} is not in provider's vision models list. Proceeding anyway.`
+        );
       }
-      
+
       return { provider, model };
     }
-    
+
     // Auto-detect provider based on available API keys - NEVER use main base URL for vision
     const config = this.autoDetectVisionConfig();
-    
+
     this.logger.debug('Auto-detected vision config', {
       provider: config.provider || 'undefined',
       model: config.model || 'undefined',
       hasApiKey: !!config.apiKey,
-      hasBaseURL: !!config.baseURL
+      hasBaseURL: !!config.baseURL,
     });
-    
+
     const mainProvider = await getLLMProvider(config.provider!, {
       apiKey: config.apiKey,
       baseUrl: config.baseURL || null, // Explicitly set to null to prevent fallback to main base URL
-      logger: this.logger
+      logger: this.logger,
     });
-    
+
     // Use dedicated vision provider if available
     const provider = mainProvider.getVisionProvider?.() || mainProvider;
-    
+
     return { provider, model: config.model! };
   }
 
   async analyzeImage(imagePath: string, options: AnalysisOptions = {}): Promise<string> {
     const fileName = path.basename(imagePath);
-    
+
     // User-facing info log
     this.logger.info(`Analyzing image: ${fileName}`);
-    
+
     this.logger.debug('Starting image analysis', {
       imagePath,
       fileName,
@@ -214,9 +242,9 @@ export class Vision implements IAgentModule {
       hasOptions: Object.keys(options).length > 0,
       hasAgent: !!this.agent,
       agentVisionModel: this.agent?.config?.visionModel || 'undefined',
-      agentId: this.agent?.id || 0
+      agentId: this.agent?.id || 0,
     });
-    
+
     try {
       const { provider, model } = await this.getProviderForVision();
       const visionOptions: VisionAnalysisOptions = {
@@ -227,17 +255,17 @@ export class Vision implements IAgentModule {
       };
 
       const result = await provider.analyzeImage!(imagePath, visionOptions);
-      
+
       // User-facing success message
       this.logger.info(`Image analysis completed for ${fileName}`);
-      
+
       this.logger.debug('Image analysis completed', {
         fileName,
         model: model,
         provider: 'unknown',
         processingTime: 0,
         resultLength: result.content.length,
-        resultPreview: result.content.slice(0, 100) + '...'
+        resultPreview: result.content.slice(0, 100) + '...',
       });
 
       return result.content;
@@ -247,21 +275,24 @@ export class Vision implements IAgentModule {
       this.logger.debug('Image analysis error', {
         fileName,
         error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack
+        hasStack: error instanceof Error && !!error.stack,
       });
       throw error;
     }
   }
 
-  async analyzeImageFromBase64(base64Image: string, options: AnalysisOptions = {}): Promise<string> {
+  async analyzeImageFromBase64(
+    base64Image: string,
+    options: AnalysisOptions = {}
+  ): Promise<string> {
     // User-facing info log
     this.logger.info('Analyzing base64 image');
-    
+
     this.logger.debug('Starting base64 image analysis', {
       provider: this.config.provider || 'auto',
       model: this.config.model || 'auto',
       base64Length: base64Image.length,
-      hasOptions: Object.keys(options).length > 0
+      hasOptions: Object.keys(options).length > 0,
     });
 
     try {
@@ -274,16 +305,16 @@ export class Vision implements IAgentModule {
       };
 
       const result = await provider.analyzeImageFromBase64!(base64Image, visionOptions);
-      
+
       // User-facing success message
       this.logger.info('Base64 image analysis completed');
-      
+
       this.logger.debug('Base64 image analysis completed', {
         model: model,
         provider: 'unknown',
         processingTime: 0,
         resultLength: result.content.length,
-        resultPreview: result.content.slice(0, 100) + '...'
+        resultPreview: result.content.slice(0, 100) + '...',
       });
 
       return result.content;
@@ -292,7 +323,7 @@ export class Vision implements IAgentModule {
       this.logger.error('Base64 image analysis failed');
       this.logger.debug('Base64 image analysis error', {
         error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack
+        hasStack: error instanceof Error && !!error.stack,
       });
       throw error;
     }

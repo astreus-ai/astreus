@@ -1,24 +1,23 @@
 import { IAgentModule, IAgent } from '../agent/types';
-import type { Agent } from '../agent';
+import { Agent } from '../agent';
 import { getDatabase } from '../database';
 import { Task } from '../task';
 import { getGraphStorage } from './storage';
 import { Logger, LogData } from '../logger/types';
-import { 
-  Graph as GraphType, 
-  GraphConfig, 
-  GraphNode, 
-  GraphEdge, 
+import {
+  Graph as GraphType,
+  GraphConfig,
+  GraphNode,
+  GraphEdge,
   GraphExecutionResult,
   GraphExecutionLogEntry,
   AddAgentNodeOptions,
   AddTaskNodeOptions,
   GraphExecutionStatus,
-  GraphSchedulingOptions
+  GraphSchedulingOptions,
 } from './types';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
-
 
 interface TaskExecutionResult {
   type: 'task';
@@ -56,7 +55,7 @@ export class Graph implements IAgentModule {
     this.knex = null!; // Will be initialized in initialize()
     this.agent = agent;
     this.logger = agent?.logger;
-    
+
     this.graph = {
       config,
       nodes: [],
@@ -64,7 +63,7 @@ export class Graph implements IAgentModule {
       status: 'idle',
       executionLog: [],
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
     };
 
     // User-facing info log
@@ -78,7 +77,7 @@ export class Graph implements IAgentModule {
     const db = await getDatabase();
     this.knex = db.getKnex();
     this.initialized = true;
-    
+
     // User-facing info log
     if (this.logger) {
       this.logger.info('Graph module ready', undefined, this.agent?.name);
@@ -88,7 +87,7 @@ export class Graph implements IAgentModule {
   // Node management
   addAgentNode(options: AddAgentNodeOptions): string {
     const nodeId = this.generateNodeId();
-    
+
     const node: GraphNode = {
       id: nodeId,
       type: 'agent',
@@ -99,44 +98,45 @@ export class Graph implements IAgentModule {
       dependencies: options.dependencies || [],
       metadata: options.metadata,
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
     };
 
     this.graph.nodes.push(node);
     this.graph.updatedAt = new Date();
-    
+
     this.log('debug', `Added agent node: ${node.name} (agentId: ${options.agentId})`, nodeId);
-    
+
     return nodeId;
   }
 
   addTaskNode(options: AddTaskNodeOptions): string {
     const nodeId = this.generateNodeId();
-    
+
     // Handle dependsOn (node names) vs dependencies (node IDs)
     let dependencies: string[] = options.dependencies || [];
     if (options.dependsOn && options.dependsOn.length > 0) {
       // Convert node names to node IDs
-      const dependencyIds = options.dependsOn.map(nodeName => {
-        const depNode = this.graph.nodes.find(n => 
-          n.metadata?.name === nodeName || 
-          n.name === nodeName
-        );
-        if (!depNode) {
-          this.log('warn', `Dependency node not found: ${nodeName}`, nodeId);
-          return null;
-        }
-        return depNode.id;
-      }).filter(id => id !== null) as string[];
-      
+      const dependencyIds = options.dependsOn
+        .map((nodeName) => {
+          const depNode = this.graph.nodes.find(
+            (n) => n.metadata?.name === nodeName || n.name === nodeName
+          );
+          if (!depNode) {
+            this.log('warn', `Dependency node not found: ${nodeName}`, nodeId);
+            return null;
+          }
+          return depNode.id;
+        })
+        .filter((id) => id !== null) as string[];
+
       dependencies = [...dependencies, ...dependencyIds];
     }
-    
+
     // Check if schedule is provided (no validation needed - just store the string)
     if (options.schedule) {
       this.log('debug', `Schedule provided: ${options.schedule}`, nodeId);
     }
-    
+
     const node: GraphNode = {
       id: nodeId,
       type: 'task',
@@ -155,69 +155,75 @@ export class Graph implements IAgentModule {
       schedule: options.schedule,
       metadata: {
         ...options.metadata,
-        ...(options.name ? { name: options.name } : {})
+        ...(options.name ? { name: options.name } : {}),
       },
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
     };
 
     this.graph.nodes.push(node);
     this.graph.updatedAt = new Date();
-    
+
     const scheduleInfo = options.schedule ? ` (scheduled: ${options.schedule})` : '';
-    this.log('debug', `Added task node: ${node.name} (prompt: "${options.prompt.slice(0, 50)}...")${scheduleInfo}`, nodeId);
-    
+    this.log(
+      'debug',
+      `Added task node: ${node.name} (prompt: "${options.prompt.slice(0, 50)}...")${scheduleInfo}`,
+      nodeId
+    );
+
     return nodeId;
   }
 
   addEdge(fromNodeId: string, toNodeId: string, condition?: string): string {
     const edgeId = this.generateEdgeId();
-    
+
     const edge: GraphEdge = {
       id: edgeId,
       fromNodeId,
       toNodeId,
-      condition
+      condition,
     };
 
     this.graph.edges.push(edge);
-    
+
     // Add dependency to target node
-    const targetNode = this.graph.nodes.find(n => n.id === toNodeId);
+    const targetNode = this.graph.nodes.find((n) => n.id === toNodeId);
     if (targetNode && !targetNode.dependencies.includes(fromNodeId)) {
       targetNode.dependencies.push(fromNodeId);
     }
-    
+
     this.graph.updatedAt = new Date();
-    
+
     return edgeId;
   }
 
   // Execution
-  async run(options?: { stream?: boolean; timeout?: number; nodeTimeout?: number } & GraphSchedulingOptions): Promise<GraphExecutionResult> {
+  async run(
+    options?: { stream?: boolean; timeout?: number; nodeTimeout?: number } & GraphSchedulingOptions
+  ): Promise<GraphExecutionResult> {
     await this.initialize();
-    
+
     // Auto-save if not already saved
     if (!this.graph.id) {
       this.log('info', 'Auto-saving graph before execution');
       await this.save();
     }
-    
+
     // Detect scheduled nodes
-    const hasScheduledNodes = this.graph.nodes.some(node => node.schedule);
+    const hasScheduledNodes = this.graph.nodes.some((node) => node.schedule);
     if (hasScheduledNodes) {
       this.log('info', 'Detected scheduled nodes in graph');
     }
-    
+
     this.log('info', 'Starting graph execution with scheduling support');
     this.graph.status = 'running';
     this.graph.startedAt = new Date();
-    
+
     const results: Record<string, NodeExecutionResult> = {};
     const errors: Record<string, string> = {};
     let completedNodes = 0;
     let failedNodes = 0;
-    
+
     // Default scheduling options with timeout support
     const schedulingOptions = {
       respectSchedules: true,
@@ -225,52 +231,63 @@ export class Graph implements IAgentModule {
       schedulingCheckInterval: 1000,
       timeout: options?.timeout || 300000, // 5 minutes default
       nodeTimeout: options?.nodeTimeout || 60000, // 1 minute per node default
-      ...options
+      ...options,
     };
-    
+
     // Set up overall graph timeout
     const overallTimeoutId = setTimeout(() => {
       this.graph.status = 'failed';
       this.log('error', `Graph execution timed out after ${schedulingOptions.timeout}ms`);
       throw new Error(`Graph execution timed out after ${schedulingOptions.timeout}ms`);
     }, schedulingOptions.timeout);
-    
+
     const nodeTimeouts = new Map<string, NodeJS.Timeout>();
-    
+
     try {
       // Ultra-simplified scheduler - no complex schedule calculation needed
-      
+
       const sortedNodes = this.topologicalSort();
-      this.log('debug', `Execution plan: ${sortedNodes.length} nodes, max concurrency: ${this.graph.config.maxConcurrency || 1}, scheduling enabled: ${schedulingOptions.respectSchedules}`);
-      
+      this.log(
+        'debug',
+        `Execution plan: ${sortedNodes.length} nodes, max concurrency: ${this.graph.config.maxConcurrency || 1}, scheduling enabled: ${schedulingOptions.respectSchedules}`
+      );
+
       const maxConcurrency = this.graph.config.maxConcurrency || 1;
       const executing = new Set<string>();
       let currentIndex = 0;
-      
+
       // Find the last node for streaming
       const lastNode = sortedNodes[sortedNodes.length - 1];
       const shouldStreamLastNode = options?.stream && lastNode?.type === 'task';
-      
+
       while (currentIndex < sortedNodes.length || executing.size > 0) {
-        
         // Start new nodes if we have capacity
         while (executing.size < maxConcurrency && currentIndex < sortedNodes.length) {
           const node = sortedNodes[currentIndex];
-          
+
           // Check if node is ready to execute (dependencies only in ultra-simplified mode)
           if (this.areDependenciesCompleted(node)) {
-            this.log('debug', `Node ${node.name} ready to execute - all dependencies completed`, node.id);
+            this.log(
+              'debug',
+              `Node ${node.name} ready to execute - all dependencies completed`,
+              node.id
+            );
             executing.add(node.id);
-            
+
             // Set up node timeout
             const nodeTimeoutId = setTimeout(() => {
               if (executing.has(node.id)) {
-                errors[node.id] = `Node execution timed out after ${schedulingOptions.nodeTimeout}ms`;
+                errors[node.id] =
+                  `Node execution timed out after ${schedulingOptions.nodeTimeout}ms`;
                 node.status = 'failed';
                 node.error = `Node execution timed out after ${schedulingOptions.nodeTimeout}ms`;
                 failedNodes++;
                 executing.delete(node.id);
-                this.log('error', `Node ${node.name} timed out after ${schedulingOptions.nodeTimeout}ms`, node.id);
+                this.log(
+                  'error',
+                  `Node ${node.name} timed out after ${schedulingOptions.nodeTimeout}ms`,
+                  node.id
+                );
               }
             }, schedulingOptions.nodeTimeout);
             nodeTimeouts.set(node.id, nodeTimeoutId);
@@ -278,7 +295,7 @@ export class Graph implements IAgentModule {
             // Special handling for last node with streaming
             if (shouldStreamLastNode && node.id === lastNode.id) {
               this.executeNode(node, true) // Pass stream=true for last node
-                .then(result => {
+                .then((result) => {
                   const timeoutId = nodeTimeouts.get(node.id);
                   if (timeoutId) {
                     clearTimeout(timeoutId);
@@ -291,7 +308,7 @@ export class Graph implements IAgentModule {
                   executing.delete(node.id);
                   this.log('info', `Node ${node.name} completed (streamed)`, node.id);
                 })
-                .catch(error => {
+                .catch((error) => {
                   const timeoutId = nodeTimeouts.get(node.id);
                   if (timeoutId) {
                     clearTimeout(timeoutId);
@@ -306,7 +323,7 @@ export class Graph implements IAgentModule {
                 });
             } else {
               this.executeNode(node)
-                .then(result => {
+                .then((result) => {
                   const timeoutId = nodeTimeouts.get(node.id);
                   if (timeoutId) {
                     clearTimeout(timeoutId);
@@ -318,57 +335,68 @@ export class Graph implements IAgentModule {
                   completedNodes++;
                   executing.delete(node.id);
                   this.log('info', `Node ${node.name} completed`, node.id);
-                 })
-                 .catch(error => {
-                   const timeoutId = nodeTimeouts.get(node.id);
-                   if (timeoutId) {
-                     clearTimeout(timeoutId);
-                     nodeTimeouts.delete(node.id);
-                   }
-                   errors[node.id] = error.message;
-                   node.status = 'failed';
-                   node.error = error.message;
-                   failedNodes++;
-                   executing.delete(node.id);
-                   this.log('error', `Node ${node.name} failed: ${error.message}`, node.id);
-                 });
-             }
-             currentIndex++;
-           } else {
-             // Node not ready (dependencies not completed)
-             break;
-           }
-         }
-         
-         // Wait a bit before checking again
-         if (executing.size > 0) {
-           await new Promise(resolve => setTimeout(resolve, 100));
-         }
-        
+                })
+                .catch((error) => {
+                  const timeoutId = nodeTimeouts.get(node.id);
+                  if (timeoutId) {
+                    clearTimeout(timeoutId);
+                    nodeTimeouts.delete(node.id);
+                  }
+                  errors[node.id] = error.message;
+                  node.status = 'failed';
+                  node.error = error.message;
+                  failedNodes++;
+                  executing.delete(node.id);
+                  this.log('error', `Node ${node.name} failed: ${error.message}`, node.id);
+                });
+            }
+            currentIndex++;
+          } else {
+            // Node not ready (dependencies not completed)
+            break;
+          }
+        }
+
+        // Wait a bit before checking again
+        if (executing.size > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+
         // Skip nodes that have failed dependencies (not running/pending ones)
-        while (currentIndex < sortedNodes.length && this.hasFailedDependencies(sortedNodes[currentIndex])) {
+        while (
+          currentIndex < sortedNodes.length &&
+          this.hasFailedDependencies(sortedNodes[currentIndex])
+        ) {
           const node = sortedNodes[currentIndex];
           node.status = 'skipped';
-          
+
           // Debug: show which dependencies failed
-          const failedDeps = node.dependencies.filter(depId => {
-            const depNode = this.graph.nodes.find(n => n.id === depId);
+          const failedDeps = node.dependencies.filter((depId) => {
+            const depNode = this.graph.nodes.find((n) => n.id === depId);
             return depNode?.status === 'failed';
           });
-          
-          this.log('warn', `Node ${node.name} skipped due to failed dependencies: ${failedDeps.map(id => {
-            const depNode = this.graph.nodes.find(n => n.id === id);
-            return `${depNode?.name || id}(${depNode?.status || 'unknown'})`;
-          }).join(', ')}`, node.id);
+
+          this.log(
+            'warn',
+            `Node ${node.name} skipped due to failed dependencies: ${failedDeps
+              .map((id) => {
+                const depNode = this.graph.nodes.find((n) => n.id === id);
+                return `${depNode?.name || id}(${depNode?.status || 'unknown'})`;
+              })
+              .join(', ')}`,
+            node.id
+          );
           currentIndex++;
         }
       }
-      
+
       this.graph.status = failedNodes > 0 ? 'failed' : 'completed';
-      
     } catch (error) {
       this.graph.status = 'failed';
-      this.log('error', `Graph execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.log(
+        'error',
+        `Graph execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     } finally {
       // Clean up all timeouts
       clearTimeout(overallTimeoutId);
@@ -378,12 +406,15 @@ export class Graph implements IAgentModule {
       }
       nodeTimeouts.clear();
     }
-    
+
     this.graph.completedAt = new Date();
     const duration = this.graph.completedAt.getTime() - this.graph.startedAt!.getTime();
-    
-    this.log('info', `Graph execution ${this.graph.status}. Completed: ${completedNodes}, Failed: ${failedNodes} (${duration}ms)`);
-    
+
+    this.log(
+      'info',
+      `Graph execution ${this.graph.status}. Completed: ${completedNodes}, Failed: ${failedNodes} (${duration}ms)`
+    );
+
     return {
       graph: this.graph,
       success: this.graph.status === 'completed',
@@ -391,7 +422,7 @@ export class Graph implements IAgentModule {
       failedNodes,
       duration,
       results: Object.fromEntries(Object.entries(results).map(([k, v]) => [k, JSON.stringify(v)])),
-      errors
+      errors,
     };
   }
 
@@ -399,7 +430,7 @@ export class Graph implements IAgentModule {
     this.log('info', `Executing node ${node.name}`, node.id);
     node.status = 'running';
     node.updatedAt = new Date();
-    
+
     if (node.type === 'agent') {
       // For agent nodes, we just mark them as completed
       // The actual agent work would be defined by connected task nodes
@@ -408,54 +439,61 @@ export class Graph implements IAgentModule {
       if (!node.agentId) {
         throw new Error(`Task node ${node.name} has no assigned agent`);
       }
-      
+
       if (!node.prompt) {
         throw new Error(`Task node ${node.name} has no prompt`);
       }
-      
+
       // Build context from dependency results and agent context
       let enhancedPrompt = node.prompt;
-      
-      
+
       if (node.dependencies.length > 0) {
         const dependencyResults: string[] = [];
-        
+
         for (const depId of node.dependencies) {
-          const depNode = this.graph.nodes.find(n => n.id === depId);
+          const depNode = this.graph.nodes.find((n) => n.id === depId);
           if (depNode?.result) {
             try {
               const depResult = JSON.parse(String(depNode.result));
               if (depResult.type === 'task' && depResult.response) {
-                dependencyResults.push(`Previous result from ${depNode.name}: ${depResult.response}`);
+                dependencyResults.push(
+                  `Previous result from ${depNode.name}: ${depResult.response}`
+                );
               }
             } catch {
               // If parsing fails, use raw result
-              dependencyResults.push(`Previous result from ${depNode.name}: ${String(depNode.result)}`);
+              dependencyResults.push(
+                `Previous result from ${depNode.name}: ${String(depNode.result)}`
+              );
             }
           }
         }
-        
+
         if (dependencyResults.length > 0) {
           enhancedPrompt = `${dependencyResults.join('\n\n')}\n\nBased on the above context, ${node.prompt}`;
-          this.log('debug', `Enhanced prompt with ${dependencyResults.length} dependency results`, node.id);
+          this.log(
+            'debug',
+            `Enhanced prompt with ${dependencyResults.length} dependency results`,
+            node.id
+          );
         }
       }
-      
+
       // Execute task using the assigned agent
       if (!this.agent) {
         throw new Error(`No agent available for task node ${node.name}`);
       }
-      
+
       // Determine if sub-agents should be used
       const shouldUseSubAgents = this.shouldUseSubAgents(node);
-      
+
       if (shouldUseSubAgents) {
         // Use agent.ask() with sub-agent delegation
         this.log('info', `Using sub-agent delegation for node ${node.name}`, node.id);
-        
+
         // Enhanced context for sub-agent coordination
         let contextualPrompt = enhancedPrompt;
-        
+
         // Add graph context for sub-agents
         if (this.graph.nodes.length > 1) {
           const graphContext = this.buildGraphContext(node);
@@ -464,15 +502,29 @@ export class Graph implements IAgentModule {
             this.log('debug', `Enhanced prompt with graph context for sub-agents`, node.id);
           }
         }
-        
-        const response = await (this.agent as IAgent & { ask: (prompt: string, options?: Record<string, unknown>) => Promise<string> }).ask(contextualPrompt, {
+
+        const response = await (
+          this.agent as IAgent & {
+            ask: (prompt: string, options?: Record<string, unknown>) => Promise<string>;
+          }
+        ).ask(contextualPrompt, {
           model: node.model,
           stream: forceStream || node.stream,
           useSubAgents: true,
-          delegation: node.subAgentDelegation || (this.graph.config.subAgentCoordination === 'adaptive' ? 'auto' : this.graph.config.subAgentCoordination) || 'auto',
-          coordination: node.subAgentCoordination || (this.graph.config.subAgentCoordination === 'adaptive' ? 'sequential' : this.graph.config.subAgentCoordination) || 'sequential'
+          delegation:
+            node.subAgentDelegation ||
+            (this.graph.config.subAgentCoordination === 'adaptive'
+              ? 'auto'
+              : this.graph.config.subAgentCoordination) ||
+            'auto',
+          coordination:
+            node.subAgentCoordination ||
+            (this.graph.config.subAgentCoordination === 'adaptive'
+              ? 'sequential'
+              : this.graph.config.subAgentCoordination) ||
+            'sequential',
         });
-        
+
         // Enhanced result with sub-agent metadata
         return {
           type: 'task',
@@ -482,46 +534,51 @@ export class Graph implements IAgentModule {
           usage: undefined, // Usage tracking not available with direct ask()
           subAgentUsed: true,
           delegationStrategy: node.subAgentDelegation || 'auto',
-          coordinationPattern: node.subAgentCoordination || (this.graph.config.subAgentCoordination === 'adaptive' ? 'sequential' : this.graph.config.subAgentCoordination) || 'sequential'
+          coordinationPattern:
+            node.subAgentCoordination ||
+            (this.graph.config.subAgentCoordination === 'adaptive'
+              ? 'sequential'
+              : this.graph.config.subAgentCoordination) ||
+            'sequential',
         };
       } else {
         // Use traditional Task module execution
         const taskModule = new Task(this.agent);
         await taskModule.initialize();
-        
+
         const createdTask = await taskModule.createTask({
           prompt: enhancedPrompt,
-          metadata: node.metadata
+          metadata: node.metadata,
         });
-        
-        const taskResponse = await taskModule.executeTask(createdTask.id!, { 
+
+        const taskResponse = await taskModule.executeTask(createdTask.id!, {
           model: node.model,
-          stream: forceStream || node.stream 
+          stream: forceStream || node.stream,
         });
-        
+
         return {
           type: 'task',
           taskId: createdTask.id!,
           response: taskResponse.response,
           model: taskResponse.model,
-          usage: taskResponse.usage
+          usage: taskResponse.usage,
         };
       }
     }
-    
+
     throw new Error(`Unknown node type: ${node.type}`);
   }
 
   private areDependenciesCompleted(node: GraphNode): boolean {
-    return node.dependencies.every(depId => {
-      const depNode = this.graph.nodes.find(n => n.id === depId);
+    return node.dependencies.every((depId) => {
+      const depNode = this.graph.nodes.find((n) => n.id === depId);
       return depNode?.status === 'completed';
     });
   }
 
   private hasFailedDependencies(node: GraphNode): boolean {
-    return node.dependencies.some(depId => {
-      const depNode = this.graph.nodes.find(n => n.id === depId);
+    return node.dependencies.some((depId) => {
+      const depNode = this.graph.nodes.find((n) => n.id === depId);
       return depNode?.status === 'failed';
     });
   }
@@ -530,29 +587,32 @@ export class Graph implements IAgentModule {
    * Build contextual information about the graph for sub-agent coordination
    */
   private buildGraphContext(currentNode: GraphNode): string | null {
-    const completedNodes = this.graph.nodes.filter(n => 
-      n.status === 'completed' && n.id !== currentNode.id
+    const completedNodes = this.graph.nodes.filter(
+      (n) => n.status === 'completed' && n.id !== currentNode.id
     );
-    
+
     if (completedNodes.length === 0) {
       return null;
     }
-    
+
     const contextParts: string[] = [];
-    
+
     // Add graph structure overview
-    contextParts.push(`This task is part of a ${this.graph.nodes.length}-node workflow: "${this.graph.config.name || 'Unnamed Graph'}"`);
-    
+    contextParts.push(
+      `This task is part of a ${this.graph.nodes.length}-node workflow: "${this.graph.config.name || 'Unnamed Graph'}"`
+    );
+
     // Add completed node summaries
-    const completedSummaries = completedNodes.map(node => {
+    const completedSummaries = completedNodes.map((node) => {
       let summary = `- ${node.name}: ${node.status}`;
       if (node.result) {
         try {
           const result = JSON.parse(String(node.result));
           if (result.response) {
-            const truncatedResponse = result.response.length > 150 
-              ? result.response.substring(0, 150) + '...' 
-              : result.response;
+            const truncatedResponse =
+              result.response.length > 150
+                ? result.response.substring(0, 150) + '...'
+                : result.response;
             summary += ` (Result: ${truncatedResponse})`;
           }
         } catch {
@@ -561,21 +621,21 @@ export class Graph implements IAgentModule {
       }
       return summary;
     });
-    
+
     if (completedSummaries.length > 0) {
       contextParts.push(`Previous workflow steps:\n${completedSummaries.join('\n')}`);
     }
-    
+
     // Add remaining workflow steps
-    const pendingNodes = this.graph.nodes.filter(n => 
-      n.status === 'pending' && n.id !== currentNode.id
+    const pendingNodes = this.graph.nodes.filter(
+      (n) => n.status === 'pending' && n.id !== currentNode.id
     );
-    
+
     if (pendingNodes.length > 0) {
-      const pendingSummaries = pendingNodes.map(node => `- ${node.name}: pending`);
+      const pendingSummaries = pendingNodes.map((node) => `- ${node.name}: pending`);
       contextParts.push(`Upcoming workflow steps:\n${pendingSummaries.join('\n')}`);
     }
-    
+
     return contextParts.join('\n\n');
   }
 
@@ -587,19 +647,19 @@ export class Graph implements IAgentModule {
     if (node.useSubAgents !== undefined) {
       return node.useSubAgents;
     }
-    
+
     // If graph is sub-agent aware and agent has sub-agents, use them
     if (this.graph.config.subAgentAware && this.agent?.config.subAgents?.length) {
       return true;
     }
-    
+
     // If optimization is enabled and agent has sub-agents, use them for complex tasks
     if (this.graph.config.optimizeSubAgentUsage && this.agent?.config.subAgents?.length) {
       // Simple heuristic: use sub-agents for longer prompts (more complex tasks)
       const promptLength = node.prompt?.length || 0;
       return promptLength > 100; // Threshold for "complex" tasks
     }
-    
+
     return false;
   }
 
@@ -607,40 +667,40 @@ export class Graph implements IAgentModule {
     const sorted: GraphNode[] = [];
     const visited = new Set<string>();
     const visiting = new Set<string>();
-    
+
     const visit = (nodeId: string) => {
       if (visiting.has(nodeId)) {
         throw new Error(`Circular dependency detected involving node ${nodeId}`);
       }
-      
+
       if (visited.has(nodeId)) {
         return;
       }
-      
+
       visiting.add(nodeId);
-      
-      const node = this.graph.nodes.find(n => n.id === nodeId);
+
+      const node = this.graph.nodes.find((n) => n.id === nodeId);
       if (!node) {
         throw new Error(`Node ${nodeId} not found`);
       }
-      
+
       // Visit dependencies first
-      node.dependencies.forEach(depId => visit(depId));
-      
+      node.dependencies.forEach((depId) => visit(depId));
+
       visiting.delete(nodeId);
       visited.add(nodeId);
       sorted.push(node);
     };
-    
+
     // Sort nodes by priority (higher priority first)
     const nodesByPriority = [...this.graph.nodes].sort((a, b) => b.priority - a.priority);
-    
-    nodesByPriority.forEach(node => {
+
+    nodesByPriority.forEach((node) => {
       if (!visited.has(node.id)) {
         visit(node.id);
       }
     });
-    
+
     return sorted;
   }
 
@@ -649,25 +709,36 @@ export class Graph implements IAgentModule {
       timestamp: new Date(),
       level,
       message,
-      nodeId
+      nodeId,
     };
-    
+
     this.graph.executionLog.push(entry);
-    
+
     // Also log to agent's logger if available
     if (this.logger) {
       const nodeContext = nodeId ? ` [Node: ${nodeId}]` : '';
       const fullMessage = message + nodeContext;
-      
+
       // Use the logger's log method with 'Graph' as module name
       // Check if logger has the public log method (it should based on implementation)
       if ('log' in this.logger && typeof this.logger.log === 'function') {
-        (this.logger as { log: (level: string, message: string, module?: string, data?: LogData, error?: Error, agentName?: string) => void }).log(
-          level, 
-          fullMessage, 
-          'Graph', 
-          undefined, 
-          level === 'error' ? new Error(fullMessage) : undefined, 
+        (
+          this.logger as {
+            log: (
+              level: string,
+              message: string,
+              module?: string,
+              data?: LogData,
+              error?: Error,
+              agentName?: string
+            ) => void;
+          }
+        ).log(
+          level,
+          fullMessage,
+          'Graph',
+          undefined,
+          level === 'error' ? new Error(fullMessage) : undefined,
           this.agent?.name
         );
       } else {
@@ -721,15 +792,15 @@ export class Graph implements IAgentModule {
 
   // Utility methods
   getNode(id: string): GraphNode | undefined {
-    return this.graph.nodes.find(n => n.id === id);
+    return this.graph.nodes.find((n) => n.id === id);
   }
 
   getNodesByType(type: 'agent' | 'task'): GraphNode[] {
-    return this.graph.nodes.filter(n => n.type === type);
+    return this.graph.nodes.filter((n) => n.type === type);
   }
 
   getNodesByStatus(status: GraphNode['status']): GraphNode[] {
-    return this.graph.nodes.filter(n => n.status === status);
+    return this.graph.nodes.filter((n) => n.status === status);
   }
 
   // Memory methods for graph
@@ -738,19 +809,27 @@ export class Graph implements IAgentModule {
       throw new Error('No default agent set for this graph');
     }
 
-    const { Agent } = await import('../agent');
     const agent = await Agent.findById(this.graph.config.defaultAgentId);
-    
+
     if (!agent || !agent.hasMemory()) {
       return [];
     }
 
     // Check if agent has listMemories method (dynamically bound)
-    if ('listMemories' in agent && typeof (agent as Agent & { listMemories?: (options: { orderBy: string; order: string }) => Promise<MemoryType[]> }).listMemories === 'function') {
-      const agentWithMemory = agent as Agent & { listMemories: (options: { orderBy: string; order: string }) => Promise<MemoryType[]> };
+    if (
+      'listMemories' in agent &&
+      typeof (
+        agent as Agent & {
+          listMemories?: (options: { orderBy: string; order: string }) => Promise<MemoryType[]>;
+        }
+      ).listMemories === 'function'
+    ) {
+      const agentWithMemory = agent as Agent & {
+        listMemories: (options: { orderBy: string; order: string }) => Promise<MemoryType[]>;
+      };
       return await agentWithMemory.listMemories({
         orderBy: 'createdAt',
-        order: 'asc'
+        order: 'asc',
       });
     }
     return [];
@@ -761,16 +840,24 @@ export class Graph implements IAgentModule {
       throw new Error('No default agent set for this graph');
     }
 
-    const { Agent } = await import('../agent');
     const agent = await Agent.findById(this.graph.config.defaultAgentId);
-    
+
     if (!agent || !agent.hasMemory()) {
       return [];
     }
 
     // Check if agent has searchMemories method (dynamically bound)
-    if ('searchMemories' in agent && typeof (agent as Agent & { searchMemories?: (query: string, limit?: number) => Promise<MemoryType[]> }).searchMemories === 'function') {
-      const agentWithMemory = agent as Agent & { searchMemories: (query: string, limit?: number) => Promise<MemoryType[]> };
+    if (
+      'searchMemories' in agent &&
+      typeof (
+        agent as Agent & {
+          searchMemories?: (query: string, limit?: number) => Promise<MemoryType[]>;
+        }
+      ).searchMemories === 'function'
+    ) {
+      const agentWithMemory = agent as Agent & {
+        searchMemories: (query: string, limit?: number) => Promise<MemoryType[]>;
+      };
       return await agentWithMemory.searchMemories(query, limit);
     }
     return [];
@@ -814,7 +901,7 @@ export class Graph implements IAgentModule {
   static async findById(graphId: number): Promise<Graph | null> {
     const storage = getGraphStorage();
     const graphData = await storage.loadGraph(graphId);
-    
+
     if (!graphData) {
       return null;
     }
@@ -836,7 +923,7 @@ export class Graph implements IAgentModule {
   }
 
   // Sub-agent coordination utilities
-  
+
   /**
    * Enable sub-agent awareness for all task nodes in the graph
    */
@@ -845,57 +932,66 @@ export class Graph implements IAgentModule {
     this.graph.updatedAt = new Date();
     this.log('info', 'Sub-agent awareness enabled for graph');
   }
-  
+
   /**
    * Configure sub-agent delegation for specific nodes
    */
-  configureSubAgentDelegation(nodeIds: string[], delegation: 'auto' | 'manual' | 'sequential'): void {
+  configureSubAgentDelegation(
+    nodeIds: string[],
+    delegation: 'auto' | 'manual' | 'sequential'
+  ): void {
     let configuredCount = 0;
-    
-    nodeIds.forEach(nodeId => {
-      const node = this.graph.nodes.find(n => n.id === nodeId);
+
+    nodeIds.forEach((nodeId) => {
+      const node = this.graph.nodes.find((n) => n.id === nodeId);
       if (node && node.type === 'task') {
         node.subAgentDelegation = delegation;
         node.updatedAt = new Date();
         configuredCount++;
       }
     });
-    
+
     this.graph.updatedAt = new Date();
-    this.log('info', `Configured sub-agent delegation (${delegation}) for ${configuredCount} nodes`);
+    this.log(
+      'info',
+      `Configured sub-agent delegation (${delegation}) for ${configuredCount} nodes`
+    );
   }
-  
+
   /**
    * Configure sub-agent coordination for specific nodes
    */
   configureSubAgentCoordination(nodeIds: string[], coordination: 'parallel' | 'sequential'): void {
     let configuredCount = 0;
-    
-    nodeIds.forEach(nodeId => {
-      const node = this.graph.nodes.find(n => n.id === nodeId);
+
+    nodeIds.forEach((nodeId) => {
+      const node = this.graph.nodes.find((n) => n.id === nodeId);
       if (node && node.type === 'task') {
         node.subAgentCoordination = coordination;
         node.updatedAt = new Date();
         configuredCount++;
       }
     });
-    
+
     this.graph.updatedAt = new Date();
-    this.log('info', `Configured sub-agent coordination (${coordination}) for ${configuredCount} nodes`);
+    this.log(
+      'info',
+      `Configured sub-agent coordination (${coordination}) for ${configuredCount} nodes`
+    );
   }
-  
+
   /**
    * Get nodes that are currently using sub-agents
    */
   getSubAgentEnabledNodes(): GraphNode[] {
-    return this.graph.nodes.filter(node => 
-      node.type === 'task' && (
-        node.useSubAgents === true ||
-        (this.graph.config.subAgentAware && this.agent?.config.subAgents?.length)
-      )
+    return this.graph.nodes.filter(
+      (node) =>
+        node.type === 'task' &&
+        (node.useSubAgents === true ||
+          (this.graph.config.subAgentAware && this.agent?.config.subAgents?.length))
     );
   }
-  
+
   /**
    * Get sub-agent usage statistics for the graph
    */
@@ -905,28 +1001,30 @@ export class Graph implements IAgentModule {
     delegationStrategies: Record<string, number>;
     coordinationPatterns: Record<string, number>;
   } {
-    const taskNodes = this.graph.nodes.filter(n => n.type === 'task');
+    const taskNodes = this.graph.nodes.filter((n) => n.type === 'task');
     const subAgentNodes = this.getSubAgentEnabledNodes();
-    
+
     const delegationStats: Record<string, number> = {};
     const coordinationStats: Record<string, number> = {};
-    
-    subAgentNodes.forEach(node => {
-      const delegation = node.subAgentDelegation || this.graph.config.subAgentCoordination || 'auto';
-      const coordination = node.subAgentCoordination || this.graph.config.subAgentCoordination || 'sequential';
-      
+
+    subAgentNodes.forEach((node) => {
+      const delegation =
+        node.subAgentDelegation || this.graph.config.subAgentCoordination || 'auto';
+      const coordination =
+        node.subAgentCoordination || this.graph.config.subAgentCoordination || 'sequential';
+
       delegationStats[delegation] = (delegationStats[delegation] || 0) + 1;
       coordinationStats[coordination] = (coordinationStats[coordination] || 0) + 1;
     });
-    
+
     return {
       totalNodes: taskNodes.length,
       subAgentEnabledNodes: subAgentNodes.length,
       delegationStrategies: delegationStats,
-      coordinationPatterns: coordinationStats
+      coordinationPatterns: coordinationStats,
     };
   }
-  
+
   /**
    * Optimize sub-agent usage across the graph based on task complexity
    */
@@ -935,18 +1033,18 @@ export class Graph implements IAgentModule {
       this.log('warn', 'No sub-agents available for optimization');
       return;
     }
-    
+
     this.graph.config.optimizeSubAgentUsage = true;
-    
+
     // Enable sub-agent awareness
     this.graph.config.subAgentAware = true;
-    
+
     // Analyze task complexity and configure coordination
-    this.graph.nodes.forEach(node => {
+    this.graph.nodes.forEach((node) => {
       if (node.type === 'task' && node.prompt) {
         const promptLength = node.prompt.length;
         const hasDepencies = node.dependencies.length > 0;
-        
+
         // Complex tasks: long prompts or nodes with dependencies
         if (promptLength > 200 || hasDepencies) {
           node.useSubAgents = true;
@@ -958,11 +1056,11 @@ export class Graph implements IAgentModule {
           node.useSubAgents = false; // Use single agent for efficiency
         }
         // Medium tasks: use default graph settings
-        
+
         node.updatedAt = new Date();
       }
     });
-    
+
     this.graph.updatedAt = new Date();
     this.log('info', 'Optimized sub-agent usage across graph nodes');
   }
@@ -988,7 +1086,7 @@ export class Graph implements IAgentModule {
       subAgentEfficiency: number;
     };
   } {
-    const nodeMetrics = this.graph.nodes.map(node => {
+    const nodeMetrics = this.graph.nodes.map((node) => {
       const nodeMetric: {
         nodeId: string;
         nodeName: string;
@@ -1001,25 +1099,28 @@ export class Graph implements IAgentModule {
         nodeId: node.id,
         nodeName: node.name,
         usedSubAgents: this.shouldUseSubAgents(node),
-        status: node.status
+        status: node.status,
       };
 
       if (this.shouldUseSubAgents(node)) {
-        nodeMetric.delegationStrategy = node.subAgentDelegation || this.graph.config.subAgentCoordination || 'auto';
-        nodeMetric.coordinationPattern = node.subAgentCoordination || this.graph.config.subAgentCoordination || 'sequential';
+        nodeMetric.delegationStrategy =
+          node.subAgentDelegation || this.graph.config.subAgentCoordination || 'auto';
+        nodeMetric.coordinationPattern =
+          node.subAgentCoordination || this.graph.config.subAgentCoordination || 'sequential';
       }
 
       // Calculate execution time if available
       if (node.status === 'completed' && this.graph.startedAt && this.graph.completedAt) {
         // Estimate based on graph timing (simplified)
-        nodeMetric.executionTime = this.graph.completedAt.getTime() - this.graph.startedAt.getTime();
+        nodeMetric.executionTime =
+          this.graph.completedAt.getTime() - this.graph.startedAt.getTime();
       }
 
       return nodeMetric;
     });
 
-    const subAgentNodes = nodeMetrics.filter(n => n.usedSubAgents);
-    const completedNodes = nodeMetrics.filter(n => n.status === 'completed');
+    const subAgentNodes = nodeMetrics.filter((n) => n.usedSubAgents);
+    const completedNodes = nodeMetrics.filter((n) => n.status === 'completed');
     const totalExecutionTime = nodeMetrics.reduce((sum, n) => sum + (n.executionTime || 0), 0);
 
     return {
@@ -1029,20 +1130,27 @@ export class Graph implements IAgentModule {
         subAgentNodes: subAgentNodes.length,
         averageExecutionTime: totalExecutionTime / Math.max(completedNodes.length, 1),
         successRate: completedNodes.length / this.graph.nodes.length,
-        subAgentEfficiency: subAgentNodes.filter(n => n.status === 'completed').length / Math.max(subAgentNodes.length, 1)
-      }
+        subAgentEfficiency:
+          subAgentNodes.filter((n) => n.status === 'completed').length /
+          Math.max(subAgentNodes.length, 1),
+      },
     };
   }
 
   /**
    * Benchmark different sub-agent coordination strategies
    */
-  async benchmarkSubAgentStrategies(testPrompt: string = 'Analyze market trends and provide recommendations'): Promise<{
-    strategies: Record<string, {
-      duration: number;
-      success: boolean;
-      nodeResults: number;
-    }>;
+  async benchmarkSubAgentStrategies(
+    testPrompt: string = 'Analyze market trends and provide recommendations'
+  ): Promise<{
+    strategies: Record<
+      string,
+      {
+        duration: number;
+        success: boolean;
+        nodeResults: number;
+      }
+    >;
     recommendation: string;
   }> {
     if (!this.agent?.config.subAgents?.length) {
@@ -1050,11 +1158,14 @@ export class Graph implements IAgentModule {
     }
 
     const strategies = ['parallel', 'sequential'] as const;
-    const results: Record<string, {
-      duration: number;
-      success: boolean;
-      nodeResults: number;
-    }> = {};
+    const results: Record<
+      string,
+      {
+        duration: number;
+        success: boolean;
+        nodeResults: number;
+      }
+    > = {};
 
     for (const strategy of strategies) {
       // Create test node
@@ -1063,21 +1174,21 @@ export class Graph implements IAgentModule {
         prompt: testPrompt,
         useSubAgents: true,
         subAgentDelegation: 'auto',
-        subAgentCoordination: strategy
+        subAgentCoordination: strategy,
       });
 
       const startTime = Date.now();
-      
+
       try {
         // Execute just this node
-        const testNode = this.graph.nodes.find(n => n.id === testNodeId)!;
+        const testNode = this.graph.nodes.find((n) => n.id === testNodeId)!;
         await this.executeNode(testNode);
-        
+
         const duration = Date.now() - startTime;
         results[strategy] = {
           duration,
           success: true,
-          nodeResults: 1
+          nodeResults: 1,
         };
 
         this.log('info', `Benchmark ${strategy}: ${duration}ms`);
@@ -1086,27 +1197,31 @@ export class Graph implements IAgentModule {
         results[strategy] = {
           duration,
           success: false,
-          nodeResults: 0
+          nodeResults: 0,
         };
 
-        this.log('error', `Benchmark ${strategy} failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        this.log(
+          'error',
+          `Benchmark ${strategy} failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+        );
       }
 
       // Remove test node
-      this.graph.nodes = this.graph.nodes.filter(n => n.id !== testNodeId);
+      this.graph.nodes = this.graph.nodes.filter((n) => n.id !== testNodeId);
     }
 
     // Determine best strategy
     const successfulStrategies = Object.entries(results).filter(([, result]) => result.success);
-    const recommendation = successfulStrategies.length > 0
-      ? successfulStrategies.reduce((best, current) => 
-          current[1].duration < best[1].duration ? current : best
-        )[0]
-      : 'sequential'; // Default fallback
+    const recommendation =
+      successfulStrategies.length > 0
+        ? successfulStrategies.reduce((best, current) =>
+            current[1].duration < best[1].duration ? current : best
+          )[0]
+        : 'sequential'; // Default fallback
 
     return {
       strategies: results,
-      recommendation: `Based on performance testing, '${recommendation}' strategy is recommended for similar tasks.`
+      recommendation: `Based on performance testing, '${recommendation}' strategy is recommended for similar tasks.`,
     };
   }
 
@@ -1120,11 +1235,11 @@ export class Graph implements IAgentModule {
     }
 
     const metrics = this.getSubAgentPerformanceMetrics();
-    
+
     // Analyze current performance
     const subAgentEfficiency = metrics.overallMetrics.subAgentEfficiency;
 
-    this.graph.nodes.forEach(node => {
+    this.graph.nodes.forEach((node) => {
       if (node.type === 'task' && node.status === 'pending') {
         const promptComplexity = node.prompt?.length || 0;
         const hasDependencies = node.dependencies.length > 0;
@@ -1156,7 +1271,10 @@ export class Graph implements IAgentModule {
     });
 
     this.graph.updatedAt = new Date();
-    this.log('info', `Auto-optimized sub-agent coordination based on efficiency: ${subAgentEfficiency.toFixed(2)}`);
+    this.log(
+      'info',
+      `Auto-optimized sub-agent coordination based on efficiency: ${subAgentEfficiency.toFixed(2)}`
+    );
   }
 
   /**
@@ -1165,7 +1283,7 @@ export class Graph implements IAgentModule {
   generateSubAgentPerformanceReport(): string {
     const stats = this.getSubAgentStats();
     const metrics = this.getSubAgentPerformanceMetrics();
-    
+
     const report = [
       '=== Sub-Agent Performance Report ===',
       '',
@@ -1176,21 +1294,22 @@ export class Graph implements IAgentModule {
       `Sub-Agent Efficiency: ${(metrics.overallMetrics.subAgentEfficiency * 100).toFixed(1)}%`,
       '',
       '--- Delegation Strategies ---',
-      ...Object.entries(stats.delegationStrategies).map(([strategy, count]) => 
-        `${strategy}: ${count} nodes`
+      ...Object.entries(stats.delegationStrategies).map(
+        ([strategy, count]) => `${strategy}: ${count} nodes`
       ),
       '',
       '--- Coordination Patterns ---',
-      ...Object.entries(stats.coordinationPatterns).map(([pattern, count]) => 
-        `${pattern}: ${count} nodes`
+      ...Object.entries(stats.coordinationPatterns).map(
+        ([pattern, count]) => `${pattern}: ${count} nodes`
       ),
       '',
       '--- Node Performance ---',
-      ...metrics.nodePerformance.map(node => 
-        `${node.nodeName}: ${node.status} ${node.usedSubAgents ? `(${node.delegationStrategy}/${node.coordinationPattern})` : '(single agent)'}`
+      ...metrics.nodePerformance.map(
+        (node) =>
+          `${node.nodeName}: ${node.status} ${node.usedSubAgents ? `(${node.delegationStrategy}/${node.coordinationPattern})` : '(single agent)'}`
       ),
       '',
-      '--- Recommendations ---'
+      '--- Recommendations ---',
     ];
 
     // Add recommendations based on analysis

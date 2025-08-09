@@ -17,18 +17,25 @@ export class AutoDelegationStrategy implements DelegationStrategy {
     this.logger = logger;
   }
 
-  async delegate(prompt: string, subAgents: IAgent[], options?: SubAgentRunOptions, model?: string): Promise<SubAgentTask[]> {
+  async delegate(
+    prompt: string,
+    subAgents: IAgent[],
+    options?: SubAgentRunOptions,
+    model?: string
+  ): Promise<SubAgentTask[]> {
     if (subAgents.length === 0) {
       return [];
     }
 
     // Single agent case - assign full task
     if (subAgents.length === 1) {
-      return [{
-        agentId: subAgents[0].id,
-        task: prompt,
-        priority: 5
-      }];
+      return [
+        {
+          agentId: subAgents[0].id,
+          task: prompt,
+          priority: 5,
+        },
+      ];
     }
 
     try {
@@ -37,25 +44,32 @@ export class AutoDelegationStrategy implements DelegationStrategy {
       return delegationPlan;
     } catch (error) {
       this.logger?.warn('LLM-based delegation failed, using fallback', {
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
-      
+
       // Fallback: assign full task to all agents (parallel execution)
-      return subAgents.map(agent => ({
+      return subAgents.map((agent) => ({
         agentId: agent.id,
         task: prompt,
-        priority: 5
+        priority: 5,
       }));
     }
   }
 
-  private async createDelegationPlan(prompt: string, subAgents: IAgent[], model?: string): Promise<SubAgentTask[]> {
+  private async createDelegationPlan(
+    prompt: string,
+    subAgents: IAgent[],
+    model?: string
+  ): Promise<SubAgentTask[]> {
     const llm = getLLM(this.logger);
 
     // Build sub-agent information for the LLM
-    const agentDescriptions = subAgents.map(agent => 
-      `Agent ID: ${agent.id}, Name: "${agent.name}", Role: "${agent.config.systemPrompt || 'General assistant'}"`
-    ).join('\n');
+    const agentDescriptions = subAgents
+      .map(
+        (agent) =>
+          `Agent ID: ${agent.id}, Name: "${agent.name}", Role: "${agent.config.systemPrompt || 'General assistant'}"`
+      )
+      .join('\n');
 
     const delegationPrompt = `You are a task coordinator. Analyze the following task and decide how to distribute it among available sub-agents.
 
@@ -105,11 +119,11 @@ Example response:
       model: model || 'gpt-4o-mini', // Use provided model or fallback to fast model
       messages: [{ role: 'user', content: delegationPrompt }],
       temperature: 0.3, // Low temperature for consistent delegation
-      maxTokens: 1000
+      maxTokens: 1000,
     });
 
-    this.logger?.debug('LLM delegation response', { 
-      response: response.content.substring(0, 200) + '...' 
+    this.logger?.debug('LLM delegation response', {
+      response: response.content.substring(0, 200) + '...',
     });
 
     try {
@@ -120,7 +134,7 @@ Example response:
       }
 
       const delegationResult = JSON.parse(jsonMatch[0]);
-      
+
       if (!delegationResult.tasks || !Array.isArray(delegationResult.tasks)) {
         throw new Error('Invalid delegation result format');
       }
@@ -129,23 +143,24 @@ Example response:
       const tasks: SubAgentTask[] = delegationResult.tasks
         .filter((task: { agentId: unknown; task: unknown; priority?: unknown }) => {
           // Validate each task
-          const hasValidAgentId = typeof task.agentId === 'number' && 
-            subAgents.some(agent => agent.id === task.agentId);
+          const hasValidAgentId =
+            typeof task.agentId === 'number' &&
+            subAgents.some((agent) => agent.id === task.agentId);
           const hasValidTask = typeof task.task === 'string' && task.task.trim().length > 0;
-          
+
           if (!hasValidAgentId) {
             this.logger?.warn(`Invalid agent ID in delegation: ${task.agentId}`);
           }
           if (!hasValidTask) {
             this.logger?.warn(`Invalid task in delegation: ${task.task}`);
           }
-          
+
           return hasValidAgentId && hasValidTask;
         })
         .map((task: { agentId: number; task: string; priority?: number }) => ({
           agentId: task.agentId,
           task: task.task.trim(),
-          priority: typeof task.priority === 'number' ? task.priority : 5
+          priority: typeof task.priority === 'number' ? task.priority : 5,
         }));
 
       if (tasks.length === 0) {
@@ -154,14 +169,15 @@ Example response:
 
       this.logger?.info(`LLM generated ${tasks.length} delegation tasks`, {
         taskCount: tasks.length,
-        agentIds: tasks.map(t => t.agentId)
+        agentIds: tasks.map((t) => t.agentId),
       });
 
       return tasks;
-
     } catch (parseError) {
       this.logger?.error('Failed to parse LLM delegation response', parseError as Error);
-      throw new Error(`Failed to parse delegation plan: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to parse delegation plan: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`
+      );
     }
   }
 }
@@ -172,29 +188,33 @@ Example response:
 export class ManualDelegationStrategy implements DelegationStrategy {
   name = 'manual' as const;
 
-  async delegate(_prompt: string, subAgents: IAgent[], options?: SubAgentRunOptions): Promise<SubAgentTask[]> {
+  async delegate(
+    _prompt: string,
+    subAgents: IAgent[],
+    options?: SubAgentRunOptions
+  ): Promise<SubAgentTask[]> {
     const tasks: SubAgentTask[] = [];
-    
+
     if (!options?.taskAssignment) {
       throw new Error('Manual delegation requires taskAssignment in options');
     }
-    
+
     // Create tasks based on manual assignment
     for (const [agentIdStr, task] of Object.entries(options.taskAssignment)) {
       const agentId = parseInt(agentIdStr);
-      const agent = subAgents.find(a => a.id === agentId);
-      
+      const agent = subAgents.find((a) => a.id === agentId);
+
       if (!agent) {
         throw new Error(`Agent with ID ${agentId} not found in sub-agents`);
       }
-      
+
       tasks.push({
         agentId,
         task,
-        priority: 5 // Default priority for manual tasks
+        priority: 5, // Default priority for manual tasks
       });
     }
-    
+
     return tasks;
   }
 }
@@ -207,16 +227,16 @@ export class SequentialDelegationStrategy implements DelegationStrategy {
 
   async delegate(prompt: string, subAgents: IAgent[]): Promise<SubAgentTask[]> {
     const tasks: SubAgentTask[] = [];
-    
+
     if (subAgents.length === 0) {
       return tasks;
     }
-    
+
     // For sequential, we assign the full prompt to each agent in order
     // Each agent builds on the previous agent's work
     for (let i = 0; i < subAgents.length; i++) {
       const agent = subAgents[i];
-      
+
       let task: string;
       if (i === 0) {
         // First agent gets the original task
@@ -225,15 +245,15 @@ export class SequentialDelegationStrategy implements DelegationStrategy {
         // Subsequent agents build on previous work
         task = `Based on the previous agent's work, continue and enhance: ${prompt}`;
       }
-      
+
       tasks.push({
         agentId: agent.id,
         task,
         priority: 10 - i, // Decreasing priority for execution order
-        dependencies: i > 0 ? [subAgents[i - 1].id] : [] // Depend on previous agent
+        dependencies: i > 0 ? [subAgents[i - 1].id] : [], // Depend on previous agent
       });
     }
-    
+
     return tasks;
   }
 }
@@ -241,7 +261,10 @@ export class SequentialDelegationStrategy implements DelegationStrategy {
 /**
  * Factory function to get delegation strategy
  */
-export function getDelegationStrategy(type: 'auto' | 'manual' | 'sequential', logger?: Logger): DelegationStrategy {
+export function getDelegationStrategy(
+  type: 'auto' | 'manual' | 'sequential',
+  logger?: Logger
+): DelegationStrategy {
   switch (type) {
     case 'auto':
       return new AutoDelegationStrategy(logger);

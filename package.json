@@ -1,6 +1,6 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "Open-source AI agent framework for building autonomous systems that solve real-world tasks effectively.",
   "author": "Berke Kiran",
   "license": "MIT",
@@ -11,7 +11,10 @@
   "scripts": {
     "build": "tsup",
     "lint": "eslint src --ext .ts",
-    "prepublishOnly": "npm run build"
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "prepublishOnly": "npm run format && npm run lint && npm run build"
   },
   "keywords": [
     "ai",
@@ -25,37 +28,27 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
     "@google/generative-ai": "^0.7.0",
-    "@types/pdf-parse": "^1.1.5",
-    "@types/pdfjs-dist": "^2.10.377",
-    "axios": "^1.6.7",
-    "chalk": "^5.3.0",
     "dotenv": "^16.5.0",
     "knex": "^3.1.0",
-    "mammoth": "^1.6.0",
     "ollama": "^0.5.16",
     "openai": "^4.20.1",
-    "pdf-parse": "^1.1.1",
-    "pdf-text-extract": "^1.5.0",
-    "pdf2pic": "^3.2.0",
-    "pdfjs-dist": "^5.3.93",
+    "pdf-ts": "^0.0.2",
     "pg": "^8.16.3",
     "pgvector": "^0.1.8",
     "pino": "^9.7.0",
     "pino-pretty": "^13.0.0",
-    "sqlite3": "^5.1.7",
-    "uuid": "^9.0.1"
+    "sqlite3": "^5.1.7"
   },
   "devDependencies": {
     "@types/node": "^20.17.30",
     "@types/pg": "^8.10.9",
     "@types/sqlite3": "^3.1.11",
-    "@types/uuid": "^9.0.8",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
-    "pdf-lib": "^1.17.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.4",
+    "prettier": "^3.6.2",
     "ts-node": "^10.9.2",
-    "ts-node-dev": "^2.0.0",
-    "tsconfig-paths": "^4.2.0",
     "tsup": "^8.0.1",
     "typescript": "^5.3.3",
     "typescript-eslint": "^8.31.1"

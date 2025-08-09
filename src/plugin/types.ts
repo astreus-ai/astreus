@@ -25,7 +25,7 @@ export type ToolParameterPrimitive = string | number | boolean | null;
 /**
  * Complex tool parameter value that can contain primitives, arrays, or nested objects
  */
-export type ToolParameterValue = 
+export type ToolParameterValue =
   | ToolParameterPrimitive
   | ToolParameterPrimitive[]
   | { [key: string]: ToolParameterValue };

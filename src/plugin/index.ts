@@ -1,14 +1,14 @@
 import { IAgentModule, IAgent } from '../agent/types';
-import { 
-  Plugin as IPlugin, 
-  PluginConfig, 
+import {
+  Plugin as IPlugin,
+  PluginConfig,
   PluginManager as IPluginManager,
-  ToolDefinition, 
-  ToolCall, 
-  ToolCallResult, 
+  ToolDefinition,
+  ToolCall,
+  ToolCallResult,
   ToolContext,
   ToolParameter,
-  ToolParameterValue
+  ToolParameterValue,
 } from './types';
 import { Logger } from '../logger/types';
 
@@ -18,10 +18,13 @@ interface LLMToolProperty {
   description?: string;
   enum?: Array<string | number>;
   items?: { type: string };
-  properties?: Record<string, {
-    type: 'string' | 'number' | 'boolean' | 'object' | 'array';
-    description?: string;
-  }>;
+  properties?: Record<
+    string,
+    {
+      type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+      description?: string;
+    }
+  >;
 }
 
 // Type for LLM function calling tool schema
@@ -40,44 +43,44 @@ export class Plugin implements IAgentModule, IPluginManager {
 
   constructor(private agent: IAgent) {
     this.logger = agent.logger;
-    
+
     // User-facing info log
     this.logger.info('Plugin manager initialized');
-    
+
     this.logger.debug('Plugin manager initialized', {
       agentId: agent.id,
-      agentName: agent.name
+      agentName: agent.name,
     });
   }
 
   async initialize(): Promise<void> {
     // User-facing info log
     this.logger.info('Plugin manager ready');
-    
+
     this.logger.debug('Plugin manager initialization completed');
   }
 
   async registerPlugin(plugin: IPlugin, config?: PluginConfig): Promise<void> {
     // User-facing info log
     this.logger.info(`Registering plugin: ${plugin.name}`);
-    
+
     this.logger.debug('Registering plugin', {
       name: plugin.name,
       version: plugin.version,
       description: plugin.description,
       toolCount: plugin.tools.length,
-      toolNames: plugin.tools.map(t => t.name),
+      toolNames: plugin.tools.map((t) => t.name),
       hasConfig: !!config,
       hasInitialize: !!plugin.initialize,
-      hasCleanup: !!plugin.cleanup
+      hasCleanup: !!plugin.cleanup,
     });
-    
+
     // Check if plugin already exists
     if (this.plugins.has(plugin.name)) {
       this.logger.error(`Plugin already registered: ${plugin.name}`);
       this.logger.debug('Plugin registration failed - already exists', {
         pluginName: plugin.name,
-        existingPlugins: Array.from(this.plugins.keys())
+        existingPlugins: Array.from(this.plugins.keys()),
       });
       throw new Error(`Plugin '${plugin.name}' is already registered`);
     }
@@ -89,13 +92,13 @@ export class Plugin implements IAgentModule, IPluginManager {
     // Set default config
     const pluginConfig: PluginConfig = config || {
       name: plugin.name,
-      enabled: true
+      enabled: true,
     };
-    
+
     this.logger.debug('Plugin config prepared', {
       pluginName: plugin.name,
       enabled: pluginConfig.enabled,
-      hasCustomConfig: !!pluginConfig.config
+      hasCustomConfig: !!pluginConfig.config,
     });
 
     // Initialize plugin if it has an initialize method
@@ -113,61 +116,61 @@ export class Plugin implements IAgentModule, IPluginManager {
     if (pluginConfig.enabled) {
       this.logger.debug('Registering plugin tools', {
         pluginName: plugin.name,
-        toolCount: plugin.tools.length
+        toolCount: plugin.tools.length,
       });
-      
+
       for (const tool of plugin.tools) {
         if (this.tools.has(tool.name)) {
           this.logger.error(`Tool name conflict: ${tool.name}`);
           this.logger.debug('Tool registration failed - name conflict', {
             toolName: tool.name,
             pluginName: plugin.name,
-            existingTools: Array.from(this.tools.keys())
+            existingTools: Array.from(this.tools.keys()),
           });
           throw new Error(`Tool '${tool.name}' is already registered by another plugin`);
         }
         this.tools.set(tool.name, tool);
-        
+
         this.logger.debug('Tool registered', {
           toolName: tool.name,
           pluginName: plugin.name,
-          description: tool.description
+          description: tool.description,
         });
       }
     } else {
       this.logger.debug('Plugin disabled, tools not registered', {
         pluginName: plugin.name,
-        toolCount: plugin.tools.length
+        toolCount: plugin.tools.length,
       });
     }
 
     // User-facing success message
     this.logger.info(`Plugin registered: ${plugin.name} (${plugin.tools.length} tools)`);
-    
+
     this.logger.debug('Plugin registered successfully', {
       pluginName: plugin.name,
       version: plugin.version,
       toolsRegistered: pluginConfig.enabled ? plugin.tools.length : 0,
       totalPlugins: this.plugins.size,
-      totalTools: this.tools.size
+      totalTools: this.tools.size,
     });
   }
 
   async unregisterPlugin(name: string): Promise<void> {
     // User-facing info log
     this.logger.info(`Unregistering plugin: ${name}`);
-    
+
     this.logger.debug('Unregistering plugin', {
       pluginName: name,
-      isRegistered: this.plugins.has(name)
+      isRegistered: this.plugins.has(name),
     });
-    
+
     const plugin = this.plugins.get(name);
     if (!plugin) {
       this.logger.error(`Plugin not found: ${name}`);
       this.logger.debug('Plugin unregistration failed - not found', {
         pluginName: name,
-        availablePlugins: Array.from(this.plugins.keys())
+        availablePlugins: Array.from(this.plugins.keys()),
       });
       throw new Error(`Plugin '${name}' is not registered`);
     }
@@ -178,18 +181,18 @@ export class Plugin implements IAgentModule, IPluginManager {
       if (this.tools.has(tool.name)) {
         this.tools.delete(tool.name);
         removedTools.push(tool.name);
-        
+
         this.logger.debug('Tool unregistered', {
           toolName: tool.name,
-          pluginName: name
+          pluginName: name,
         });
       }
     }
-    
+
     this.logger.debug('Plugin tools removed', {
       pluginName: name,
       removedTools,
-      removedCount: removedTools.length
+      removedCount: removedTools.length,
     });
 
     // Cleanup plugin if it has a cleanup method
@@ -205,64 +208,64 @@ export class Plugin implements IAgentModule, IPluginManager {
 
     // User-facing success message
     this.logger.info(`Plugin unregistered: ${name}`);
-    
+
     this.logger.debug('Plugin unregistered successfully', {
       pluginName: name,
       removedToolCount: removedTools.length,
       remainingPlugins: this.plugins.size,
-      remainingTools: this.tools.size
+      remainingTools: this.tools.size,
     });
   }
 
   getPlugin(name: string): IPlugin | undefined {
     const plugin = this.plugins.get(name);
-    
+
     this.logger.debug('Plugin lookup', {
       pluginName: name,
       found: !!plugin,
-      version: plugin?.version || 'unknown'
+      version: plugin?.version || 'unknown',
     });
-    
+
     return plugin;
   }
 
   getTools(): ToolDefinition[] {
     const tools = Array.from(this.tools.values());
-    
+
     this.logger.debug('Retrieved all tools', {
       toolCount: tools.length,
-      toolNames: tools.map(t => t.name)
+      toolNames: tools.map((t) => t.name),
     });
-    
+
     return tools;
   }
 
   getTool(name: string): ToolDefinition | undefined {
     const tool = this.tools.get(name);
-    
+
     this.logger.debug('Tool lookup', {
       toolName: name,
       found: !!tool,
-      description: tool?.description || 'none'
+      description: tool?.description || 'none',
     });
-    
+
     return tool;
   }
 
   async executeTool(toolCall: ToolCall, context?: ToolContext): Promise<ToolCallResult> {
     const startTime = Date.now();
-    
+
     // User-facing info log
     this.logger.info(`Executing tool: ${toolCall.name}`);
-    
+
     this.logger.debug('Executing tool', {
       toolName: toolCall.name,
       callId: toolCall.id,
       parameters: Object.keys(toolCall.parameters),
       parameterCount: Object.keys(toolCall.parameters).length,
-      hasContext: !!context
+      hasContext: !!context,
     });
-    
+
     try {
       const tool = this.getTool(toolCall.name);
       if (!tool) {
@@ -270,26 +273,26 @@ export class Plugin implements IAgentModule, IPluginManager {
         this.logger.debug('Tool execution failed - tool not found', {
           toolName: toolCall.name,
           callId: toolCall.id,
-          availableTools: Array.from(this.tools.keys())
+          availableTools: Array.from(this.tools.keys()),
         });
-        
+
         return {
           id: toolCall.id,
           name: toolCall.name,
           result: {
             success: false,
-            error: `Tool '${toolCall.name}' not found`
+            error: `Tool '${toolCall.name}' not found`,
           },
-          executionTime: Date.now() - startTime
+          executionTime: Date.now() - startTime,
         };
       }
 
       // Validate parameters
       this.logger.debug('Validating tool parameters', {
         toolName: toolCall.name,
-        callId: toolCall.id
+        callId: toolCall.id,
       });
-      
+
       const validationError = this.validateToolParameters(tool, toolCall.parameters);
       if (validationError) {
         this.logger.error(`Tool parameter validation failed: ${toolCall.name}`);
@@ -297,101 +300,103 @@ export class Plugin implements IAgentModule, IPluginManager {
           toolName: toolCall.name,
           callId: toolCall.id,
           validationError,
-          parameters: toolCall.parameters
+          parameters: toolCall.parameters,
         });
-        
+
         return {
           id: toolCall.id,
           name: toolCall.name,
           result: {
             success: false,
-            error: validationError
+            error: validationError,
           },
-          executionTime: Date.now() - startTime
+          executionTime: Date.now() - startTime,
         };
       }
 
       // Execute tool
       this.logger.debug('Calling tool handler', {
         toolName: toolCall.name,
-        callId: toolCall.id
+        callId: toolCall.id,
       });
-      
+
       const result = await tool.handler(toolCall.parameters, context);
       const executionTime = Date.now() - startTime;
-      
+
       // User-facing success message
       this.logger.info(`Tool completed: ${toolCall.name} (${executionTime}ms)`);
-      
+
       this.logger.debug('Tool execution successful', {
         toolName: toolCall.name,
         callId: toolCall.id,
         executionTime,
         success: result.success,
         hasData: !!result.data,
-        hasError: !!result.error
+        hasError: !!result.error,
       });
-      
+
       return {
         id: toolCall.id,
         name: toolCall.name,
         result,
-        executionTime
+        executionTime,
       };
-
     } catch (error) {
       const executionTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      
+
       this.logger.error(`Tool execution failed: ${toolCall.name}`);
       this.logger.debug('Tool execution error', {
         toolName: toolCall.name,
         callId: toolCall.id,
         executionTime,
         error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack
+        hasStack: error instanceof Error && !!error.stack,
       });
-      
+
       return {
         id: toolCall.id,
         name: toolCall.name,
         result: {
           success: false,
-          error: errorMessage
+          error: errorMessage,
         },
-        executionTime
+        executionTime,
       };
     }
   }
 
   listPlugins(): IPlugin[] {
     const plugins = Array.from(this.plugins.values());
-    
+
     this.logger.debug('Listed plugins', {
       pluginCount: plugins.length,
-      pluginNames: plugins.map(p => p.name)
+      pluginNames: plugins.map((p) => p.name),
     });
-    
+
     return plugins;
   }
 
   // Get tools formatted for LLM function calling
-  getToolsForLLM(): Array<{ type: string; function: { name: string; description: string; parameters: LLMToolSchema } }> {
+  getToolsForLLM(): Array<{
+    type: string;
+    function: { name: string; description: string; parameters: LLMToolSchema };
+  }> {
     const tools = this.getTools();
-    const llmTools = tools.map(tool => ({
+    const llmTools = tools.map((tool) => ({
       type: 'function',
       function: {
         name: tool.name,
         description: tool.description,
-        parameters: this.convertParametersToJsonSchema(tool.parameters)
-      }
+        parameters: this.convertParametersToJsonSchema(tool.parameters),
+      },
     }));
-    
+
     this.logger.debug('Generated LLM tool schemas', {
       toolCount: llmTools.length,
-      toolNames: llmTools.map(t => t.function.name)
+      toolNames: llmTools.map((t) => t.function.name),
     });
-    
+
     return llmTools;
   }
 
@@ -401,14 +406,14 @@ export class Plugin implements IAgentModule, IPluginManager {
       hasName: !!plugin.name,
       hasVersion: !!plugin.version,
       hasTools: Array.isArray(plugin.tools),
-      toolCount: Array.isArray(plugin.tools) ? plugin.tools.length : 0
+      toolCount: Array.isArray(plugin.tools) ? plugin.tools.length : 0,
     });
-    
+
     if (!plugin.name || !plugin.version) {
       this.logger.debug('Plugin validation failed - missing name or version', {
         pluginName: plugin.name || '[missing]',
         hasName: !!plugin.name,
-        hasVersion: !!plugin.version
+        hasVersion: !!plugin.version,
       });
       throw new Error('Plugin must have name and version');
     }
@@ -417,7 +422,7 @@ export class Plugin implements IAgentModule, IPluginManager {
       this.logger.debug('Plugin validation failed - invalid tools array', {
         pluginName: plugin.name,
         toolsType: typeof plugin.tools,
-        isArray: Array.isArray(plugin.tools)
+        isArray: Array.isArray(plugin.tools),
       });
       throw new Error('Plugin must have tools array');
     }
@@ -429,54 +434,57 @@ export class Plugin implements IAgentModule, IPluginManager {
         toolName: tool.name,
         hasName: !!tool.name,
         hasDescription: !!tool.description,
-        hasHandler: !!tool.handler
+        hasHandler: !!tool.handler,
       });
-      
+
       if (!tool.name || !tool.description || !tool.handler) {
         this.logger.debug('Tool validation failed', {
           pluginName: plugin.name,
           toolName: tool.name || '[missing]',
           hasName: !!tool.name,
           hasDescription: !!tool.description,
-          hasHandler: !!tool.handler
+          hasHandler: !!tool.handler,
         });
         throw new Error(`Invalid tool definition in plugin '${plugin.name}'`);
       }
     }
-    
+
     this.logger.debug('Plugin validation successful', {
       pluginName: plugin.name,
       version: plugin.version,
-      toolCount: plugin.tools.length
+      toolCount: plugin.tools.length,
     });
   }
 
-  private validateToolParameters(tool: ToolDefinition, parameters: Record<string, ToolParameterValue>): string | null {
+  private validateToolParameters(
+    tool: ToolDefinition,
+    parameters: Record<string, ToolParameterValue>
+  ): string | null {
     this.logger.debug('Validating tool parameters', {
       toolName: tool.name,
       expectedParams: Object.keys(tool.parameters),
       providedParams: Object.keys(parameters),
-      parameterCount: Object.keys(parameters).length
+      parameterCount: Object.keys(parameters).length,
     });
-    
+
     for (const [paramName, paramDef] of Object.entries(tool.parameters)) {
       const value = parameters[paramName];
-      
+
       this.logger.debug('Validating parameter', {
         toolName: tool.name,
         paramName,
         paramType: paramDef.type,
         required: !!paramDef.required,
         hasValue: value !== undefined && value !== null,
-        valueType: typeof value
+        valueType: typeof value,
       });
-      
+
       // Check required parameters
       if (paramDef.required && (value === undefined || value === null)) {
         this.logger.debug('Required parameter missing', {
           toolName: tool.name,
           paramName,
-          paramType: paramDef.type
+          paramType: paramDef.type,
         });
         return `Required parameter '${paramName}' is missing`;
       }
@@ -489,7 +497,7 @@ export class Plugin implements IAgentModule, IPluginManager {
             paramName,
             expectedType: paramDef.type,
             actualType: typeof value,
-            value: String(value).slice(0, 100) // Truncate long values
+            value: String(value).slice(0, 100), // Truncate long values
           });
           return `Parameter '${paramName}' has invalid type. Expected ${paramDef.type}`;
         }
@@ -498,7 +506,7 @@ export class Plugin implements IAgentModule, IPluginManager {
 
     this.logger.debug('Tool parameter validation successful', {
       toolName: tool.name,
-      validatedParams: Object.keys(tool.parameters).length
+      validatedParams: Object.keys(tool.parameters).length,
     });
 
     return null;
@@ -523,11 +531,11 @@ export class Plugin implements IAgentModule, IPluginManager {
 
   public convertParametersToJsonSchema(parameters: Record<string, ToolParameter>): LLMToolSchema {
     const properties: Record<string, LLMToolProperty> = {};
-    
+
     for (const [name, param] of Object.entries(parameters)) {
       properties[name] = {
         type: param.type as 'string' | 'number' | 'boolean' | 'object' | 'array',
-        description: param.description
+        description: param.description,
       };
 
       if (param.enum) {
@@ -535,12 +543,14 @@ export class Plugin implements IAgentModule, IPluginManager {
       }
 
       if (param.properties) {
-        properties[name].properties = this.convertParametersToJsonSchema(param.properties).properties;
+        properties[name].properties = this.convertParametersToJsonSchema(
+          param.properties
+        ).properties;
       }
 
       if (param.items) {
         properties[name].items = {
-          type: param.items.type
+          type: param.items.type,
         };
       }
     }
@@ -550,7 +560,7 @@ export class Plugin implements IAgentModule, IPluginManager {
       properties,
       required: Object.entries(parameters)
         .filter(([, param]) => param.required)
-        .map(([name]) => name)
+        .map(([name]) => name),
     };
   }
 }
@@ -571,13 +581,15 @@ export function getPlugin(agent?: IAgent): Plugin {
 export * from './types';
 
 // Export utility function for converting tool parameters to JSON schema
-export function convertToolParametersToJsonSchema(parameters: Record<string, ToolParameter>): LLMToolSchema {
+export function convertToolParametersToJsonSchema(
+  parameters: Record<string, ToolParameter>
+): LLMToolSchema {
   const properties: Record<string, LLMToolProperty> = {};
-  
+
   for (const [name, param] of Object.entries(parameters)) {
     properties[name] = {
       type: param.type as 'string' | 'number' | 'boolean' | 'object' | 'array',
-      description: param.description
+      description: param.description,
     };
 
     if (param.enum) {
@@ -590,7 +602,7 @@ export function convertToolParametersToJsonSchema(parameters: Record<string, Too
 
     if (param.items) {
       properties[name].items = {
-        type: param.items.type
+        type: param.items.type,
       };
     }
   }
@@ -600,6 +612,6 @@ export function convertToolParametersToJsonSchema(parameters: Record<string, Too
     properties,
     required: Object.entries(parameters)
       .filter(([, param]) => param.required)
-      .map(([name]) => name)
+      .map(([name]) => name),
   };
 }

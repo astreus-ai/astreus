@@ -8,10 +8,7 @@ export type LogDataPrimitive = string | number | boolean | null | Date;
 /**
  * Complex log data that can contain primitives, arrays, or nested objects
  */
-export type LogData = 
-  | LogDataPrimitive
-  | LogDataPrimitive[]
-  | { [key: string]: LogData };
+export type LogData = LogDataPrimitive | LogDataPrimitive[] | { [key: string]: LogData };
 
 export interface LogEntry {
   level: LogLevel;
@@ -39,7 +36,14 @@ export interface Logger {
   warn(message: string, data?: LogData, agentName?: string): void;
   error(message: string, error?: Error, data?: LogData, agentName?: string): void;
   success(message: string, data?: LogData, agentName?: string): void;
-  log(level: LogLevel, message: string, module: string, data?: LogData, error?: Error, agentName?: string): void;
+  log(
+    level: LogLevel,
+    message: string,
+    module: string,
+    data?: LogData,
+    error?: Error,
+    agentName?: string
+  ): void;
   setLevel(level: LogLevel): void;
   setDebug(debug: boolean): void;
 }

@@ -9,7 +9,7 @@ export type GraphResultPrimitive = string | number | boolean | null | Date;
 /**
  * Complex result data that can contain primitives, arrays, or nested objects
  */
-export type GraphResultValue = 
+export type GraphResultValue =
   | GraphResultPrimitive
   | GraphResultPrimitive[]
   | { [key: string]: GraphResultValue };
@@ -22,33 +22,33 @@ export interface GraphNode {
   type: GraphNodeType;
   name: string;
   description?: string;
-  
+
   // Agent node properties
   agentId?: number;
   agent?: Agent;
-  
+
   // Task node properties
   prompt?: string;
   model?: string;
   stream?: boolean;
-  
+
   // Sub-agent delegation properties
   useSubAgents?: boolean; // Whether this node should use sub-agents
   subAgentDelegation?: 'auto' | 'manual' | 'sequential'; // Delegation strategy
   subAgentCoordination?: 'parallel' | 'sequential'; // Coordination pattern
-  
+
   // Execution properties
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'scheduled';
   priority: number;
   dependencies: string[]; // Node IDs that must complete first
-  
+
   // Scheduling properties
   schedule?: string; // Simple schedule string (e.g., 'daily@07:00')
-  
+
   // Results
   result?: GraphResultValue;
   error?: string;
-  
+
   // Metadata
   metadata?: MetadataObject;
   createdAt: Date;
@@ -84,12 +84,12 @@ export interface Graph {
   nodes: GraphNode[];
   edges: GraphEdge[];
   status: GraphExecutionStatus;
-  
+
   // Execution tracking
   startedAt?: Date;
   completedAt?: Date;
   executionLog: GraphExecutionLogEntry[];
-  
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -135,7 +135,6 @@ export interface AddTaskNodeOptions extends AddNodeOptions {
   subAgentDelegation?: 'auto' | 'manual' | 'sequential'; // Sub-agent delegation strategy
   subAgentCoordination?: 'parallel' | 'sequential'; // Sub-agent coordination pattern
 }
-
 
 export interface GraphSchedulingOptions {
   respectSchedules?: boolean; // Whether to respect node schedules during execution
