@@ -594,9 +594,12 @@ export class Knowledge implements IAgentModule {
       // Dynamic import for ES Module compatibility
       const pdfjs = await import('pdfjs-dist');
 
+      // Convert Buffer to Uint8Array for pdfjs-dist
+      const uint8Array = new Uint8Array(pdfBuffer);
+
       // Load PDF document
       const loadingTask = pdfjs.getDocument({
-        data: pdfBuffer,
+        data: uint8Array,
         isEvalSupported: false, // Security: disable eval for CVE-2024-4367 mitigation
       });
 
