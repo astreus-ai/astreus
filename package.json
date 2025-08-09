@@ -1,6 +1,6 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.5.11",
+  "version": "0.5.12",
   "description": "Open-source AI agent framework for building autonomous systems that solve real-world tasks effectively.",
   "author": "Berke Kiran",
   "license": "MIT",
@@ -32,7 +32,7 @@
     "knex": "^3.1.0",
     "ollama": "^0.5.16",
     "openai": "^4.20.1",
-    "pdfjs-dist": "^4.3.136",
+    "pdfjs-dist": "^4.8.69",
     "pg": "^8.16.3",
     "pgvector": "^0.1.8",
     "pino": "^9.7.0",
@@ -54,7 +54,7 @@
     "typescript-eslint": "^8.31.1"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=22.0.0"
   },
   "repository": {
     "type": "git",
