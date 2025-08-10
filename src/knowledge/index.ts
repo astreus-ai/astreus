@@ -287,13 +287,33 @@ export class Knowledge implements IAgentModule {
   }
 
   private async getDatabase(): Promise<KnowledgeDatabase> {
+    this.logger.debug('Getting knowledge database instance');
     if (!this.database) {
+      this.logger.debug('Database not cached, creating new instance');
       if (!this.embeddingProvider) {
+        this.logger.error('Embedding provider not initialized for database');
         throw new Error('Embedding provider not initialized');
       }
-      this.database = await getKnowledgeDatabase({
-        embeddingProvider: this.embeddingProvider,
-      });
+      try {
+        this.logger.debug('Creating knowledge database', {
+          embeddingModel: this.embeddingModel,
+          providerName: this.embeddingProvider.name,
+        });
+        this.database = await getKnowledgeDatabase({
+          embeddingProvider: this.embeddingProvider,
+          embeddingModel: this.embeddingModel,
+        });
+        this.logger.debug('Knowledge database created successfully');
+      } catch (dbError) {
+        this.logger.error('Failed to create knowledge database');
+        this.logger.debug('Database creation error', {
+          errorMessage: dbError instanceof Error ? dbError.message : String(dbError),
+          embeddingModel: this.embeddingModel,
+        });
+        throw dbError;
+      }
+    } else {
+      this.logger.debug('Using cached database instance');
     }
     return this.database;
   }
@@ -321,7 +341,6 @@ export class Knowledge implements IAgentModule {
       this.agent.id,
       title || 'Untitled Document',
       content,
-      typeof metadata?.filePath === 'string' ? metadata.filePath : undefined,
       typeof metadata?.fileType === 'string' ? metadata.fileType : undefined,
       typeof metadata?.fileSize === 'number' ? metadata.fileSize : undefined,
       metadata
@@ -393,57 +412,109 @@ export class Knowledge implements IAgentModule {
       similarity: number;
     }>
   > {
-    const startTime = Date.now();
+    try {
+      const startTime = Date.now();
 
-    // User-facing info log
-    this.logger.info(`Searching knowledge base for: "${query}"`);
+      // User-facing info log
+      this.logger.info(`Searching knowledge base for: "${query}"`);
 
-    this.logger.debug('Searching knowledge base', {
-      query,
-      limit,
-      threshold,
-      agentId: this.agent.id,
-    });
+      this.logger.debug('Starting knowledge search', {
+        query,
+        limit,
+        threshold,
+        agentId: this.agent.id,
+        embeddingModel: this.embeddingModel,
+        hasEmbeddingProvider: !!this.embeddingProvider,
+      });
+      let db: KnowledgeDatabase;
+      try {
+        db = await this.getDatabase();
+        this.logger.debug('Database instance obtained for search');
+      } catch (dbError) {
+        this.logger.error('Failed to get database for search');
+        this.logger.debug('Database error in search', {
+          errorMessage: dbError instanceof Error ? dbError.message : String(dbError),
+        });
+        throw dbError;
+      }
 
-    const db = await this.getDatabase();
+      this.logger.debug('Generating query embedding');
+      this.logger.debug('Query embedding details', {
+        queryLength: query.length,
+        embeddingModel: this.embeddingModel,
+        providerName: this.embeddingProvider?.name || 'unknown',
+        hasGenerateEmbedding: !!this.embeddingProvider?.generateEmbedding,
+      });
 
-    this.logger.debug('Generating query embedding');
-    if (!this.embeddingProvider?.generateEmbedding) {
-      throw new Error('Embedding provider not properly initialized');
+      if (!this.embeddingProvider?.generateEmbedding) {
+        this.logger.error('Embedding provider not properly initialized');
+        throw new Error('Embedding provider not properly initialized');
+      }
+
+      let queryEmbedding: number[];
+      try {
+        const queryEmbeddingResult = await this.embeddingProvider.generateEmbedding(
+          query,
+          this.embeddingModel
+        );
+        queryEmbedding = queryEmbeddingResult.embedding;
+        this.logger.debug('Query embedding generated successfully', {
+          embeddingDimensions: queryEmbedding.length,
+          embeddingModel: this.embeddingModel,
+        });
+      } catch (embeddingError) {
+        this.logger.error('Failed to generate query embedding');
+        this.logger.debug('Embedding error details', {
+          errorMessage:
+            embeddingError instanceof Error ? embeddingError.message : String(embeddingError),
+          embeddingModel: this.embeddingModel,
+          queryLength: query.length,
+        });
+        throw embeddingError;
+      }
+
+      const results = await db.searchKnowledge(this.agent.id, queryEmbedding, limit, threshold);
+
+      // User-facing result summary
+      this.logger.info(
+        `Found ${results.length} relevant knowledge ${results.length === 1 ? 'result' : 'results'} (threshold: ${threshold})`
+      );
+
+      this.logger.debug(`Found ${results.length} knowledge results`, {
+        resultCount: results.length,
+        topSimilarity: results[0]?.similarity || 0,
+        searchTime: Date.now() - startTime,
+        hasResults: results.length > 0,
+      });
+
+      // Transform KnowledgeSearchResult to the expected format
+      return results.map((result) => ({
+        content: result.content,
+        metadata: {
+          ...result.chunk_metadata,
+          documentId: result.document_id,
+          chunkIndex: result.chunk_index,
+          documentTitle: result.document_title,
+          fileType: result.file_type,
+          documentMetadata: result.document_metadata,
+        },
+        similarity: result.similarity,
+      }));
+    } catch (searchError) {
+      this.logger.error('Knowledge search failed with exception');
+      this.logger.debug('Search error details', {
+        errorMessage: searchError instanceof Error ? searchError.message : String(searchError),
+        errorType: typeof searchError,
+        query,
+        limit,
+        threshold,
+      });
+      if (searchError instanceof Error && searchError.stack) {
+        this.logger.debug('Search error stack trace', { stack: searchError.stack });
+      }
+      // Return empty results instead of throwing to prevent breaking the agent
+      return [];
     }
-    const queryEmbeddingResult = await this.embeddingProvider.generateEmbedding(
-      query,
-      this.embeddingModel
-    );
-    const queryEmbedding = queryEmbeddingResult.embedding;
-
-    const results = await db.searchKnowledge(this.agent.id, queryEmbedding, limit, threshold);
-
-    // User-facing result summary
-    this.logger.info(
-      `Found ${results.length} relevant knowledge ${results.length === 1 ? 'result' : 'results'}`
-    );
-
-    this.logger.debug(`Found ${results.length} knowledge results`, {
-      resultCount: results.length,
-      topSimilarity: results[0]?.similarity || 0,
-      searchTime: Date.now() - startTime,
-      hasResults: results.length > 0,
-    });
-
-    // Transform KnowledgeSearchResult to the expected format
-    return results.map((result) => ({
-      content: result.content,
-      metadata: {
-        ...result.chunk_metadata,
-        documentId: result.document_id,
-        documentTitle: result.document_title,
-        filePath: result.file_path,
-        fileType: result.file_type,
-        documentMetadata: result.document_metadata,
-      },
-      similarity: result.similarity,
-    }));
   }
 
   async getKnowledgeContext(query: string, limit: number = 5): Promise<string> {
@@ -456,9 +527,7 @@ export class Knowledge implements IAgentModule {
     return results.map((r) => r.content).join('\n\n---\n\n');
   }
 
-  async getKnowledgeDocuments(): Promise<
-    Array<{ id: number; title: string; file_path: string; created_at: string }>
-  > {
+  async getKnowledgeDocuments(): Promise<Array<{ id: number; title: string; created_at: string }>> {
     const db = await this.getDatabase();
     const documents = await db.getDocuments(this.agent.id);
 
@@ -466,7 +535,6 @@ export class Knowledge implements IAgentModule {
     return documents.map((doc) => ({
       id: doc.id,
       title: doc.title || 'Untitled Document',
-      file_path: doc.file_path || '',
       created_at: doc.created_at,
     }));
   }
@@ -510,8 +578,37 @@ export class Knowledge implements IAgentModule {
     });
   }
 
+  async expandKnowledgeContext(
+    documentId: number,
+    chunkIndex: number,
+    expandBefore: number = 1,
+    expandAfter: number = 1
+  ): Promise<string[]> {
+    this.logger.debug('Expanding knowledge context', {
+      documentId,
+      chunkIndex,
+      expandBefore,
+      expandAfter,
+      agentId: this.agent.id,
+    });
+
+    const db = await this.getDatabase();
+    return db.expandKnowledgeContext(documentId, chunkIndex, expandBefore, expandAfter);
+  }
+
   async addKnowledgeFromFile(filePath: string, metadata?: MetadataObject): Promise<void> {
     const fileName = path.basename(filePath);
+
+    // Check if document with same filename already exists for this agent
+    const db = await this.getDatabase();
+    const existingDocs = await db.getDocuments(this.agent.id);
+    const existingDoc = existingDocs.find((doc) => doc.title === fileName);
+
+    if (existingDoc) {
+      this.logger.info(`Skipping file: ${fileName} - already exists in knowledge base`);
+      return;
+    }
+
     this.logger.info(`Adding knowledge from file: ${fileName}`);
 
     const fileExtension = path.extname(filePath).toLowerCase();
@@ -539,7 +636,6 @@ export class Knowledge implements IAgentModule {
       const fileMetadata = {
         ...metadata,
         fileName,
-        filePath,
         fileType: fileExtension,
         fileSize: getFileSize(filePath),
         addedAt: new Date().toISOString(),
@@ -547,7 +643,9 @@ export class Knowledge implements IAgentModule {
 
       await this.addKnowledge(content, title, fileMetadata);
     } catch (error) {
-      throw new Error(`Failed to process file ${filePath}: ${error}`);
+      throw new Error(
+        `Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 
@@ -601,8 +699,8 @@ export class Knowledge implements IAgentModule {
     try {
       const pdfBuffer = await fs.promises.readFile(filePath);
 
-      // Dynamic import for ES Module compatibility
-      const pdfjs = await import('pdfjs-dist');
+      // Dynamic import for ES Module compatibility - use legacy build for Node.js
+      const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
 
       // Convert Buffer to Uint8Array for pdfjs-dist
       const uint8Array = new Uint8Array(pdfBuffer);
@@ -623,9 +721,14 @@ export class Knowledge implements IAgentModule {
 
         const pageText = textContent.items
           .map((item: TextItem | TextMarkedContent) => ('str' in item ? item.str : ''))
-          .join(' ');
+          .join(' ')
+          .replace(/\0/g, '') // Remove null bytes that cause UTF8 encoding errors
+          .replace(/[\p{Cc}\p{Cf}]/gu, ' ') // Replace control and format characters with spaces
+          .trim();
 
-        fullText += pageText + '\n';
+        if (pageText) {
+          fullText += pageText + '\n';
+        }
       }
 
       return fullText.trim();
@@ -638,33 +741,41 @@ export class Knowledge implements IAgentModule {
 
   private chunkText(text: string): string[] {
     const chunks: string[] = [];
-    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+
+    // Better sentence splitting - handles abbreviations and decimals
+    const sentences = text.match(/[^.!?]*[.!?]+(?:\s|$)/g) || [text];
+
+    // Clean up sentences
+    const cleanSentences = sentences.map((s) => s.trim()).filter((s) => s.length > 0);
 
     let currentChunk = '';
-    let currentLength = 0;
 
-    for (const sentence of sentences) {
-      const sentenceLength = sentence.length;
-
-      if (currentLength + sentenceLength > this.chunkSize && currentChunk) {
+    for (const sentence of cleanSentences) {
+      // Check if adding this sentence would exceed chunk size
+      if (currentChunk.length + sentence.length > this.chunkSize && currentChunk) {
         chunks.push(currentChunk.trim());
 
-        // Add overlap
-        const words = currentChunk.split(' ');
-        const overlapWords = Math.ceil(words.length * (this.chunkOverlap / this.chunkSize));
-        currentChunk = words.slice(-overlapWords).join(' ') + ' ';
-        currentLength = currentChunk.length;
+        // Create overlap by keeping last portion of current chunk
+        const words = currentChunk.trim().split(' ');
+        const overlapWordCount = Math.floor(words.length * (this.chunkOverlap / this.chunkSize));
+
+        if (overlapWordCount > 0) {
+          currentChunk = words.slice(-overlapWordCount).join(' ') + ' ';
+        } else {
+          currentChunk = '';
+        }
       }
 
-      currentChunk += sentence;
-      currentLength += sentenceLength;
+      currentChunk += sentence + ' ';
     }
 
+    // Add final chunk if it has content
     if (currentChunk.trim()) {
       chunks.push(currentChunk.trim());
     }
 
-    return chunks;
+    // Filter out very short chunks that won't be useful
+    return chunks.filter((chunk) => chunk.length >= 50);
   }
 }
 

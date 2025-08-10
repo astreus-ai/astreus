@@ -13,7 +13,6 @@ interface KnowledgeSearchResult {
   chunk_metadata: MetadataObject;
   document_id: number;
   document_title: string;
-  file_path: string | null;
   file_type: string | null;
   document_metadata: MetadataObject;
   similarity: number;
@@ -24,7 +23,6 @@ interface KnowledgeDocument {
   agent_id: number;
   title: string | null;
   content: string;
-  file_path: string | null;
   file_type: string | null;
   file_size: number | null;
   metadata: MetadataObject;
@@ -52,6 +50,7 @@ export interface KnowledgeDatabaseConfig {
     name: string;
     generateEmbedding?: (text: string, model?: string) => Promise<{ embedding: number[] }>;
   };
+  embeddingModel?: string;
 }
 
 export class KnowledgeDatabase {
@@ -61,6 +60,7 @@ export class KnowledgeDatabase {
     name: string;
     generateEmbedding?: (text: string, model?: string) => Promise<{ embedding: number[] }>;
   } | null = null;
+  private embeddingModel: string | null = null;
   private embeddingDimensions: number | null = null;
   private tableDimensions: number | null = null;
   private logger = getLogger();
@@ -79,6 +79,7 @@ export class KnowledgeDatabase {
     });
 
     this.embeddingProvider = config?.embeddingProvider || null;
+    this.embeddingModel = config?.embeddingModel || null;
     if (!this.embeddingProvider) {
       throw new Error('Embedding provider is required for knowledge database');
     }
@@ -165,7 +166,10 @@ export class KnowledgeDatabase {
       if (!this.embeddingProvider?.generateEmbedding) {
         throw new Error('Embedding provider not properly initialized');
       }
-      const testResult = await this.embeddingProvider.generateEmbedding('test');
+      const testResult = await this.embeddingProvider.generateEmbedding(
+        'test',
+        this.embeddingModel || undefined
+      );
       this.embeddingDimensions = testResult.embedding.length;
       this.logger.debug('Detected embedding dimensions', { dimensions: this.embeddingDimensions });
     }
@@ -182,7 +186,6 @@ export class KnowledgeDatabase {
           agent_id INTEGER NOT NULL,
           title VARCHAR(255),
           content TEXT NOT NULL,
-          file_path VARCHAR(500),
           file_type VARCHAR(20),
           file_size INTEGER,
           metadata JSONB,
@@ -341,7 +344,6 @@ export class KnowledgeDatabase {
     agentId: number,
     title: string,
     content: string,
-    filePath?: string,
     fileType?: string,
     fileSize?: number,
     metadata?: MetadataObject
@@ -355,7 +357,6 @@ export class KnowledgeDatabase {
         agent_id: agentId,
         title,
         content,
-        file_path: filePath,
         file_type: fileType,
         file_size: fileSize,
         metadata: metadata || {},
@@ -366,14 +367,13 @@ export class KnowledgeDatabase {
       const encryptedData = await this.encryptKnowledgeData(documentData, 'knowledge_documents');
 
       const result = await client.query(
-        `INSERT INTO knowledge_documents (agent_id, title, content, file_path, file_type, file_size, metadata, token_count) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+        `INSERT INTO knowledge_documents (agent_id, title, content, file_type, file_size, metadata, token_count) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) 
          RETURNING id`,
         [
           encryptedData.agent_id,
           encryptedData.title,
           encryptedData.content,
-          encryptedData.file_path,
           encryptedData.file_type,
           encryptedData.file_size,
           encryptedData.metadata,
@@ -468,7 +468,6 @@ export class KnowledgeDatabase {
            c.metadata as chunk_metadata,
            d.id as document_id,
            d.title as document_title,
-           d.file_path,
            d.file_type,
            d.metadata as document_metadata,
            1 - (c.embedding <=> $1::vector) as similarity
@@ -492,11 +491,10 @@ export class KnowledgeDatabase {
                 'knowledge_chunks'
               );
 
-              // Decrypt document title, file_path and metadata
+              // Decrypt document title and metadata
               const decryptedDoc = await this.decryptKnowledgeData(
                 {
                   title: row.document_title,
-                  file_path: row.file_path,
                   metadata: row.document_metadata,
                 },
                 'knowledge_documents'
@@ -507,7 +505,6 @@ export class KnowledgeDatabase {
                 content: decryptedChunk.content,
                 chunk_metadata: decryptedChunk.metadata,
                 document_title: decryptedDoc.title,
-                file_path: decryptedDoc.file_path,
                 document_metadata: decryptedDoc.metadata,
               };
             } catch {
@@ -619,6 +616,29 @@ export class KnowledgeDatabase {
     const client = await this.pool.connect();
     try {
       await client.query(`DELETE FROM knowledge_documents WHERE agent_id = $1`, [agentId]);
+    } finally {
+      client.release();
+    }
+  }
+
+  async expandKnowledgeContext(
+    documentId: number,
+    chunkIndex: number,
+    expandBefore: number = 1,
+    expandAfter: number = 1
+  ): Promise<string[]> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT content, chunk_index 
+         FROM knowledge_chunks 
+         WHERE document_id = $1 
+         AND chunk_index BETWEEN $2 AND $3
+         ORDER BY chunk_index`,
+        [documentId, Math.max(0, chunkIndex - expandBefore), chunkIndex + expandAfter]
+      );
+
+      return result.rows.map((row) => row.content);
     } finally {
       client.release();
     }

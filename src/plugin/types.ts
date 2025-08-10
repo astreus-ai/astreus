@@ -37,6 +37,26 @@ export interface ToolHandler {
 export interface ToolContext {
   agentId: number;
   taskId?: number;
+  agent?: {
+    hasKnowledge(): boolean;
+    searchKnowledge?(
+      query: string,
+      limit: number,
+      threshold: number
+    ): Promise<
+      Array<{
+        content: string;
+        metadata: MetadataObject;
+        similarity: number;
+      }>
+    >;
+    expandKnowledgeContext?(
+      documentId: number,
+      chunkIndex: number,
+      expandBefore?: number,
+      expandAfter?: number
+    ): Promise<string[]>;
+  };
   userId?: string;
   metadata?: MetadataObject;
 }

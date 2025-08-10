@@ -41,10 +41,12 @@ export class Logger implements ILogger {
           options: {
             colorize: true,
             translateTime: false,
-            ignore: 'pid,hostname,framework,level,time,module,agent,data,err',
+            ignore: this.config.debug
+              ? 'pid,hostname,framework,level,time,module,agent,err'
+              : 'pid,hostname,framework,level,time,module,agent,data,err',
             messageFormat: 'Astreus [{agent}] {module} → {msg}',
             customColors: 'info:blue,warn:yellow,error:red,success:green',
-            hideObject: true,
+            hideObject: !this.config.debug,
             singleLine: false,
             messageKey: 'msg',
           },

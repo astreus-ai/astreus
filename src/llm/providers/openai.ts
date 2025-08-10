@@ -15,6 +15,18 @@ import { Logger } from '../../logger/types';
 import * as fs from 'fs';
 import * as path from 'path';
 
+// OpenAI-specific message type that accepts string arguments for tool calls
+interface OpenAIMessage extends Omit<LLMMessage, 'tool_calls'> {
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: {
+      name: string;
+      arguments: string; // OpenAI requires string, not our Record type
+    };
+  }>;
+}
+
 export class OpenAIProvider implements LLMProvider {
   name = 'openai';
   private client: OpenAI;
@@ -463,7 +475,7 @@ export class OpenAIProvider implements LLMProvider {
     return mimeTypes[extension.toLowerCase()] || 'image/jpeg';
   }
 
-  private prepareMessages(options: LLMRequestOptions): LLMMessage[] {
+  private prepareMessages(options: LLMRequestOptions): OpenAIMessage[] {
     const messages = [...options.messages];
 
     // Add system prompt if provided and no system message exists
@@ -471,7 +483,27 @@ export class OpenAIProvider implements LLMProvider {
       messages.unshift({ role: 'system', content: options.systemPrompt });
     }
 
-    return messages;
+    // Ensure tool_calls arguments are serialized as strings for OpenAI API
+    const processedMessages: OpenAIMessage[] = messages.map((message): OpenAIMessage => {
+      if (message.role === 'assistant' && message.tool_calls) {
+        return {
+          ...message,
+          tool_calls: message.tool_calls.map((tc) => ({
+            ...tc,
+            function: {
+              ...tc.function,
+              arguments:
+                typeof tc.function.arguments === 'string'
+                  ? tc.function.arguments
+                  : JSON.stringify(tc.function.arguments),
+            },
+          })),
+        };
+      }
+      return message as OpenAIMessage;
+    });
+
+    return processedMessages;
   }
 
   getEmbeddingProvider(): LLMProvider {
