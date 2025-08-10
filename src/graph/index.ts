@@ -56,6 +56,11 @@ export class Graph implements IAgentModule {
     this.agent = agent;
     this.logger = agent?.logger;
 
+    // Log warning if no agent provided
+    if (!agent) {
+      console.warn('Graph created without agent - some functionality may be limited');
+    }
+
     this.graph = {
       config,
       nodes: [],
@@ -144,7 +149,7 @@ export class Graph implements IAgentModule {
       prompt: options.prompt,
       model: options.model,
       stream: options.stream,
-      agentId: options.agentId || this.graph.config.defaultAgentId,
+      agentId: options.agentId || this.agent?.id,
       // Sub-agent delegation options
       useSubAgents: options.useSubAgents,
       subAgentDelegation: options.subAgentDelegation,
@@ -807,26 +812,24 @@ export class Graph implements IAgentModule {
 
   // Memory methods for graph
   async getMemories(): Promise<MemoryType[]> {
-    if (!this.graph.config.defaultAgentId) {
-      throw new Error('No default agent set for this graph');
+    if (!this.agent) {
+      throw new Error('No agent available for this graph');
     }
 
-    const agent = await Agent.findById(this.graph.config.defaultAgentId);
-
-    if (!agent || !agent.hasMemory()) {
+    if (!this.agent.hasMemory()) {
       return [];
     }
 
     // Check if agent has listMemories method (dynamically bound)
     if (
-      'listMemories' in agent &&
+      'listMemories' in this.agent &&
       typeof (
-        agent as Agent & {
+        this.agent as Agent & {
           listMemories?: (options: { orderBy: string; order: string }) => Promise<MemoryType[]>;
         }
       ).listMemories === 'function'
     ) {
-      const agentWithMemory = agent as Agent & {
+      const agentWithMemory = this.agent as Agent & {
         listMemories: (options: { orderBy: string; order: string }) => Promise<MemoryType[]>;
       };
       return await agentWithMemory.listMemories({
@@ -838,26 +841,24 @@ export class Graph implements IAgentModule {
   }
 
   async searchMemories(query: string, limit?: number): Promise<MemoryType[]> {
-    if (!this.graph.config.defaultAgentId) {
-      throw new Error('No default agent set for this graph');
+    if (!this.agent) {
+      throw new Error('No agent available for this graph');
     }
 
-    const agent = await Agent.findById(this.graph.config.defaultAgentId);
-
-    if (!agent || !agent.hasMemory()) {
+    if (!this.agent.hasMemory()) {
       return [];
     }
 
     // Check if agent has searchMemories method (dynamically bound)
     if (
-      'searchMemories' in agent &&
+      'searchMemories' in this.agent &&
       typeof (
-        agent as Agent & {
+        this.agent as Agent & {
           searchMemories?: (query: string, limit?: number) => Promise<MemoryType[]>;
         }
       ).searchMemories === 'function'
     ) {
-      const agentWithMemory = agent as Agent & {
+      const agentWithMemory = this.agent as Agent & {
         searchMemories: (query: string, limit?: number) => Promise<MemoryType[]>;
       };
       return await agentWithMemory.searchMemories(query, limit);
