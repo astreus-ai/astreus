@@ -102,7 +102,13 @@ export class LLM {
     const response = await provider.generateResponse(options);
 
     // User-facing success message
-    this.logger.info(`Response generated (${response.content.length} chars)`);
+    if (response.content.length === 0 && response.toolCalls && response.toolCalls.length > 0) {
+      this.logger.info(
+        `Tools called: ${response.toolCalls.map((tc) => tc.function.name).join(', ')}`
+      );
+    } else {
+      this.logger.info(`Response generated (${response.content.length} chars)`);
+    }
 
     this.logger.debug('LLM response generated', {
       model: response.model,

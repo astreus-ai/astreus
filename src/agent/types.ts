@@ -67,14 +67,18 @@ export interface IKnowledgeMethods {
     threshold?: number
   ): Promise<Array<{ content: string; metadata: MetadataObject; similarity: number }>>;
   getKnowledgeContext(query: string, limit?: number): Promise<string>;
-  getKnowledgeDocuments(): Promise<
-    Array<{ id: number; title: string; file_path: string; created_at: string }>
-  >;
+  getKnowledgeDocuments(): Promise<Array<{ id: number; title: string; created_at: string }>>;
   deleteKnowledgeDocument(documentId: number): Promise<boolean>;
   deleteKnowledgeChunk(chunkId: number): Promise<boolean>;
   clearKnowledge(): Promise<void>;
   addKnowledgeFromFile(filePath: string, metadata?: MetadataObject): Promise<void>;
   addKnowledgeFromDirectory(dirPath: string, metadata?: MetadataObject): Promise<void>;
+  expandKnowledgeContext(
+    documentId: number,
+    chunkIndex: number,
+    expandBefore?: number,
+    expandAfter?: number
+  ): Promise<string[]>;
 }
 
 /**

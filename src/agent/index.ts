@@ -351,9 +351,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     return this.modules.knowledge.getKnowledgeContext(query, limit);
   }
 
-  async getKnowledgeDocuments(): Promise<
-    Array<{ id: number; title: string; file_path: string; created_at: string }>
-  > {
+  async getKnowledgeDocuments(): Promise<Array<{ id: number; title: string; created_at: string }>> {
     if (!this.modules.knowledge) throw new Error('Knowledge module not enabled');
     return this.modules.knowledge.getKnowledgeDocuments();
   }
@@ -383,6 +381,21 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     return this.modules.knowledge.addKnowledgeFromDirectory(dirPath, metadata);
   }
 
+  async expandKnowledgeContext(
+    documentId: number,
+    chunkIndex: number,
+    expandBefore?: number,
+    expandAfter?: number
+  ): Promise<string[]> {
+    if (!this.modules.knowledge) throw new Error('Knowledge module not enabled');
+    return this.modules.knowledge.expandKnowledgeContext(
+      documentId,
+      chunkIndex,
+      expandBefore,
+      expandAfter
+    );
+  }
+
   // ===== PLUGIN MODULE METHODS (when useTools enabled) =====
 
   async registerPlugin(plugin: IPlugin, config?: PluginConfig): Promise<void> {
@@ -407,7 +420,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
   async executeTool(toolCall: PluginToolCall): Promise<ToolCallResult> {
     if (!this.modules.plugin) throw new Error('Plugin module not enabled');
-    return this.modules.plugin.executeTool(toolCall);
+    return this.modules.plugin.executeTool(toolCall, { agentId: this.id, agent: this });
   }
 
   // ===== MCP MODULE METHODS (when useTools enabled) =====
@@ -820,30 +833,6 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       }
     }
 
-    // Add knowledge context if query seems to need it
-    if (this.hasKnowledge() && this.modules?.knowledge) {
-      try {
-        const knowledgeModule = this.modules.knowledge as Knowledge;
-        if (knowledgeModule && typeof knowledgeModule.searchKnowledge === 'function') {
-          const relevantKnowledge = await knowledgeModule.searchKnowledge(prompt, 3, 0.7);
-          if (Array.isArray(relevantKnowledge) && relevantKnowledge.length > 0) {
-            const knowledgeContext = relevantKnowledge
-              .filter((k) => k && k.content)
-              .map((k) => k.content)
-              .join('\n\n---\n\n');
-            if (knowledgeContext.trim()) {
-              enhancedPrompt = `Relevant context from knowledge base:\n${knowledgeContext}\n\nUser question: ${enhancedPrompt}`;
-            }
-          }
-        }
-      } catch (error) {
-        this.logger.warn(
-          'Failed to search knowledge:',
-          error instanceof Error ? error.message : String(error)
-        );
-      }
-    }
-
     // Add temporary MCP servers if provided
     if (options?.mcpServers && Array.isArray(options.mcpServers) && this.modules?.mcp) {
       const mcpModule = this.modules.mcp as MCP;
@@ -1024,7 +1013,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
               toolResult = mcpResult.content.map((c) => c.text || '').join('\n');
             } else if (toolCall.function.name.startsWith('plugin_')) {
               // Handle plugin tool call
-              const pluginToolName = toolCall.function.name.substring(8); // Remove 'plugin_' prefix
+              const pluginToolName = toolCall.function.name.substring(7); // Remove 'plugin_' prefix
 
               // Ensure arguments are properly formatted for plugin tools
               let pluginArgs: Record<string, unknown>;
@@ -1035,11 +1024,14 @@ export class Agent extends BaseAgent implements IAgentWithModules {
               }
 
               if (this.modules.plugin) {
-                const pluginResult = await this.modules.plugin.executeTool({
-                  id: toolCall.id,
-                  name: pluginToolName,
-                  parameters: pluginArgs as Record<string, ToolParameterValue>,
-                });
+                const pluginResult = await this.modules.plugin.executeTool(
+                  {
+                    id: toolCall.id,
+                    name: pluginToolName,
+                    parameters: pluginArgs as Record<string, ToolParameterValue>,
+                  },
+                  { agentId: this.id, agent: this }
+                );
                 toolResult = pluginResult.result.success
                   ? typeof pluginResult.result.data === 'string'
                     ? pluginResult.result.data
@@ -1079,6 +1071,25 @@ export class Agent extends BaseAgent implements IAgentWithModules {
         }
 
         // Get final response from LLM with tool results
+        const toolMessages = messages.filter((m) => m.role === 'tool');
+        if (toolMessages.length > 0) {
+          const lastToolContent = toolMessages[toolMessages.length - 1]?.content || '';
+          this.logger.info(
+            `Sending tool results to LLM (${lastToolContent.length} chars, ${toolMessages.length} tool results)`
+          );
+          this.logger.debug('Tool result content preview', {
+            preview: lastToolContent.slice(0, 500),
+            totalLength: lastToolContent.length,
+            toolCount: toolMessages.length,
+          });
+        }
+        this.logger.debug('Sending tool results to LLM for final response', {
+          messageCount: messages.length,
+          toolMessageCount: toolMessages.length,
+          lastToolContentLength: toolMessages[toolMessages.length - 1]?.content.length || 0,
+          lastToolPreview: toolMessages[toolMessages.length - 1]?.content.slice(0, 100) || '',
+        });
+
         const finalLlmOptions: LLMRequestOptions = {
           ...llmOptions,
           messages,
