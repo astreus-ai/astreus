@@ -1,6 +1,6 @@
 import knex, { Knex } from 'knex';
 import { DatabaseConfig } from './types';
-import { AgentConfig } from '../agent/types';
+import { AgentConfig, AgentConfigInput } from '../agent/types';
 import { DEFAULT_DATABASE_CONFIG } from './defaults';
 import { createKnexConfig } from './knex';
 import { Logger } from '../logger/types';
@@ -373,7 +373,7 @@ export class Database {
     });
   }
 
-  async createAgent(data: AgentConfig): Promise<AgentConfig> {
+  async createAgent(data: AgentConfigInput): Promise<AgentConfig> {
     // User-facing info log
     this.logger.info(`Creating agent: ${data.name}`);
 

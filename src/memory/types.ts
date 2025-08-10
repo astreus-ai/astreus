@@ -1,13 +1,13 @@
 import { MetadataObject } from '../types';
 
 export interface Memory {
-  id?: number;
+  id: number;
   agentId: number;
   content: string;
   embedding?: number[];
   metadata?: MetadataObject;
-  createdAt?: Date;
-  updatedAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface MemorySearchOptions {

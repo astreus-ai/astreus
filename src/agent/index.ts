@@ -1,4 +1,11 @@
-import { AgentConfig, IAgent, IAgentWithModules, RunOptions, AskOptions } from './types';
+import {
+  AgentConfig,
+  AgentConfigInput,
+  IAgent,
+  IAgentWithModules,
+  RunOptions,
+  AskOptions,
+} from './types';
 import { DEFAULT_AGENT_CONFIG } from './defaults';
 import { Task as TaskType, TaskRequest, TaskSearchOptions, TaskResponse } from '../task/types';
 import { Memory as MemoryType, MemorySearchOptions } from '../memory/types';
@@ -593,18 +600,18 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   /**
    * Factory method to create a new agent or find existing one by name
    */
-  static async create(config: AgentConfig): Promise<Agent> {
+  static async create(config: AgentConfigInput): Promise<Agent> {
     const db = await getDatabase();
 
-    // Ensure all optional fields have defaults to prevent undefined behavior
-    const fullConfig: AgentConfig = {
+    // Apply defaults for required boolean fields
+    const fullConfig: AgentConfigInput = {
       memory: false,
       knowledge: false,
       vision: false,
       useTools: true,
       contextCompression: false,
       debug: false,
-      ...config, // Override with provided config
+      ...config,
     };
 
     // Check if agent with this name already exists

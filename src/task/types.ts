@@ -5,14 +5,14 @@ import { MetadataObject } from '../types';
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 export interface Task {
-  id?: number;
+  id: number;
   agentId: number;
   prompt: string;
   response?: string;
   status: TaskStatus;
   metadata?: MetadataObject;
-  createdAt?: Date;
-  updatedAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
   completedAt?: Date;
 }
 
