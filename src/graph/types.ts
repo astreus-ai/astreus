@@ -69,7 +69,6 @@ export interface GraphConfig {
   id?: number;
   name: string;
   description?: string;
-  defaultAgentId?: number;
   maxConcurrency?: number;
   timeout?: number;
   retryAttempts?: number;
