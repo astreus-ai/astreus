@@ -46,6 +46,7 @@ coverage/
 .DS_Store
 .claude
 .cursor
+.codacy
 
 # OS generated files
 .DS_Store
@@ -59,6 +60,3 @@ Thumbs.db
 example.ts
 old/
 product/
-
-#Ignore cursor AI rules
-.cursor/rules/codacy.mdc
