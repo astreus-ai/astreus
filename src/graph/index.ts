@@ -182,6 +182,8 @@ export class Graph implements IAgentModule {
       fromNodeId,
       toNodeId,
       condition,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     };
 
     this.graph.edges.push(edge);
@@ -868,8 +870,9 @@ export class Graph implements IAgentModule {
     await this.initialize();
     const storage = getGraphStorage();
     const graphId = await storage.saveGraph(this.graph);
-    this.graph.id = graphId.toString();
-    this.graph.config.id = graphId.toString();
+
+    this.graph.id = graphId;
+    this.graph.config.id = graphId;
     return graphId;
   }
 
@@ -879,7 +882,7 @@ export class Graph implements IAgentModule {
       throw new Error('Graph must be saved before updating');
     }
     const storage = getGraphStorage();
-    await storage.updateGraph(parseInt(this.graph.id), this.graph);
+    await storage.updateGraph(this.graph.id, this.graph);
   }
 
   async delete(): Promise<boolean> {
@@ -888,7 +891,7 @@ export class Graph implements IAgentModule {
       throw new Error('Graph must be saved before deleting');
     }
     const storage = getGraphStorage();
-    return await storage.deleteGraph(parseInt(this.graph.id));
+    return await storage.deleteGraph(this.graph.id);
   }
 
   // Ultra-simplified scheduler - complex scheduling methods removed

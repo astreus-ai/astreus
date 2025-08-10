@@ -59,37 +59,35 @@ export interface GraphEdge {
   id: string;
   fromNodeId: string;
   toNodeId: string;
-  condition?: string; // Optional condition for conditional execution
+  condition?: string;
   metadata?: MetadataObject;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface GraphConfig {
-  id?: string;
+  id?: number;
   name: string;
   description?: string;
-  defaultAgentId?: number; // Default agent for task nodes
-  maxConcurrency?: number; // Max parallel execution
-  timeout?: number; // Execution timeout in ms
+  defaultAgentId?: number;
+  maxConcurrency?: number;
+  timeout?: number;
   retryAttempts?: number;
-  // Sub-agent integration options
-  subAgentAware?: boolean; // Enable sub-agent awareness and optimization
-  optimizeSubAgentUsage?: boolean; // Optimize sub-agent delegation patterns
-  subAgentCoordination?: 'parallel' | 'sequential' | 'adaptive'; // Default sub-agent coordination
+  subAgentAware?: boolean;
+  optimizeSubAgentUsage?: boolean;
+  subAgentCoordination?: 'parallel' | 'sequential' | 'adaptive';
   metadata?: MetadataObject;
 }
 
 export interface Graph {
-  id?: string;
+  id?: number;
   config: GraphConfig;
   nodes: GraphNode[];
   edges: GraphEdge[];
   status: GraphExecutionStatus;
-
-  // Execution tracking
   startedAt?: Date;
   completedAt?: Date;
   executionLog: GraphExecutionLogEntry[];
-
   createdAt: Date;
   updatedAt: Date;
 }

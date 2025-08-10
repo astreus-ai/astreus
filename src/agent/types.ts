@@ -162,15 +162,14 @@ export interface IAgentModule {
 }
 
 /**
- * Agent configuration
+ * Agent configuration input (for creating new agents)
  */
-export interface AgentConfig {
-  id?: number;
+export interface AgentConfigInput {
   name: string;
   description?: string;
   model?: string;
-  embeddingModel?: string; // Specific model for embeddings (auto-detected if not specified)
-  visionModel?: string; // Specific model for vision (auto-detected if not specified)
+  embeddingModel?: string;
+  visionModel?: string;
   temperature?: number;
   maxTokens?: number;
   systemPrompt?: string;
@@ -178,11 +177,24 @@ export interface AgentConfig {
   knowledge?: boolean;
   vision?: boolean;
   useTools?: boolean;
-  contextCompression?: boolean; // Enable smart context management for long conversations
-  debug?: boolean; // Enable debug logging
-  subAgents?: IAgent[]; // Sub-agents for this agent
-  createdAt?: Date;
-  updatedAt?: Date;
+  contextCompression?: boolean;
+  debug?: boolean;
+  subAgents?: IAgent[];
+}
+
+/**
+ * Agent configuration (complete, from database)
+ */
+export interface AgentConfig extends AgentConfigInput {
+  id: number;
+  memory: boolean;
+  knowledge: boolean;
+  vision: boolean;
+  useTools: boolean;
+  contextCompression: boolean;
+  debug: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 /**
