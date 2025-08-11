@@ -6,7 +6,8 @@ import { createKnexConfig } from './knex';
 import { Logger } from '../logger/types';
 import { getLogger } from '../logger';
 import { getEncryptionService } from './encryption';
-import { getSensitiveFields } from './sensitive-fields';
+import { encryptSensitiveFields, decryptSensitiveFields } from './utils';
+import { validateEncryptionConsistency } from './sensitive-fields';
 
 interface AgentDbRow {
   id: number;
@@ -22,7 +23,7 @@ interface AgentDbRow {
   knowledge: boolean;
   vision: boolean;
   useTools: boolean;
-  contextCompression: boolean;
+  autoContextCompression: boolean;
   debug: boolean;
   created_at: string;
   updated_at: string;
@@ -39,80 +40,6 @@ export class Database {
    */
   getKnex(): Knex {
     return this.knex;
-  }
-
-  /**
-   * Encrypt sensitive fields before storing
-   */
-  private async encryptSensitiveFields(
-    data: Record<string, unknown>,
-    tableName: string
-  ): Promise<Record<string, unknown>> {
-    if (!this.encryption.isEnabled()) {
-      return data;
-    }
-
-    const encrypted = { ...data };
-
-    // Get sensitive fields from centralized configuration
-    const fieldsToEncrypt = getSensitiveFields(tableName);
-
-    for (const field of fieldsToEncrypt) {
-      if (encrypted[field] !== undefined && encrypted[field] !== null) {
-        if (field === 'metadata' && typeof encrypted[field] === 'object') {
-          // Handle JSON metadata fields
-          encrypted[field] = await this.encryption.encryptJSON(
-            encrypted[field],
-            `${tableName}.${field}`
-          );
-        } else {
-          // Handle string fields
-          encrypted[field] = await this.encryption.encrypt(
-            String(encrypted[field]),
-            `${tableName}.${field}`
-          );
-        }
-      }
-    }
-
-    return encrypted;
-  }
-
-  /**
-   * Decrypt sensitive fields after retrieving
-   */
-  private async decryptSensitiveFields(
-    data: Record<string, unknown>,
-    tableName: string
-  ): Promise<Record<string, unknown>> {
-    if (!this.encryption.isEnabled() || !data) {
-      return data;
-    }
-
-    const decrypted = { ...data };
-
-    // Get sensitive fields from centralized configuration
-    const fieldsToDecrypt = getSensitiveFields(tableName);
-
-    for (const field of fieldsToDecrypt) {
-      if (decrypted[field] !== undefined && decrypted[field] !== null) {
-        if (field === 'metadata') {
-          // Handle JSON metadata fields
-          decrypted[field] = await this.encryption.decryptJSON(
-            String(decrypted[field]),
-            `${tableName}.${field}`
-          );
-        } else {
-          // Handle string fields
-          decrypted[field] = await this.encryption.decrypt(
-            String(decrypted[field]),
-            `${tableName}.${field}`
-          );
-        }
-      }
-    }
-
-    return decrypted;
   }
 
   constructor(config: DatabaseConfig, logger?: Logger) {
@@ -190,6 +117,23 @@ export class Database {
 
     this.logger.debug('Starting database schema initialization');
 
+    // Validate encryption configuration
+    const encryptionValidation = validateEncryptionConsistency();
+    if (!encryptionValidation.isValid) {
+      this.logger.error('Encryption configuration validation failed');
+      this.logger.debug('Encryption validation errors', {
+        errors: encryptionValidation.errors,
+      });
+      throw new Error(`Encryption validation failed: ${encryptionValidation.errors.join(', ')}`);
+    }
+
+    if (encryptionValidation.warnings.length > 0) {
+      this.logger.warn('Encryption configuration warnings');
+      this.logger.debug('Encryption validation warnings', {
+        warnings: encryptionValidation.warnings,
+      });
+    }
+
     // Initialize agents table
     const hasAgentsTable = await this.knex.schema.hasTable('agents');
 
@@ -215,7 +159,7 @@ export class Database {
         table.boolean('knowledge').defaultTo(false);
         table.boolean('vision').defaultTo(false);
         table.boolean('useTools').defaultTo(true);
-        table.boolean('contextCompression').defaultTo(false);
+        table.boolean('autoContextCompression').defaultTo(false);
         table.boolean('debug').defaultTo(false);
         table.timestamps(true, true);
       });
@@ -225,9 +169,9 @@ export class Database {
     } else {
       // Check and add missing columns
       const hasVision = await this.knex.schema.hasColumn('agents', 'vision');
-      const hasContextCompression = await this.knex.schema.hasColumn(
+      const hasAutoContextCompression = await this.knex.schema.hasColumn(
         'agents',
-        'contextCompression'
+        'autoContextCompression'
       );
       const hasDebug = await this.knex.schema.hasColumn('agents', 'debug');
       const hasEmbeddingModel = await this.knex.schema.hasColumn('agents', 'embeddingModel');
@@ -235,7 +179,7 @@ export class Database {
 
       this.logger.debug('Checking agents table columns', {
         hasVision,
-        hasContextCompression,
+        hasAutoContextCompression,
         hasDebug,
         hasEmbeddingModel,
         hasVisionModel,
@@ -243,7 +187,7 @@ export class Database {
 
       if (
         !hasVision ||
-        !hasContextCompression ||
+        !hasAutoContextCompression ||
         !hasDebug ||
         !hasEmbeddingModel ||
         !hasVisionModel
@@ -252,7 +196,7 @@ export class Database {
 
         this.logger.debug('Adding missing columns to agents table', {
           needsVision: !hasVision,
-          needsContextCompression: !hasContextCompression,
+          needsAutoContextCompression: !hasAutoContextCompression,
           needsDebug: !hasDebug,
           needsEmbeddingModel: !hasEmbeddingModel,
           needsVisionModel: !hasVisionModel,
@@ -262,8 +206,8 @@ export class Database {
           if (!hasVision) {
             table.boolean('vision').defaultTo(false);
           }
-          if (!hasContextCompression) {
-            table.boolean('contextCompression').defaultTo(false);
+          if (!hasAutoContextCompression) {
+            table.boolean('autoContextCompression').defaultTo(false);
           }
           if (!hasDebug) {
             table.boolean('debug').defaultTo(false);
@@ -365,11 +309,42 @@ export class Database {
       }
     }
 
+    // Initialize contexts table
+    const hasContextsTable = await this.knex.schema.hasTable('contexts');
+
+    this.logger.debug('Checking contexts table', { exists: hasContextsTable });
+
+    if (!hasContextsTable) {
+      this.logger.info('Creating contexts table');
+
+      this.logger.debug('Creating contexts table with full schema');
+
+      await this.knex.schema.createTable('contexts', (table) => {
+        table.increments('id').primary();
+        table.integer('agentId').notNullable();
+        table.json('contextData').nullable(); // Compressed context messages
+        table.text('summary').nullable(); // Context summary for very large contexts
+        table.integer('tokensUsed').defaultTo(0);
+        table.string('compressionVersion').nullable(); // Track compression strategy version
+        table.timestamp('lastCompressed').nullable();
+        table.timestamps(true, true); // created_at, updated_at
+
+        // Add foreign key constraint to agents table
+        table.foreign('agentId').references('id').inTable('agents').onDelete('CASCADE');
+
+        // Add index for agent-based queries
+        table.index('agentId');
+      });
+
+      this.logger.info('Contexts table created');
+      this.logger.debug('Contexts table created successfully');
+    }
+
     // User-facing completion message
     this.logger.info('Database schema initialized');
 
     this.logger.debug('Database schema initialization completed', {
-      tablesChecked: ['agents', 'tasks', 'memories'],
+      tablesChecked: ['agents', 'tasks', 'memories', 'contexts'],
     });
   }
 
@@ -389,7 +364,7 @@ export class Database {
       knowledge: !!data.knowledge,
       vision: !!data.vision,
       useTools: data.useTools !== false,
-      contextCompression: !!data.contextCompression,
+      autoContextCompression: !!data.autoContextCompression,
       debug: !!data.debug,
       hasSystemPrompt: !!data.systemPrompt,
     });
@@ -408,20 +383,17 @@ export class Database {
       knowledge: data.knowledge || false,
       vision: data.vision || false,
       useTools: data.useTools !== undefined ? data.useTools : true,
-      contextCompression: data.contextCompression || false,
+      autoContextCompression: data.autoContextCompression || false,
       debug: data.debug || false,
     };
 
     // Encrypt sensitive fields
-    const encryptedData = await this.encryptSensitiveFields(insertData, 'agents');
+    const encryptedData = await encryptSensitiveFields(insertData, 'agents');
 
     const [agent] = await this.knex('agents').insert(encryptedData).returning('*');
 
     // Decrypt for response
-    const decryptedAgent = await this.decryptSensitiveFields(
-      agent as Record<string, unknown>,
-      'agents'
-    );
+    const decryptedAgent = await decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
     const formattedAgent = this.formatAgent(decryptedAgent as unknown as AgentDbRow);
 
     // User-facing success message
@@ -449,10 +421,7 @@ export class Database {
     if (!agent) return null;
 
     // Decrypt sensitive fields
-    const decryptedAgent = await this.decryptSensitiveFields(
-      agent as Record<string, unknown>,
-      'agents'
-    );
+    const decryptedAgent = await decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
     return this.formatAgent(decryptedAgent as unknown as AgentDbRow);
   }
 
@@ -470,10 +439,7 @@ export class Database {
     if (!agent) return null;
 
     // Decrypt sensitive fields
-    const decryptedAgent = await this.decryptSensitiveFields(
-      agent as Record<string, unknown>,
-      'agents'
-    );
+    const decryptedAgent = await decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
     return this.formatAgent(decryptedAgent as unknown as AgentDbRow);
   }
 
@@ -490,10 +456,7 @@ export class Database {
     // Decrypt sensitive fields for each agent
     const decryptedAgents = await Promise.all(
       agents.map(async (agent) => {
-        const decrypted = await this.decryptSensitiveFields(
-          agent as Record<string, unknown>,
-          'agents'
-        );
+        const decrypted = await decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
         return this.formatAgent(decrypted as unknown as AgentDbRow);
       })
     );
@@ -526,7 +489,7 @@ export class Database {
       'knowledge',
       'vision',
       'useTools',
-      'contextCompression',
+      'autoContextCompression',
       'debug',
     ] as const;
 
@@ -570,8 +533,8 @@ export class Database {
           case 'useTools':
             updateData.useTools = data.useTools ?? false;
             break;
-          case 'contextCompression':
-            updateData.contextCompression = data.contextCompression ?? false;
+          case 'autoContextCompression':
+            updateData.autoContextCompression = data.autoContextCompression ?? false;
             break;
           case 'debug':
             updateData.debug = data.debug ?? false;
@@ -586,7 +549,7 @@ export class Database {
     }
 
     // Encrypt sensitive fields in update data
-    const encryptedUpdateData = await this.encryptSensitiveFields(updateData, 'agents');
+    const encryptedUpdateData = await encryptSensitiveFields(updateData, 'agents');
 
     const [agent] = await this.knex('agents')
       .where({ id })
@@ -595,7 +558,7 @@ export class Database {
 
     if (agent) {
       // Decrypt for response
-      const decryptedAgent = await this.decryptSensitiveFields(
+      const decryptedAgent = await decryptSensitiveFields(
         agent as Record<string, unknown>,
         'agents'
       );
@@ -654,7 +617,7 @@ export class Database {
       knowledge: Boolean(agent.knowledge), // Convert SQLite 0/1 to boolean
       vision: Boolean(agent.vision), // Convert SQLite 0/1 to boolean
       useTools: Boolean(agent.useTools), // Convert SQLite 0/1 to boolean
-      contextCompression: Boolean(agent.contextCompression), // Convert SQLite 0/1 to boolean
+      autoContextCompression: Boolean(agent.autoContextCompression), // Convert SQLite 0/1 to boolean
       debug: Boolean(agent.debug), // Convert SQLite 0/1 to boolean
       createdAt: new Date(agent.created_at),
       updatedAt: new Date(agent.updated_at),

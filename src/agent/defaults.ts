@@ -2,14 +2,14 @@
  * Default configuration values for agents
  */
 export const DEFAULT_AGENT_CONFIG = {
-  model: 'gpt-4o-mini',
-  temperature: 0.7,
+  model: process.env.ASTREUS_DEFAULT_MODEL || 'gpt-4o-mini',
+  temperature: parseFloat(process.env.ASTREUS_TEMPERATURE || '0.7'),
   maxTokens: 2000,
   useTools: true,
   memory: false,
   knowledge: false,
   vision: false,
-  contextCompression: false,
+  autoContextCompression: false,
   debug: false,
 } as const;
 

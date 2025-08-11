@@ -7,6 +7,7 @@ import {
   TaskRequest,
   TaskResponse,
 } from './types';
+import { MetadataObject } from '../types';
 import { getDatabase } from '../database';
 import {
   getLLM,
@@ -427,22 +428,13 @@ export class Task implements IAgentModule {
         // Prepare messages for LLM
         const llmMessages: LLMMessage[] = [];
 
-        if (agentHasMemory) {
-          const memory = new Memory(this.agent);
-          const recentMemories = await memory.listMemories({
-            limit: 20,
-            orderBy: 'createdAt',
-            order: 'asc',
+        // Add conversation context from agent
+        const contextMessages = this.agent.getContext();
+        for (const contextMsg of contextMessages) {
+          llmMessages.push({
+            role: contextMsg.role,
+            content: contextMsg.content,
           });
-
-          // Add memories as conversation history
-          for (const mem of recentMemories) {
-            if (mem.metadata?.type === 'user_message') {
-              llmMessages.push({ role: 'user', content: mem.content });
-            } else if (mem.metadata?.type === 'assistant_response') {
-              llmMessages.push({ role: 'assistant', content: mem.content });
-            }
-          }
         }
 
         // Process attachments if present
@@ -582,21 +574,31 @@ export class Task implements IAgentModule {
         status: 'completed',
       });
 
-      // Add to memory if agent has memory enabled
-      if (agentHasMemory) {
-        const memory = new Memory(this.agent);
-
-        // Store user prompt
-        await memory.addMemory(task.prompt, {
-          type: 'user_message',
+      // Add task conversation to memory/context
+      if (this.agent && 'addMemory' in this.agent && typeof this.agent.addMemory === 'function') {
+        await (
+          this.agent.addMemory as (
+            content: string,
+            metadata?: MetadataObject
+          ) => Promise<{ id: number; content: string }>
+        )(task.prompt, {
+          role: 'user',
+          type: 'task_execution',
           taskId: taskId,
+          source: 'task',
         });
 
-        // Store assistant response
-        await memory.addMemory(llmResponse.content, {
-          type: 'assistant_response',
+        await (
+          this.agent.addMemory as (
+            content: string,
+            metadata?: MetadataObject
+          ) => Promise<{ id: number; content: string }>
+        )(llmResponse.content, {
+          role: 'assistant',
+          type: 'task_response',
           taskId: taskId,
-          model: llmResponse.model,
+          model: llmResponse.model || '',
+          source: 'task',
         });
       }
 
