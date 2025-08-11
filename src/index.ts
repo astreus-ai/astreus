@@ -86,5 +86,16 @@ export type { KnowledgeConfig } from './knowledge';
 export { parseScheduleString } from './scheduler';
 export type { Schedule, ScheduledItem, SchedulerConfig, ScheduleOptions } from './scheduler/types';
 
+// Context exports
+export { ContextManager, ContextCompressor, Context } from './context';
+export type {
+  ContextMessage,
+  ContextWindow,
+  ContextAnalysis,
+  CompressionResult,
+  ContextCompressorOptions,
+  ContextSummary,
+} from './context/types';
+
 // Default export
 export { default } from './agent';

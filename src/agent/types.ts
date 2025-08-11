@@ -14,6 +14,13 @@ import {
 import { MCPServerDefinition, MCPValue, MCPTool } from '../mcp/types';
 import { AnalysisOptions } from '../vision/index';
 import { MetadataObject } from '../types';
+import {
+  ContextMessage,
+  ContextWindow,
+  ContextAnalysis,
+  ContextSummary,
+  CompressionResult,
+} from '../context/types';
 
 // Forward declaration for sub-agents - using IAgent interface
 
@@ -116,6 +123,21 @@ export interface IVisionMethods {
 }
 
 /**
+ * Context module methods - bound when context management is enabled
+ */
+export interface IContextMethods {
+  getContextMessages(): ContextMessage[];
+  getContextWindow(): ContextWindow;
+  analyzeContext(): ContextAnalysis;
+  compressContext(): Promise<CompressionResult>;
+  clearContext(): void;
+  exportContext(): string;
+  importContext(data: string): void;
+  generateContextSummary(): Promise<ContextSummary>;
+  updateContextModel(model: string): void;
+}
+
+/**
  * SubAgent module methods - bound when SubAgent module is available
  */
 export interface ISubAgentMethods {
@@ -150,6 +172,8 @@ export interface IAgent {
   hasMemory(): boolean;
   hasKnowledge(): boolean;
   hasVision(): boolean;
+  // Context methods (available on all agents)
+  getContext(): ContextMessage[];
 }
 
 /**
@@ -177,7 +201,7 @@ export interface AgentConfigInput {
   knowledge?: boolean;
   vision?: boolean;
   useTools?: boolean;
-  contextCompression?: boolean;
+  autoContextCompression?: boolean;
   debug?: boolean;
   subAgents?: IAgent[];
 }
@@ -191,7 +215,7 @@ export interface AgentConfig extends AgentConfigInput {
   knowledge: boolean;
   vision: boolean;
   useTools: boolean;
-  contextCompression: boolean;
+  autoContextCompression: boolean;
   debug: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -272,9 +296,13 @@ export interface AskOptions {
 export interface IAgentWithModules
   extends IAgent,
     ITaskMethods,
+    IContextMethods, // Context is now always available, not Partial
     Partial<IMemoryMethods>,
     Partial<IKnowledgeMethods>,
     Partial<IPluginMethods>,
     Partial<IMCPMethods>,
     Partial<IVisionMethods>,
-    Partial<ISubAgentMethods> {}
+    Partial<ISubAgentMethods> {
+  updateModel(model: string): void;
+  getContext(): ContextMessage[];
+}

@@ -18,6 +18,9 @@ export const SENSITIVE_FIELDS: Record<string, string[]> = {
   // Knowledge system chunk fields
   knowledge_chunks: ['content', 'metadata'],
 
+  // Context system fields
+  contexts: ['contextData', 'summary'],
+
   // Scheduler system fields
   scheduled_items: ['metadata'],
 };
@@ -59,5 +62,77 @@ export function validateSensitiveFieldsConfig(): void {
     if (uniqueFields.size !== fields.length) {
       throw new Error(`Duplicate sensitive fields found for table '${table}'`);
     }
+
+    // Validate field names
+    for (const field of fields) {
+      if (typeof field !== 'string' || field.length === 0) {
+        throw new Error(
+          `Invalid field name '${field}' in table '${table}' - must be non-empty string`
+        );
+      }
+
+      // Check for reserved or problematic field names
+      const reservedFields = ['id', 'created_at', 'updated_at'];
+      if (reservedFields.includes(field.toLowerCase())) {
+        throw new Error(
+          `Field '${field}' in table '${table}' is reserved and should not be encrypted`
+        );
+      }
+    }
   }
+}
+
+/**
+ * Validate encryption configuration for consistency
+ */
+export function validateEncryptionConsistency(): {
+  isValid: boolean;
+  errors: string[];
+  warnings: string[];
+} {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  try {
+    validateSensitiveFieldsConfig();
+  } catch (error) {
+    errors.push(
+      `Sensitive fields validation failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  // Check for common sensitive field patterns
+  const commonSensitiveFields = ['password', 'secret', 'key', 'token', 'credential'];
+
+  for (const [, fields] of Object.entries(SENSITIVE_FIELDS)) {
+    for (const commonField of commonSensitiveFields) {
+      if (fields.some((field) => field.toLowerCase().includes(commonField))) {
+        // Good - sensitive field patterns are included
+        continue;
+      }
+    }
+  }
+
+  // Check for tables that might need encryption but aren't configured
+  const knownTables = Object.keys(SENSITIVE_FIELDS);
+  const expectedTables = [
+    'agents',
+    'memories',
+    'tasks',
+    'contexts',
+    'knowledge_documents',
+    'knowledge_chunks',
+  ];
+
+  for (const expectedTable of expectedTables) {
+    if (!knownTables.includes(expectedTable)) {
+      warnings.push(`Table '${expectedTable}' might need encryption configuration`);
+    }
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings,
+  };
 }

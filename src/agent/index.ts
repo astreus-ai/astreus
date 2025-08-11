@@ -30,6 +30,14 @@ import { MCP } from '../mcp';
 import { Knowledge } from '../knowledge';
 import { Vision } from '../vision';
 import { SubAgent } from '../sub-agent';
+import { ContextManager } from '../context';
+import {
+  ContextMessage,
+  ContextWindow,
+  ContextAnalysis,
+  ContextSummary,
+  CompressionResult,
+} from '../context/types';
 import { getDatabase } from '../database';
 import { getProviderForModel } from '../llm/models';
 import { getLLM } from '../llm';
@@ -44,6 +52,7 @@ import * as fs from 'fs/promises';
 export abstract class BaseAgent implements IAgent {
   public data: AgentConfig;
   public logger: Logger;
+  protected sessionMessages: ContextMessage[] = []; // Session-only messages when memory is disabled
 
   constructor(data: AgentConfig) {
     this.data = data;
@@ -68,6 +77,11 @@ export abstract class BaseAgent implements IAgent {
    * Abstract method that must be implemented by concrete agent classes
    */
   abstract ask(prompt: string, options?: AskOptions): Promise<string>;
+
+  /**
+   * Abstract context methods that must be implemented by concrete agent classes
+   */
+  abstract getContext(): ContextMessage[];
 
   // Getters for IAgent interface
   get id(): number {
@@ -208,6 +222,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     knowledge?: Knowledge;
     vision?: Vision;
     subAgent?: SubAgent;
+    context?: ContextManager;
   };
 
   constructor(data: AgentConfig) {
@@ -237,6 +252,13 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
     // Always initialize SubAgent module for potential sub-agent usage
     this.modules.subAgent = new SubAgent(this.logger);
+
+    // Always initialize context manager (core component)
+    this.modules.context = new ContextManager({
+      maxContextLength: data.maxTokens || 8000,
+      autoCompress: data.autoContextCompression || false,
+      model: this.getModel(), // Use agent's effective model
+    });
 
     // Module methods are now directly implemented in the class
   }
@@ -277,8 +299,43 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   // ===== MEMORY MODULE METHODS (when memory enabled) =====
 
   async addMemory(content: string, metadata?: MetadataObject): Promise<MemoryType> {
-    if (!this.modules.memory) throw new Error('Memory module not enabled');
-    return this.modules.memory.addMemory(content, metadata);
+    if (this.modules.memory) {
+      // Memory enabled: Save to database
+      const memory = await this.modules.memory.addMemory(content, metadata);
+
+      // Also add to context manager (for non-memory-fed scenarios)
+      if (this.modules.context) {
+        const contextMessage: ContextMessage = {
+          role: (metadata?.role as 'user' | 'assistant') || 'user',
+          content,
+          timestamp: new Date(),
+          metadata,
+        };
+        this.modules.context.addMessage(contextMessage);
+      }
+
+      return memory;
+    } else {
+      // Memory disabled: Add to session-only messages
+      const contextMessage: ContextMessage = {
+        role: (metadata?.role as 'user' | 'assistant') || 'user',
+        content,
+        timestamp: new Date(),
+        metadata,
+      };
+
+      this.sessionMessages.push(contextMessage);
+
+      // Return mock memory object
+      return {
+        id: Date.now(), // Temp ID
+        agentId: this.id,
+        content,
+        metadata: metadata || {},
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+    }
   }
 
   async getMemory(id: number): Promise<MemoryType | null> {
@@ -518,6 +575,87 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     return results;
   }
 
+  // ===== CONTEXT MODULE METHODS (always available) =====
+
+  getContextMessages(): ContextMessage[] {
+    return this.modules.context!.getMessages();
+  }
+
+  getContextWindow(): ContextWindow {
+    return this.modules.context!.getContextWindow();
+  }
+
+  analyzeContext(): ContextAnalysis {
+    return this.modules.context!.analyzeContext();
+  }
+
+  async compressContext(): Promise<CompressionResult> {
+    return this.modules.context!.compressContext();
+  }
+
+  clearContext(): void {
+    this.modules.context!.clearContext();
+  }
+
+  exportContext(): string {
+    return this.modules.context!.exportContext();
+  }
+
+  importContext(data: string): void {
+    this.modules.context!.importContext(data);
+  }
+
+  async generateContextSummary(): Promise<ContextSummary> {
+    return this.modules.context!.generateSummary();
+  }
+
+  updateContextModel(model: string): void {
+    this.modules.context!.updateModel(model);
+  }
+
+  /**
+   * Get conversation context messages based on memory configuration
+   * This is the central method that all modules use to get conversation history
+   */
+  getContext(): ContextMessage[] {
+    if (this.hasMemory() && this.modules.memory) {
+      // Memory enabled: Get from context manager (fed by memory)
+      return this.modules.context!.getMessages();
+    } else {
+      // Memory disabled: Return session-only messages
+      return [...this.sessionMessages];
+    }
+  }
+
+  /**
+   * Save current context to memory
+   */
+  private async saveContextToMemory(): Promise<void> {
+    if (!this.hasMemory() || !this.modules.memory) {
+      return;
+    }
+
+    try {
+      await this.modules.context!.saveToMemory(this.modules.memory);
+    } catch (error) {
+      this.logger.warn('Failed to save context to memory', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Update agent's model and propagate to context manager
+   */
+  updateModel(model: string): void {
+    this.data.model = model;
+
+    // Update context manager's model
+    this.modules.context!.updateModel(model);
+
+    this.logger.info(`Agent model updated to: ${model}`);
+  }
+
   /**
    * Initialize all modules
    */
@@ -542,7 +680,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       knowledge: !!this.data.knowledge,
       vision: !!this.data.vision,
       useTools: this.data.useTools !== false,
-      contextCompression: !!this.data.contextCompression,
+      autoContextCompression: !!this.data.autoContextCompression,
       debug: !!this.data.debug,
     });
 
@@ -574,7 +712,16 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       await this.modules.subAgent.initialize();
     }
 
-    // Methods are now directly implemented in the class
+    // Initialize context storage for this agent
+    if (this.data.id) {
+      try {
+        await this.modules.context!.initializeForAgent(this.data.id);
+      } catch (error) {
+        this.logger.warn('Failed to initialize context storage', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     // User-facing success message with capabilities summary
     const capabilities = [];
@@ -582,7 +729,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     if (this.data.knowledge) capabilities.push('Knowledge');
     if (this.data.vision) capabilities.push('Vision');
     if (this.data.useTools !== false) capabilities.push('Tools');
-    if (this.data.contextCompression) capabilities.push('Context Compression');
+    if (this.data.autoContextCompression) capabilities.push('Auto Context Compression');
 
     this.logger.info(
       `Agent ready: ${this.data.name} (${model} via ${provider || 'unknown'}) - ${capabilities.join(', ')}`
@@ -609,7 +756,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       knowledge: false,
       vision: false,
       useTools: true,
-      contextCompression: false,
+      autoContextCompression: false,
       debug: false,
       ...config,
     };
@@ -807,37 +954,13 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       enhancedPrompt = `${prompt}\n\nAttached files:\n${attachmentDescriptions.join('\n\n')}`;
     }
 
-    // Add memory context if available
-    if (this.hasMemory() && this.modules?.memory) {
-      try {
-        const memoryModule = this.modules.memory as Memory;
-        if (memoryModule && typeof memoryModule.listMemories === 'function') {
-          const recentMemories = await memoryModule.listMemories({
-            limit: 10,
-            orderBy: 'createdAt',
-            order: 'asc',
-          });
-
-          // Add memories as conversation history
-          if (Array.isArray(recentMemories)) {
-            for (const mem of recentMemories) {
-              if (mem && typeof mem === 'object') {
-                const memTyped = mem as MemoryType;
-                if (memTyped.content && memTyped.metadata?.type === 'user_message') {
-                  messages.push({ role: 'user', content: memTyped.content });
-                } else if (memTyped.content && memTyped.metadata?.type === 'assistant_response') {
-                  messages.push({ role: 'assistant', content: memTyped.content });
-                }
-              }
-            }
-          }
-        }
-      } catch (error) {
-        this.logger.warn(
-          'Failed to load memories:',
-          error instanceof Error ? error.message : String(error)
-        );
-      }
+    // Add conversation context (handles memory integration internally)
+    const contextMessages = this.getContext();
+    for (const contextMsg of contextMessages) {
+      messages.push({
+        role: contextMsg.role,
+        content: contextMsg.content,
+      });
     }
 
     // Add temporary MCP servers if provided
@@ -890,8 +1013,11 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       }
     }
 
-    // Add current prompt
+    // Add current user prompt
     messages.push({ role: 'user', content: enhancedPrompt });
+
+    // Add user message to conversation (memory/context)
+    await this.addMemory(enhancedPrompt, { role: 'user' });
 
     // Check if we should use tools
     const shouldUseTools =
@@ -1114,25 +1240,11 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       }
     }
 
-    // Store in memory if enabled
-    if (this.hasMemory() && this.modules.memory) {
-      try {
-        await (this.modules.memory as Memory).addMemory(prompt, {
-          type: 'user_message',
-          attachments: options?.attachments ? options.attachments.length : 0,
-        });
+    // Add response to conversation (memory/context)
+    await this.addMemory(response, { role: 'assistant' });
 
-        await (this.modules.memory as Memory).addMemory(response, {
-          type: 'assistant_response',
-          model: options?.model || this.getModel(),
-        });
-      } catch (error) {
-        this.logger.warn(
-          'Failed to store memory:',
-          error instanceof Error ? error.message : String(error)
-        );
-      }
-    }
+    // Save context to memory if enabled
+    await this.saveContextToMemory();
 
     // Clean up temporary MCP servers
     if (options?.mcpServers && this.modules.mcp) {
