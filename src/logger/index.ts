@@ -63,8 +63,8 @@ export class Logger implements ILogger {
     data?: LogData,
     error?: Error,
     agentName?: string
-  ): Record<string, unknown> {
-    const logObject: Record<string, unknown> = {
+  ): Record<string, LogData> {
+    const logObject: Record<string, LogData> = {
       msg: message,
       module,
       framework: 'Astreus',
@@ -78,7 +78,7 @@ export class Logger implements ILogger {
     if (error) {
       logObject.err = {
         message: error.message,
-        stack: error.stack,
+        stack: error.stack || null,
         name: error.name,
       };
     }

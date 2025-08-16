@@ -51,7 +51,9 @@ export class Memory implements IAgentModule {
   /**
    * Encrypt sensitive memory fields before storing
    */
-  private async encryptMemoryData(data: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async encryptMemoryData(
+    data: Record<string, string | number | boolean | null>
+  ): Promise<Record<string, string | number | boolean | null>> {
     if (!this.encryption.isEnabled()) {
       return data;
     }
@@ -78,7 +80,9 @@ export class Memory implements IAgentModule {
   /**
    * Decrypt sensitive memory fields after retrieving
    */
-  private async decryptMemoryData(data: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async decryptMemoryData(
+    data: Record<string, string | number | boolean | null>
+  ): Promise<Record<string, string | number | boolean | null>> {
     if (!this.encryption.isEnabled() || !data) {
       return data;
     }
@@ -93,10 +97,11 @@ export class Memory implements IAgentModule {
     }
 
     if (decrypted.metadata !== undefined && decrypted.metadata !== null) {
-      decrypted.metadata = await this.encryption.decryptJSON(
+      const decryptedMetadata = await this.encryption.decryptJSON(
         String(decrypted.metadata),
         'memories.metadata'
       );
+      decrypted.metadata = decryptedMetadata ? JSON.stringify(decryptedMetadata) : null;
     }
 
     return decrypted;
@@ -174,7 +179,9 @@ export class Memory implements IAgentModule {
     const [memory] = await this.knex!(tableName).insert(encryptedData).returning('*');
 
     // Decrypt for response
-    const decryptedMemory = await this.decryptMemoryData(memory as Record<string, unknown>);
+    const decryptedMemory = await this.decryptMemoryData(
+      memory as Record<string, string | number | boolean | null>
+    );
     const formattedMemory = this.formatMemory(decryptedMemory as unknown as MemoryDbRow);
 
     this.logger.debug('Memory added successfully', {
@@ -207,7 +214,9 @@ export class Memory implements IAgentModule {
     if (!memory) return null;
 
     // Decrypt sensitive fields
-    const decryptedMemory = await this.decryptMemoryData(memory as Record<string, unknown>);
+    const decryptedMemory = await this.decryptMemoryData(
+      memory as Record<string, string | number | boolean | null>
+    );
     return this.formatMemory(decryptedMemory as unknown as MemoryDbRow);
   }
 
@@ -266,7 +275,7 @@ export class Memory implements IAgentModule {
       const allMemories = await dbQuery;
 
       // Decrypt and search in memory
-      const matchingMemories: Record<string, unknown>[] = [];
+      const matchingMemories: Record<string, string | number | boolean | null>[] = [];
       for (const memory of allMemories) {
         try {
           const decryptedMemory = await this.decryptMemoryData(memory);
@@ -367,7 +376,9 @@ export class Memory implements IAgentModule {
       const decryptedMemories = await Promise.all(
         memories.map(async (memory) => {
           try {
-            const decrypted = await this.decryptMemoryData(memory as Record<string, unknown>);
+            const decrypted = await this.decryptMemoryData(
+              memory as Record<string, string | number | boolean | null>
+            );
             return this.formatMemory(decrypted as unknown as MemoryDbRow);
           } catch {
             // If decryption fails, return original memory (might be unencrypted legacy data)
@@ -421,7 +432,9 @@ export class Memory implements IAgentModule {
     if (!memory) return null;
 
     // Decrypt for response
-    const decryptedMemory = await this.decryptMemoryData(memory as Record<string, unknown>);
+    const decryptedMemory = await this.decryptMemoryData(
+      memory as Record<string, string | number | boolean | null>
+    );
     return this.formatMemory(decryptedMemory as unknown as MemoryDbRow);
   }
 
@@ -519,7 +532,9 @@ export class Memory implements IAgentModule {
     const decryptedMemories = await Promise.all(
       memoriesWithSimilarity.map(async (memory) => {
         try {
-          const decrypted = await this.decryptMemoryData(memory as Record<string, unknown>);
+          const decrypted = await this.decryptMemoryData(
+            memory as Record<string, string | number | boolean | null>
+          );
           return this.formatMemory(decrypted as unknown as MemoryDbRow);
         } catch {
           this.logger.debug('Failed to decrypt memory during similarity search', {
@@ -610,7 +625,9 @@ export class Memory implements IAgentModule {
     // Decrypt content for embedding generation
     let content: string;
     try {
-      const decryptedMemory = await this.decryptMemoryData(memory as Record<string, unknown>);
+      const decryptedMemory = await this.decryptMemoryData(
+        memory as Record<string, string | number | boolean | null>
+      );
       content = String(decryptedMemory.content);
     } catch (error) {
       this.logger.debug('Failed to decrypt memory content', {

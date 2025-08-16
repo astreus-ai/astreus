@@ -58,11 +58,7 @@ export interface ContextManager {
   updateModel(model: string): void;
   loadFromMemory(
     memoryModule: {
-      listMemories: (options: {
-        limit: number;
-        orderBy: string;
-        orderDirection: string;
-      }) => Promise<
+      listMemories: (options: { limit: number; orderBy: string; order: string }) => Promise<
         Array<{
           id: number;
           content: string;

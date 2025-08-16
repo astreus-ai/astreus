@@ -4,13 +4,7 @@
 import { Logger } from '../logger/types';
 import { Task, TaskRequest, TaskSearchOptions, TaskResponse } from '../task/types';
 import { Memory, MemorySearchOptions } from '../memory/types';
-import {
-  Plugin,
-  PluginConfig,
-  ToolDefinition,
-  ToolCall as PluginToolCall,
-  ToolCallResult,
-} from '../plugin/types';
+import { Plugin, PluginConfig, ToolDefinition, ToolCall, ToolCallResult } from '../plugin/types';
 import { MCPServerDefinition, MCPValue, MCPTool } from '../mcp/types';
 import { AnalysisOptions } from '../vision/index';
 import { MetadataObject } from '../types';
@@ -94,9 +88,9 @@ export interface IKnowledgeMethods {
 export interface IPluginMethods {
   registerPlugin(plugin: Plugin, config?: PluginConfig): Promise<void>;
   unregisterPlugin(name: string): Promise<void>;
-  getPlugins(): Plugin[];
+  listPlugins(): Plugin[];
   getTools(): ToolDefinition[];
-  executeTool(toolCall: PluginToolCall): Promise<ToolCallResult>;
+  executeTool(toolCall: ToolCall): Promise<ToolCallResult>;
 }
 
 /**
@@ -144,13 +138,13 @@ export interface ISubAgentMethods {
   executeWithSubAgents(
     prompt: string,
     subAgents: IAgent[],
-    options?: Record<string, unknown>,
+    options?: Record<string, string | number | boolean | object | null>,
     mainModel?: string
   ): Promise<string>;
   delegateTask(
     taskPrompt: string,
     targetAgent: IAgent,
-    options?: Record<string, unknown>
+    options?: Record<string, string | number | boolean | object | null>
   ): Promise<string>;
   coordinateAgents(
     tasks: Array<{ agent: IAgent; prompt: string }>,

@@ -431,13 +431,21 @@ export class Database {
       debug: data.debug || false,
     };
 
+    // Remove undefined values before encryption
+    const cleanedData = Object.fromEntries(
+      Object.entries(insertData).filter(([, value]) => value !== undefined)
+    ) as Record<string, string | number | boolean | null>;
+
     // Encrypt sensitive fields
-    const encryptedData = await encryptSensitiveFields(insertData, 'agents');
+    const encryptedData = await encryptSensitiveFields(cleanedData, 'agents');
 
     const [agent] = await this.knex('agents').insert(encryptedData).returning('*');
 
     // Decrypt for response
-    const decryptedAgent = await decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+    const decryptedAgent = await decryptSensitiveFields(
+      agent as Record<string, string | number | boolean | null>,
+      'agents'
+    );
     const formattedAgent = this.formatAgent(decryptedAgent as unknown as AgentDbRow);
 
     // User-facing success message
@@ -465,7 +473,10 @@ export class Database {
     if (!agent) return null;
 
     // Decrypt sensitive fields
-    const decryptedAgent = await decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+    const decryptedAgent = await decryptSensitiveFields(
+      agent as Record<string, string | number | boolean | null>,
+      'agents'
+    );
     return this.formatAgent(decryptedAgent as unknown as AgentDbRow);
   }
 
@@ -483,7 +494,10 @@ export class Database {
     if (!agent) return null;
 
     // Decrypt sensitive fields
-    const decryptedAgent = await decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+    const decryptedAgent = await decryptSensitiveFields(
+      agent as Record<string, string | number | boolean | null>,
+      'agents'
+    );
     return this.formatAgent(decryptedAgent as unknown as AgentDbRow);
   }
 
@@ -500,7 +514,10 @@ export class Database {
     // Decrypt sensitive fields for each agent
     const decryptedAgents = await Promise.all(
       agents.map(async (agent) => {
-        const decrypted = await decryptSensitiveFields(agent as Record<string, unknown>, 'agents');
+        const decrypted = await decryptSensitiveFields(
+          agent as Record<string, string | number | boolean | null>,
+          'agents'
+        );
         return this.formatAgent(decrypted as unknown as AgentDbRow);
       })
     );
@@ -608,7 +625,7 @@ export class Database {
     if (agent) {
       // Decrypt for response
       const decryptedAgent = await decryptSensitiveFields(
-        agent as Record<string, unknown>,
+        agent as Record<string, string | number | boolean | null>,
         'agents'
       );
       const formattedAgent = this.formatAgent(decryptedAgent as unknown as AgentDbRow);

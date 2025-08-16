@@ -12,10 +12,10 @@ import { getDatabase } from '../database';
 import {
   getLLM,
   LLMResponse,
-  LLMStreamChunk,
   LLMMessage,
   LLMMessageContent,
   LLMMessageContentPart,
+  Tool,
 } from '../llm';
 import { Memory } from '../memory';
 import { Memory as MemoryType } from '../memory/types';
@@ -26,6 +26,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { DEFAULT_AGENT_CONFIG } from '../agent/defaults';
 import { DEFAULT_TASK_CONFIG } from './defaults';
+import { convertToolParametersToJsonSchema } from '../plugin';
 
 // Database row interfaces
 interface TaskDbRow {
@@ -70,7 +71,9 @@ export class Task implements IAgentModule {
   /**
    * Encrypt sensitive task fields before storing
    */
-  private async encryptTaskData(data: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async encryptTaskData(
+    data: Record<string, string | number | boolean | null>
+  ): Promise<Record<string, string | number | boolean | null>> {
     if (!this.encryption.isEnabled()) {
       return data;
     }
@@ -89,7 +92,12 @@ export class Task implements IAgentModule {
     }
 
     if (encrypted.metadata !== undefined && encrypted.metadata !== null) {
-      encrypted.metadata = await this.encryption.encryptJSON(encrypted.metadata, 'tasks.metadata');
+      // Convert metadata to JSON string first if needed
+      const metadataToEncrypt =
+        typeof encrypted.metadata === 'string'
+          ? encrypted.metadata
+          : JSON.stringify(encrypted.metadata);
+      encrypted.metadata = await this.encryption.encryptJSON(metadataToEncrypt, 'tasks.metadata');
     }
 
     return encrypted;
@@ -98,7 +106,9 @@ export class Task implements IAgentModule {
   /**
    * Decrypt sensitive task fields after retrieving
    */
-  private async decryptTaskData(data: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async decryptTaskData(
+    data: Record<string, string | number | boolean | null>
+  ): Promise<Record<string, string | number | boolean | null>> {
     if (!this.encryption.isEnabled() || !data) {
       return data;
     }
@@ -117,10 +127,11 @@ export class Task implements IAgentModule {
     }
 
     if (decrypted.metadata !== undefined && decrypted.metadata !== null) {
-      decrypted.metadata = await this.encryption.decryptJSON(
+      const decryptedMetadata = await this.encryption.decryptJSON(
         String(decrypted.metadata),
         'tasks.metadata'
       );
+      decrypted.metadata = decryptedMetadata ? JSON.stringify(decryptedMetadata) : null;
     }
 
     return decrypted;
@@ -224,7 +235,9 @@ export class Task implements IAgentModule {
     const [task] = await this.knex!(tableName).insert(encryptedData).returning('*');
 
     // Decrypt for response
-    const decryptedTask = await this.decryptTaskData(task as Record<string, unknown>);
+    const decryptedTask = await this.decryptTaskData(
+      task as Record<string, string | number | boolean | null>
+    );
     const formattedTask = this.formatTask(decryptedTask as unknown as TaskDbRow);
 
     // User-facing success message
@@ -241,7 +254,7 @@ export class Task implements IAgentModule {
 
   async executeTask(
     taskId: number,
-    options?: { model?: string; stream?: boolean }
+    options?: { model?: string; stream?: boolean; onChunk?: (chunk: string) => void }
   ): Promise<TaskResponse> {
     const startTime = Date.now();
 
@@ -374,12 +387,28 @@ export class Task implements IAgentModule {
           content: response,
           model: options?.model || this.agent.config.model || DEFAULT_AGENT_CONFIG.model,
         };
-      } else if (
-        shouldUseTools &&
-        this.agent &&
-        'executeTaskWithTools' in this.agent &&
-        typeof this.agent.executeTaskWithTools === 'function'
-      ) {
+      } else {
+        // Direct LLM execution with optional tool support
+        const llm = getLLM(this.logger);
+
+        // Prepare messages for LLM
+        const llmMessages: LLMMessage[] = [];
+
+        // Add system prompt
+        const systemPrompt = this.agent.config.systemPrompt;
+        if (systemPrompt) {
+          llmMessages.push({ role: 'system', content: systemPrompt });
+        }
+
+        // Add conversation context from agent
+        const contextMessages = this.agent.getContext();
+        for (const contextMsg of contextMessages) {
+          llmMessages.push({
+            role: contextMsg.role,
+            content: contextMsg.content,
+          });
+        }
+
         // Build the prompt with context and memory if needed
         let contextualPrompt = task.prompt;
 
@@ -408,37 +437,50 @@ export class Task implements IAgentModule {
           }
         }
 
-        // Execute task with tools
-        const result = await this.agent.executeTaskWithTools(contextualPrompt, {
-          enableTools: true,
-          stream: options?.stream || false,
-        });
+        // Prepare tools if enabled
+        const tools: Tool[] = [];
 
-        llmResponse = {
-          content: result.response,
-          model:
-            result.model || options?.model || this.agent.config.model || DEFAULT_AGENT_CONFIG.model,
-          usage: result.usage,
-          toolCalls: result.toolCalls,
-        };
-      } else {
-        // Fallback to standard LLM execution without tools
-        const llm = getLLM(this.logger);
+        if (shouldUseTools && this.agent.canUseTools()) {
+          // Add MCP tools
+          if (
+            this.agent &&
+            'getMCPTools' in this.agent &&
+            typeof this.agent.getMCPTools === 'function'
+          ) {
+            const mcpTools = this.agent.getMCPTools();
+            for (const mcpTool of mcpTools) {
+              tools.push({
+                type: 'function',
+                function: {
+                  name: `mcp_${mcpTool.name}`,
+                  description: mcpTool.description,
+                  parameters: mcpTool.inputSchema || {
+                    type: 'object',
+                    properties: {},
+                  },
+                },
+              });
+            }
+          }
 
-        // Prepare messages for LLM
-        const llmMessages: LLMMessage[] = [];
-
-        // Add conversation context from agent
-        const contextMessages = this.agent.getContext();
-        for (const contextMsg of contextMessages) {
-          llmMessages.push({
-            role: contextMsg.role,
-            content: contextMsg.content,
-          });
+          // Add plugin tools
+          if (this.agent && 'getTools' in this.agent && typeof this.agent.getTools === 'function') {
+            const pluginTools = this.agent.getTools();
+            for (const pluginTool of pluginTools) {
+              tools.push({
+                type: 'function',
+                function: {
+                  name: `plugin_${pluginTool.name}`,
+                  description: pluginTool.description,
+                  parameters: convertToolParametersToJsonSchema(pluginTool.parameters),
+                },
+              });
+            }
+          }
         }
 
         // Process attachments if present
-        let userMessageContent: LLMMessageContent = task.prompt;
+        let userMessageContent: LLMMessageContent = contextualPrompt;
 
         if (task.metadata?.attachments) {
           try {
@@ -530,30 +572,257 @@ export class Task implements IAgentModule {
           messages: llmMessages,
           temperature: this.agent.config.temperature || DEFAULT_AGENT_CONFIG.temperature,
           maxTokens: this.agent.config.maxTokens || DEFAULT_AGENT_CONFIG.maxTokens,
-          systemPrompt: this.agent.config.systemPrompt,
+          tools: tools.length > 0 ? tools : undefined,
         };
 
         if (options?.stream) {
-          // Stream response
+          // Handle streaming with tool support
           let fullContent = '';
-          const chunks: LLMStreamChunk[] = [];
+          let streamToolCalls: Array<{
+            id: string;
+            type: 'function';
+            function: {
+              name: string;
+              arguments: Record<string, string | number | boolean | null>;
+            };
+          }> = [];
 
           for await (const chunk of llm.generateStreamResponse(llmOptions)) {
             fullContent += chunk.content;
-            chunks.push(chunk);
+            if (chunk.content) {
+              // Use onChunk callback if available, otherwise fallback to process.stdout
+              if (options?.onChunk) {
+                options.onChunk(chunk.content);
+              } else {
+                process.stdout.write(chunk.content);
+              }
+            }
+            if (chunk.toolCalls) {
+              streamToolCalls = chunk.toolCalls;
+            }
+          }
+
+          // Handle tool calls if present during streaming
+          if (streamToolCalls.length > 0) {
+            // Add assistant message with tool calls
+            llmMessages.push({
+              role: 'assistant',
+              content: fullContent || '',
+              tool_calls: streamToolCalls,
+            });
+
+            // Execute each tool call
+            for (const toolCall of streamToolCalls) {
+              try {
+                let toolResult: string;
+
+                if (toolCall.function.name.startsWith('mcp_')) {
+                  // Handle MCP tool
+                  const mcpToolName = toolCall.function.name.substring(4);
+                  const mcpArgs =
+                    typeof toolCall.function.arguments === 'string'
+                      ? JSON.parse(toolCall.function.arguments)
+                      : toolCall.function.arguments;
+
+                  if (
+                    this.agent &&
+                    'callMCPTool' in this.agent &&
+                    typeof this.agent.callMCPTool === 'function'
+                  ) {
+                    const mcpResult = await this.agent.callMCPTool(mcpToolName, mcpArgs);
+                    toolResult = mcpResult.content
+                      .map((c: { text?: string }) => c.text || '')
+                      .join('\\n');
+                  } else {
+                    toolResult = 'Error: MCP tools not available';
+                  }
+                } else if (toolCall.function.name.startsWith('plugin_')) {
+                  // Handle plugin tool
+                  const pluginToolName = toolCall.function.name.substring(7);
+                  const pluginArgs =
+                    typeof toolCall.function.arguments === 'string'
+                      ? JSON.parse(toolCall.function.arguments)
+                      : toolCall.function.arguments;
+
+                  if (
+                    this.agent &&
+                    'executeTool' in this.agent &&
+                    typeof this.agent.executeTool === 'function'
+                  ) {
+                    const pluginCallResult = await this.agent.executeTool({
+                      id: toolCall.id || `${Date.now()}-${Math.random()}`,
+                      name: pluginToolName,
+                      parameters: pluginArgs,
+                    });
+
+                    toolResult = pluginCallResult.result.success
+                      ? typeof pluginCallResult.result.data === 'string'
+                        ? pluginCallResult.result.data
+                        : JSON.stringify(pluginCallResult.result.data)
+                      : `Error: ${pluginCallResult.result.error || 'Unknown error'}`;
+                  } else {
+                    toolResult = 'Error: Plugin tools not available';
+                  }
+                } else {
+                  toolResult = `Unknown tool type: ${toolCall.function.name}`;
+                }
+
+                // Add tool result to messages
+                llmMessages.push({
+                  role: 'tool',
+                  content: toolResult,
+                  tool_call_id: toolCall.id,
+                });
+              } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                llmMessages.push({
+                  role: 'tool',
+                  content: `Error: ${errorMessage}`,
+                  tool_call_id: toolCall.id,
+                });
+              }
+            }
+
+            // Get final response from LLM with tool results (streaming)
+            const finalLlmOptions = {
+              ...llmOptions,
+              messages: llmMessages,
+              tools: undefined, // Don't include tools in follow-up
+            };
+
+            let finalStreamContent = '';
+            for await (const chunk of llm.generateStreamResponse(finalLlmOptions)) {
+              finalStreamContent += chunk.content;
+              if (chunk.content) {
+                // Use onChunk callback if available, otherwise fallback to process.stdout
+                if (options?.onChunk) {
+                  options.onChunk(chunk.content);
+                } else {
+                  process.stdout.write(chunk.content);
+                }
+              }
+            }
+            fullContent = finalStreamContent;
           }
 
           llmResponse = {
             content: fullContent,
-            model:
-              chunks[0]?.model ||
-              options?.model ||
-              this.agent.config.model ||
-              DEFAULT_AGENT_CONFIG.model,
+            model: modelToUse,
+            toolCalls: streamToolCalls,
           };
         } else {
-          // Generate response using LLM
-          llmResponse = await llm.generateResponse(llmOptions);
+          // Non-streaming with tool handling
+          const initialResponse = await llm.generateResponse(llmOptions);
+          let finalResponse = initialResponse.content;
+          let toolCallsExecuted: Array<{
+            id: string;
+            type: 'function';
+            function: {
+              name: string;
+              arguments: Record<string, string | number | boolean | null>;
+            };
+          }> = [];
+
+          // Handle tool calls if present
+          if (initialResponse.toolCalls && initialResponse.toolCalls.length > 0) {
+            toolCallsExecuted = initialResponse.toolCalls;
+
+            // Add assistant message with tool calls
+            llmMessages.push({
+              role: 'assistant',
+              content: initialResponse.content || '',
+              tool_calls: initialResponse.toolCalls,
+            });
+
+            // Execute each tool call
+            for (const toolCall of initialResponse.toolCalls) {
+              try {
+                let toolResult: string;
+
+                if (toolCall.function.name.startsWith('mcp_')) {
+                  // Handle MCP tool
+                  const mcpToolName = toolCall.function.name.substring(4);
+                  const mcpArgs =
+                    typeof toolCall.function.arguments === 'string'
+                      ? JSON.parse(toolCall.function.arguments)
+                      : toolCall.function.arguments;
+
+                  if (
+                    this.agent &&
+                    'callMCPTool' in this.agent &&
+                    typeof this.agent.callMCPTool === 'function'
+                  ) {
+                    const mcpResult = await this.agent.callMCPTool(mcpToolName, mcpArgs);
+                    toolResult = mcpResult.content
+                      .map((c: { text?: string }) => c.text || '')
+                      .join('\\n');
+                  } else {
+                    toolResult = 'Error: MCP tools not available';
+                  }
+                } else if (toolCall.function.name.startsWith('plugin_')) {
+                  // Handle plugin tool
+                  const pluginToolName = toolCall.function.name.substring(7);
+                  const pluginArgs =
+                    typeof toolCall.function.arguments === 'string'
+                      ? JSON.parse(toolCall.function.arguments)
+                      : toolCall.function.arguments;
+
+                  if (
+                    this.agent &&
+                    'executeTool' in this.agent &&
+                    typeof this.agent.executeTool === 'function'
+                  ) {
+                    const pluginCallResult = await this.agent.executeTool({
+                      id: toolCall.id || `${Date.now()}-${Math.random()}`,
+                      name: pluginToolName,
+                      parameters: pluginArgs,
+                    });
+
+                    toolResult = pluginCallResult.result.success
+                      ? typeof pluginCallResult.result.data === 'string'
+                        ? pluginCallResult.result.data
+                        : JSON.stringify(pluginCallResult.result.data)
+                      : `Error: ${pluginCallResult.result.error || 'Unknown error'}`;
+                  } else {
+                    toolResult = 'Error: Plugin tools not available';
+                  }
+                } else {
+                  toolResult = `Unknown tool type: ${toolCall.function.name}`;
+                }
+
+                // Add tool result to messages
+                llmMessages.push({
+                  role: 'tool',
+                  content: toolResult,
+                  tool_call_id: toolCall.id,
+                });
+              } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                llmMessages.push({
+                  role: 'tool',
+                  content: `Error: ${errorMessage}`,
+                  tool_call_id: toolCall.id,
+                });
+              }
+            }
+
+            // Get final response from LLM with tool results
+            const finalLlmOptions = {
+              ...llmOptions,
+              messages: llmMessages,
+              tools: undefined, // Don't include tools in follow-up
+            };
+
+            const finalLlmResponse = await llm.generateResponse(finalLlmOptions);
+            finalResponse = finalLlmResponse.content;
+          }
+
+          llmResponse = {
+            content: finalResponse,
+            model: modelToUse,
+            usage: initialResponse.usage,
+            toolCalls: toolCallsExecuted,
+          };
         }
       }
 
@@ -632,7 +901,9 @@ export class Task implements IAgentModule {
     if (!task) return null;
 
     // Decrypt sensitive fields
-    const decryptedTask = await this.decryptTaskData(task as Record<string, unknown>);
+    const decryptedTask = await this.decryptTaskData(
+      task as Record<string, string | number | boolean | null>
+    );
     return this.formatTask(decryptedTask as unknown as TaskDbRow);
   }
 
@@ -679,7 +950,9 @@ export class Task implements IAgentModule {
       const decryptedTasks = await Promise.all(
         tasks.map(async (task) => {
           try {
-            const decrypted = await this.decryptTaskData(task as Record<string, unknown>);
+            const decrypted = await this.decryptTaskData(
+              task as Record<string, string | number | boolean | null>
+            );
             return this.formatTask(decrypted as unknown as TaskDbRow);
           } catch {
             // If decryption fails, return original task (might be unencrypted legacy data)
@@ -725,7 +998,9 @@ export class Task implements IAgentModule {
     if (!task) return null;
 
     // Decrypt for response
-    const decryptedTask = await this.decryptTaskData(task as Record<string, unknown>);
+    const decryptedTask = await this.decryptTaskData(
+      task as Record<string, string | number | boolean | null>
+    );
     return this.formatTask(decryptedTask as unknown as TaskDbRow);
   }
 

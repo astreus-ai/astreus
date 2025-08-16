@@ -99,10 +99,10 @@ export class ContextStorage {
 
     // Decrypt for return using centralized system
     const decryptedResult = await decryptSensitiveFields(
-      result as unknown as Record<string, unknown>,
+      result as Record<string, string | number | boolean | null>,
       'contexts'
     );
-    return this.formatContextData(decryptedResult as unknown as ContextDbRow);
+    return this.formatContextData(decryptedResult as ContextDbRow);
   }
 
   /**
@@ -120,10 +120,10 @@ export class ContextStorage {
 
     // Decrypt sensitive fields using centralized system
     const decryptedRow = await decryptSensitiveFields(
-      contextRow as unknown as Record<string, unknown>,
+      contextRow as Record<string, string | number | boolean | null>,
       'contexts'
     );
-    const formattedData = this.formatContextData(decryptedRow as unknown as ContextDbRow);
+    const formattedData = this.formatContextData(decryptedRow as ContextDbRow);
 
     this.logger.debug('Context loaded from storage', {
       agentId,

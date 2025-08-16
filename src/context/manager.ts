@@ -400,11 +400,7 @@ Return only valid JSON.`;
    */
   async loadFromMemory(
     memoryModule: {
-      listMemories: (options: {
-        limit: number;
-        orderBy: string;
-        orderDirection: string;
-      }) => Promise<
+      listMemories: (options: { limit: number; orderBy: string; order: string }) => Promise<
         Array<{
           id: number;
           content: string;
@@ -416,17 +412,17 @@ Return only valid JSON.`;
     limit: number = 20
   ): Promise<void> {
     try {
-      // Memory'den son conversation messages'larını al
+      // Get the latest conversation messages from Memory
       const recentMemories = await memoryModule.listMemories({
         limit,
         orderBy: 'created_at',
-        orderDirection: 'desc',
+        order: 'desc',
       });
 
-      // Eski context'i temizle
+      // Clear the old context
       this.messages = [];
 
-      // Memory'den mesajları context'e yükle (eski -> yeni sırası)
+      // Load messages from Memory to context (old to new order)
       const sortedMemories = recentMemories.reverse();
       for (const memory of sortedMemories) {
         if (memory.metadata?.type === 'user_message') {
@@ -451,7 +447,7 @@ Return only valid JSON.`;
         memoryLimit: limit,
       });
 
-      // Memory'den yüklendikten sonra compression gerekirse uygula
+      // Apply compression if needed after loading from Memory
       if (this.autoCompress && this.shouldCompress()) {
         await this.compressContext();
       }
@@ -473,7 +469,7 @@ Return only valid JSON.`;
     ) => Promise<{ id: number; content: string }>;
   }): Promise<void> {
     try {
-      // Sadece memory'de olmayan yeni mesajları kaydet
+      // Save only new messages that are not in memory
       const newMessages = this.messages.filter(
         (msg) => !msg.metadata?.source || msg.metadata.source !== 'memory'
       );

@@ -38,9 +38,9 @@ export function getFileSize(filePath: string): number {
  * Encrypts sensitive fields based on centralized configuration
  */
 export async function encryptSensitiveFields(
-  data: Record<string, unknown>,
+  data: Record<string, string | number | boolean | null>,
   tableName: string
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, string | number | boolean | null>> {
   const encryption = getEncryptionService();
 
   if (!encryption.isEnabled() || !data) {
@@ -78,9 +78,9 @@ export async function encryptSensitiveFields(
  * Decrypts sensitive fields based on centralized configuration
  */
 export async function decryptSensitiveFields(
-  data: Record<string, unknown>,
+  data: Record<string, string | number | boolean | null>,
   tableName: string
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, string | number | boolean | null>> {
   const encryption = getEncryptionService();
 
   if (!encryption.isEnabled() || !data) {
