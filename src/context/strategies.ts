@@ -13,13 +13,28 @@ export class SummarizationStrategy implements CompressionStrategy {
   ): Promise<ContextMessage[]> {
     const preserveCount = Math.min(options.preserveLastN || 5, messages.length);
     const messagesToPreserve = messages.slice(-preserveCount);
+
+    // Filter out old summaries from messages to compress (we'll combine them into new summary)
     const messagesToCompress = messages.slice(0, -preserveCount);
+    const oldSummaries = messagesToCompress.filter((msg) => msg.metadata?.type === 'summary');
+    const regularMessages = messagesToCompress.filter((msg) => msg.metadata?.type !== 'summary');
 
     if (messagesToCompress.length === 0) {
       return messages;
     }
 
-    const conversationText = messagesToCompress
+    // Combine old summaries and regular messages for new summary
+    let conversationText = '';
+
+    // Include old summaries content
+    if (oldSummaries.length > 0) {
+      conversationText += 'Previous Summaries:\n';
+      conversationText += oldSummaries.map((msg) => msg.content).join('\n\n');
+      conversationText += '\n\nNew Messages:\n';
+    }
+
+    // Add regular messages
+    conversationText += regularMessages
       .map((msg) => `${msg.role.toUpperCase()}: ${msg.content}`)
       .join('\n\n');
 
@@ -38,16 +53,25 @@ Create a comprehensive summary that maintains essential context, key decisions, 
       maxTokens: 500,
     });
 
+    const totalOriginalCount = messagesToCompress.reduce((count, msg) => {
+      const msgCount = msg.metadata?.originalMessageCount;
+      return count + (typeof msgCount === 'number' ? msgCount : 1);
+    }, 0);
+
     const summaryMessage: ContextMessage = {
       role: 'system',
-      content: `[Conversation Summary: ${response.content}]`,
+      content: `[Context Compressed] Previous ${totalOriginalCount} messages summarized:\n${response.content}`,
       metadata: {
         type: 'summary',
-        originalMessageCount: messagesToCompress.length,
+        originalMessageCount: totalOriginalCount,
         compressionTimestamp: new Date(),
+        compressed: true,
       },
+      timestamp: new Date(),
+      tokens: Math.floor(response.content.length / 4), // Estimate tokens
     };
 
+    // Return only ONE summary plus preserved messages
     return [summaryMessage, ...messagesToPreserve];
   }
 
@@ -144,8 +168,9 @@ export class HybridStrategy implements CompressionStrategy {
       return messages;
     }
 
-    // For very long conversations, use summarization
-    if (messagesToCompress.length > 20) {
+    // For very long conversations or if we already have summaries, use summarization
+    const hasSummaries = messagesToCompress.some((msg) => msg.metadata?.type === 'summary');
+    if (messagesToCompress.length > 20 || hasSummaries) {
       return this.summarizationStrategy.compress(messages, options);
     }
 

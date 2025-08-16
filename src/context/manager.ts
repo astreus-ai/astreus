@@ -86,10 +86,17 @@ export class ContextManager implements IContextManager {
 
     try {
       const tokensUsed = this.compressor.calculateTotalTokens(this.messages);
+
+      // Check if any messages are compressed summaries
+      const hasCompressedMessages = this.messages.some(
+        (msg) => msg.metadata?.type === 'summary' || msg.metadata?.compressed === true
+      );
+
       await this.storage.saveContext({
         agentId: this.agentId,
         contextData: this.messages,
         tokensUsed,
+        compressionVersion: hasCompressedMessages ? 'hybrid' : undefined,
       });
 
       this.isDirty = false;
@@ -97,6 +104,7 @@ export class ContextManager implements IContextManager {
         agentId: this.agentId,
         messagesCount: this.messages.length,
         tokensUsed,
+        hasCompression: hasCompressedMessages,
       });
     } catch (error) {
       this.logger.warn('Failed to save context to storage', {
@@ -109,7 +117,7 @@ export class ContextManager implements IContextManager {
   /**
    * Add a message to the context
    */
-  addMessage(message: ContextMessage): void {
+  async addMessage(message: ContextMessage): Promise<void> {
     // Add timestamp if not provided
     if (!message.timestamp) {
       message.timestamp = new Date();
@@ -129,17 +137,27 @@ export class ContextManager implements IContextManager {
       totalMessages: this.messages.length,
     });
 
-    // Auto-save to storage (async, don't block)
-    this.saveToStorage().catch((error) => {
+    // Auto-compress if needed BEFORE saving
+    if (this.autoCompress && this.shouldCompress()) {
+      this.logger.debug('Auto-compression triggered', {
+        currentTokens: this.compressor.calculateTotalTokens(this.messages),
+        maxTokens: this.maxTokens,
+      });
+
+      try {
+        await this.compressContext();
+        this.logger.debug('Auto-compression completed successfully');
+      } catch (error) {
+        this.logger.error('Auto-compression failed', error instanceof Error ? error : undefined);
+      }
+    }
+
+    // Auto-save to storage after potential compression
+    try {
+      await this.saveToStorage();
+    } catch (error) {
       this.logger.debug('Auto-save failed', {
         error: error instanceof Error ? error.message : String(error),
-      });
-    });
-
-    // Auto-compress if needed
-    if (this.autoCompress && this.shouldCompress()) {
-      this.compressContext().catch((error) => {
-        this.logger.error('Auto-compression failed', error instanceof Error ? error : undefined);
       });
     }
   }
@@ -177,13 +195,28 @@ export class ContextManager implements IContextManager {
    * Compress the context
    */
   async compressContext(): Promise<CompressionResult> {
+    const originalMessageCount = this.messages.length;
+    const originalTokens = this.compressor.calculateTotalTokens(this.messages);
+
+    this.logger.debug('Starting context compression', {
+      originalMessageCount,
+      originalTokens,
+      maxTokens: this.maxTokens,
+    });
+
     const result = await this.compressor.compressConversation(this.messages);
 
     if (result.success) {
       this.messages = result.compressedMessages;
       this.isDirty = true; // Mark as dirty since messages changed
 
+      const newTokens = this.compressor.calculateTotalTokens(this.messages);
+
       this.logger.info('Context compressed successfully', {
+        originalMessages: originalMessageCount,
+        compressedMessages: this.messages.length,
+        originalTokens,
+        newTokens,
         tokensReduced: result.tokensReduced,
         compressionRatio: `${(result.compressionRatio * 100).toFixed(1)}%`,
       });
