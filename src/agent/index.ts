@@ -311,7 +311,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
           timestamp: new Date(),
           metadata,
         };
-        this.modules.context.addMessage(contextMessage);
+        await this.modules.context.addMessage(contextMessage);
       }
 
       return memory;

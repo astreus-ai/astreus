@@ -46,7 +46,7 @@ export interface ContextWindow {
 }
 
 export interface ContextManager {
-  addMessage(message: ContextMessage): void;
+  addMessage(message: ContextMessage): Promise<void>;
   getMessages(): ContextMessage[];
   getContextWindow(): ContextWindow;
   analyzeContext(): ContextAnalysis;
