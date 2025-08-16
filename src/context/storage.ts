@@ -98,8 +98,11 @@ export class ContextStorage {
     }
 
     // Decrypt for return using centralized system
-    const decryptedResult = await decryptSensitiveFields(result, 'contexts');
-    return this.formatContextData(decryptedResult);
+    const decryptedResult = await decryptSensitiveFields(
+      result as unknown as Record<string, unknown>,
+      'contexts'
+    );
+    return this.formatContextData(decryptedResult as unknown as ContextDbRow);
   }
 
   /**
@@ -116,8 +119,11 @@ export class ContextStorage {
     }
 
     // Decrypt sensitive fields using centralized system
-    const decryptedRow = await decryptSensitiveFields(contextRow, 'contexts');
-    const formattedData = this.formatContextData(decryptedRow);
+    const decryptedRow = await decryptSensitiveFields(
+      contextRow as unknown as Record<string, unknown>,
+      'contexts'
+    );
+    const formattedData = this.formatContextData(decryptedRow as unknown as ContextDbRow);
 
     this.logger.debug('Context loaded from storage', {
       agentId,
@@ -193,7 +199,7 @@ export class ContextStorage {
       try {
         contextData = JSON.parse(row.contextData);
       } catch (error) {
-        this.logger.warn('Failed to parse context data', { error });
+        this.logger.warn('Failed to parse context data', { error: String(error) });
         contextData = [];
       }
     }

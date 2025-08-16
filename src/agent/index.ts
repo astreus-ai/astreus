@@ -255,9 +255,12 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
     // Always initialize context manager (core component)
     this.modules.context = new ContextManager({
-      maxContextLength: data.maxTokens || 8000,
+      maxContextLength: data.maxContextLength || data.maxTokens || 8000,
       autoCompress: data.autoContextCompression || false,
       model: this.getModel(), // Use agent's effective model
+      preserveLastN: data.preserveLastN,
+      compressionRatio: data.compressionRatio,
+      compressionStrategy: data.compressionStrategy,
     });
 
     // Module methods are now directly implemented in the class
