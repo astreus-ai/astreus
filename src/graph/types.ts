@@ -137,4 +137,5 @@ export interface GraphSchedulingOptions {
   respectSchedules?: boolean; // Whether to respect node schedules during execution
   waitForScheduled?: boolean; // Whether to wait for scheduled nodes or skip them
   schedulingCheckInterval?: number; // How often to check for scheduled nodes (ms)
+  onChunk?: (chunk: string) => void; // Callback for streaming chunks
 }

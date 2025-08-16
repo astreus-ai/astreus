@@ -142,7 +142,7 @@ Example response:
 
       // Convert to SubAgentTask format and validate
       const tasks: SubAgentTask[] = delegationResult.tasks
-        .filter((task: { agentId: unknown; task: unknown; priority?: unknown }) => {
+        .filter((task: { agentId: number; task: string; priority?: number }) => {
           // Validate each task
           const hasValidAgentId =
             typeof task.agentId === 'number' &&

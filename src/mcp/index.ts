@@ -12,12 +12,11 @@ interface MCPMessage {
   params?: Record<string, MCPValue>;
   result?: {
     tools?: MCPTool[];
-    [key: string]: unknown;
-  };
+  } & Record<string, MCPValue>;
   error?: {
     code: number;
     message: string;
-    data?: unknown;
+    data?: MCPValue;
   };
 }
 

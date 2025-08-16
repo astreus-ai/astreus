@@ -27,7 +27,7 @@ interface GeminiResponseWithUsage {
 }
 
 // Type guard for Gemini response with usage metadata
-function hasUsageMetadata(response: unknown): response is GeminiResponseWithUsage {
+function hasUsageMetadata(response: object | null): response is GeminiResponseWithUsage {
   return typeof response === 'object' && response !== null && 'usageMetadata' in response;
 }
 

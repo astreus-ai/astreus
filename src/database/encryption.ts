@@ -195,7 +195,10 @@ export class EncryptionService {
   /**
    * Encrypt JSON metadata
    */
-  async encryptJSON(value: unknown, fieldName: string): Promise<string | null> {
+  async encryptJSON(
+    value: Record<string, string | number | boolean | null> | string | null,
+    fieldName: string
+  ): Promise<string | null> {
     if (!value) return null;
 
     const jsonString = typeof value === 'string' ? value : JSON.stringify(value);
@@ -205,7 +208,10 @@ export class EncryptionService {
   /**
    * Decrypt JSON metadata
    */
-  async decryptJSON(value: string | null, fieldName: string): Promise<unknown> {
+  async decryptJSON(
+    value: string | null,
+    fieldName: string
+  ): Promise<Record<string, string | number | boolean | null> | null> {
     if (!value) return null;
 
     const decrypted = await this.decrypt(value, fieldName);

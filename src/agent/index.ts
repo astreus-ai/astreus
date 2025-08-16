@@ -17,7 +17,6 @@ import {
   Plugin as IPlugin,
   ToolParameterValue,
   PluginConfig,
-  ToolCall as PluginToolCall,
   ToolCallResult,
 } from '../plugin/types';
 import { convertToolParametersToJsonSchema } from '../plugin';
@@ -475,7 +474,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     return this.modules.plugin.unregisterPlugin(name);
   }
 
-  getPlugins(): IPlugin[] {
+  listPlugins(): IPlugin[] {
     if (!this.modules.plugin) throw new Error('Plugin module not enabled');
     return this.modules.plugin.listPlugins();
   }
@@ -485,7 +484,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     return this.modules.plugin.getTools();
   }
 
-  async executeTool(toolCall: PluginToolCall): Promise<ToolCallResult> {
+  async executeTool(toolCall: import('../plugin/types').ToolCall): Promise<ToolCallResult> {
     if (!this.modules.plugin) throw new Error('Plugin module not enabled');
     return this.modules.plugin.executeTool(toolCall, { agentId: this.id, agent: this });
   }
@@ -544,7 +543,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   async executeWithSubAgents(
     prompt: string,
     subAgents: IAgent[],
-    options?: Record<string, unknown>,
+    options?: Record<string, string | number | boolean | object | null>,
     mainModel?: string
   ): Promise<string> {
     if (!this.modules.subAgent) throw new Error('SubAgent module not available');
@@ -554,7 +553,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   async delegateTask(
     taskPrompt: string,
     targetAgent: IAgent,
-    options?: Record<string, unknown>
+    options?: Record<string, string | number | boolean | object | null>
   ): Promise<string> {
     if (!this.modules.subAgent) throw new Error('SubAgent module not available');
     return this.modules.subAgent.executeWithSubAgents(taskPrompt, [targetAgent], options);
@@ -1135,11 +1134,14 @@ export class Agent extends BaseAgent implements IAgentWithModules {
               const mcpToolName = toolCall.function.name.substring(4); // Remove 'mcp_' prefix
 
               // Ensure arguments are properly formatted for MCP
-              let mcpArgs: Record<string, unknown>;
+              let mcpArgs: Record<string, string | number | boolean | object | null>;
               if (typeof toolCall.function.arguments === 'string') {
                 mcpArgs = JSON.parse(toolCall.function.arguments);
               } else {
-                mcpArgs = toolCall.function.arguments as Record<string, unknown>;
+                mcpArgs = toolCall.function.arguments as Record<
+                  string,
+                  string | number | boolean | object | null
+                >;
               }
 
               const mcpResult = await this.modules.mcp!.callMCPTool(
@@ -1152,11 +1154,14 @@ export class Agent extends BaseAgent implements IAgentWithModules {
               const pluginToolName = toolCall.function.name.substring(7); // Remove 'plugin_' prefix
 
               // Ensure arguments are properly formatted for plugin tools
-              let pluginArgs: Record<string, unknown>;
+              let pluginArgs: Record<string, string | number | boolean | object | null>;
               if (typeof toolCall.function.arguments === 'string') {
                 pluginArgs = JSON.parse(toolCall.function.arguments);
               } else {
-                pluginArgs = toolCall.function.arguments as Record<string, unknown>;
+                pluginArgs = toolCall.function.arguments as Record<
+                  string,
+                  string | number | boolean | object | null
+                >;
               }
 
               if (this.modules.plugin) {

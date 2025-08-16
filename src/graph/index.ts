@@ -206,7 +206,12 @@ export class Graph implements IAgentModule {
 
   // Execution
   async run(
-    options?: { stream?: boolean; timeout?: number; nodeTimeout?: number } & GraphSchedulingOptions
+    options?: {
+      stream?: boolean;
+      onChunk?: (chunk: string) => void;
+      timeout?: number;
+      nodeTimeout?: number;
+    } & GraphSchedulingOptions
   ): Promise<GraphExecutionResult> {
     await this.initialize();
 
@@ -301,7 +306,7 @@ export class Graph implements IAgentModule {
 
             // Special handling for last node with streaming
             if (shouldStreamLastNode && node.id === lastNode.id) {
-              this.executeNode(node, true) // Pass stream=true for last node
+              this.executeNode(node, true, options?.onChunk) // Pass stream=true and onChunk for last node
                 .then((result) => {
                   const timeoutId = nodeTimeouts.get(node.id);
                   if (timeoutId) {
@@ -329,7 +334,7 @@ export class Graph implements IAgentModule {
                   this.log('error', `Node ${node.name} failed: ${error.message}`, node.id);
                 });
             } else {
-              this.executeNode(node)
+              this.executeNode(node, false, options?.onChunk)
                 .then((result) => {
                   const timeoutId = nodeTimeouts.get(node.id);
                   if (timeoutId) {
@@ -433,7 +438,11 @@ export class Graph implements IAgentModule {
     };
   }
 
-  private async executeNode(node: GraphNode, forceStream?: boolean): Promise<NodeExecutionResult> {
+  private async executeNode(
+    node: GraphNode,
+    forceStream?: boolean,
+    onChunk?: (chunk: string) => void
+  ): Promise<NodeExecutionResult> {
     this.log('info', `Executing node ${node.name}`, node.id);
     node.status = 'running';
     node.updatedAt = new Date();
@@ -494,9 +503,9 @@ export class Graph implements IAgentModule {
       // Determine if sub-agents should be used
       const shouldUseSubAgents = this.shouldUseSubAgents(node);
 
+      // Always use Task module for proper tool support and consistency
       if (shouldUseSubAgents) {
-        // Use agent.ask() with sub-agent delegation
-        this.log('info', `Using sub-agent delegation for node ${node.name}`, node.id);
+        this.log('info', `Using sub-agent delegation for task node ${node.name}`, node.id);
 
         // Enhanced context for sub-agent coordination
         let contextualPrompt = enhancedPrompt;
@@ -510,43 +519,45 @@ export class Graph implements IAgentModule {
           }
         }
 
-        const response = await (
-          this.agent as IAgent & {
-            ask: (prompt: string, options?: Record<string, unknown>) => Promise<string>;
-          }
-        ).ask(contextualPrompt, {
-          model: node.model,
-          stream: forceStream || node.stream,
-          useSubAgents: true,
-          delegation:
-            node.subAgentDelegation ||
-            (this.graph.config.subAgentCoordination === 'adaptive'
-              ? 'auto'
-              : this.graph.config.subAgentCoordination) ||
-            'auto',
-          coordination:
-            node.subAgentCoordination ||
-            (this.graph.config.subAgentCoordination === 'adaptive'
-              ? 'sequential'
-              : this.graph.config.subAgentCoordination) ||
-            'sequential',
+        // Use Task module with sub-agent delegation
+        const taskModule = new Task(this.agent);
+        await taskModule.initialize();
+
+        const createdTask = await taskModule.createTask({
+          prompt: contextualPrompt,
+          metadata: {
+            ...node.metadata,
+            useSubAgents: true,
+            subAgentDelegation:
+              node.subAgentDelegation ||
+              (this.graph.config.subAgentCoordination === 'adaptive'
+                ? 'auto'
+                : this.graph.config.subAgentCoordination) ||
+              'auto',
+            subAgentCoordination:
+              node.subAgentCoordination ||
+              (this.graph.config.subAgentCoordination === 'adaptive'
+                ? 'sequential'
+                : this.graph.config.subAgentCoordination) ||
+              'sequential',
+          },
         });
 
-        // Enhanced result with sub-agent metadata
+        const taskResponse = await taskModule.executeTask(createdTask.id!, {
+          model: node.model,
+          stream: forceStream || node.stream,
+          onChunk,
+        });
+
         return {
           type: 'task',
-          taskId: 0, // No specific task ID when using direct agent.ask()
-          response,
-          model: node.model || (this.agent as IAgent & { getModel: () => string }).getModel(),
-          usage: undefined, // Usage tracking not available with direct ask()
+          taskId: createdTask.id!,
+          response: taskResponse.response,
+          model: taskResponse.model,
+          usage: taskResponse.usage,
           subAgentUsed: true,
           delegationStrategy: node.subAgentDelegation || 'auto',
-          coordinationPattern:
-            node.subAgentCoordination ||
-            (this.graph.config.subAgentCoordination === 'adaptive'
-              ? 'sequential'
-              : this.graph.config.subAgentCoordination) ||
-            'sequential',
+          coordinationPattern: node.subAgentCoordination || 'sequential',
         };
       } else {
         // Use traditional Task module execution
@@ -561,6 +572,7 @@ export class Graph implements IAgentModule {
         const taskResponse = await taskModule.executeTask(createdTask.id!, {
           model: node.model,
           stream: forceStream || node.stream,
+          onChunk,
         });
 
         return {
@@ -1186,7 +1198,7 @@ export class Graph implements IAgentModule {
       try {
         // Execute just this node
         const testNode = this.graph.nodes.find((n) => n.id === testNodeId)!;
-        await this.executeNode(testNode);
+        await this.executeNode(testNode, false, undefined);
 
         const duration = Date.now() - startTime;
         results[strategy] = {

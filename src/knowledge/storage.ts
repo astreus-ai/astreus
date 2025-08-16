@@ -89,9 +89,9 @@ export class KnowledgeDatabase {
    * Encrypt sensitive knowledge fields before storing
    */
   private async encryptKnowledgeData(
-    data: Record<string, unknown>,
+    data: Record<string, string | number | boolean | null>,
     tableName: string
-  ): Promise<Record<string, unknown>> {
+  ): Promise<Record<string, string | number | boolean | null>> {
     if (!this.encryption.isEnabled()) {
       return data;
     }
@@ -126,9 +126,9 @@ export class KnowledgeDatabase {
    * Decrypt sensitive knowledge fields after retrieving
    */
   private async decryptKnowledgeData(
-    data: Record<string, unknown>,
+    data: Record<string, string | number | boolean | null>,
     tableName: string
-  ): Promise<Record<string, unknown>> {
+  ): Promise<Record<string, string | number | boolean | null>> {
     if (!this.encryption.isEnabled() || !data) {
       return data;
     }
@@ -142,10 +142,11 @@ export class KnowledgeDatabase {
       if (decrypted[field] !== undefined && decrypted[field] !== null) {
         if (field === 'metadata') {
           // Handle JSON metadata fields
-          decrypted[field] = await this.encryption.decryptJSON(
+          const decryptedMetadata = await this.encryption.decryptJSON(
             String(decrypted[field]),
             `${tableName}.${field}`
           );
+          decrypted[field] = decryptedMetadata ? JSON.stringify(decryptedMetadata) : null;
         } else {
           // Handle string fields
           decrypted[field] = await this.encryption.decrypt(
@@ -363,8 +364,16 @@ export class KnowledgeDatabase {
         token_count: tokenCount,
       };
 
+      // Remove undefined values before encryption
+      const cleanedDocumentData = Object.fromEntries(
+        Object.entries(documentData).filter(([, value]) => value !== undefined)
+      ) as Record<string, string | number | boolean | null>;
+
       // Encrypt sensitive fields
-      const encryptedData = await this.encryptKnowledgeData(documentData, 'knowledge_documents');
+      const encryptedData = await this.encryptKnowledgeData(
+        cleanedDocumentData,
+        'knowledge_documents'
+      );
 
       const result = await client.query(
         `INSERT INTO knowledge_documents (agent_id, title, content, file_type, file_size, metadata, token_count) 
@@ -418,8 +427,14 @@ export class KnowledgeDatabase {
         metadata: metadata || {},
       };
 
+      // Convert metadata to string for encryption compatibility
+      const cleanedChunkData = {
+        ...chunkData,
+        metadata: JSON.stringify(chunkData.metadata),
+      } as Record<string, string | number | boolean | null>;
+
       // Encrypt sensitive fields (not embedding)
-      const encryptedData = await this.encryptKnowledgeData(chunkData, 'knowledge_chunks');
+      const encryptedData = await this.encryptKnowledgeData(cleanedChunkData, 'knowledge_chunks');
 
       const result = await client.query(
         `INSERT INTO knowledge_chunks (document_id, agent_id, content, token_count, chunk_index, embedding, metadata) 
