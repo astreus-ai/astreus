@@ -11,7 +11,7 @@ export class SummarizationStrategy implements CompressionStrategy {
     messages: ContextMessage[],
     options: ContextCompressorOptions
   ): Promise<ContextMessage[]> {
-    const preserveCount = Math.min(options.preserveLastN || 5, messages.length);
+    const preserveCount = Math.min(options.preserveLastN || 3, messages.length);
     const messagesToPreserve = messages.slice(-preserveCount);
 
     // Filter out old summaries from messages to compress (we'll combine them into new summary)
@@ -88,7 +88,7 @@ export class SelectiveStrategy implements CompressionStrategy {
     messages: ContextMessage[],
     options: ContextCompressorOptions
   ): Promise<ContextMessage[]> {
-    const preserveCount = Math.min(options.preserveLastN || 5, messages.length);
+    const preserveCount = Math.min(options.preserveLastN || 3, messages.length);
     const messagesToPreserve = messages.slice(-preserveCount);
     const messagesToAnalyze = messages.slice(0, -preserveCount);
 
@@ -160,7 +160,7 @@ export class HybridStrategy implements CompressionStrategy {
     messages: ContextMessage[],
     options: ContextCompressorOptions
   ): Promise<ContextMessage[]> {
-    const preserveCount = Math.min(options.preserveLastN || 5, messages.length);
+    const preserveCount = Math.min(options.preserveLastN || 3, messages.length);
     const messagesToPreserve = messages.slice(-preserveCount);
     const messagesToCompress = messages.slice(0, -preserveCount);
 

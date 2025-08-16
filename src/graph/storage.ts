@@ -109,7 +109,6 @@ export class GraphStorage {
       .insert({
         name: graph.config.name,
         description: graph.config.description,
-        defaultAgentId: graph.config.defaultAgentId,
         maxConcurrency: graph.config.maxConcurrency,
         timeout: graph.config.timeout,
         retryAttempts: graph.config.retryAttempts,
@@ -198,15 +197,16 @@ export class GraphStorage {
       toNodeId: edge.toNodeId,
       condition: edge.condition,
       metadata: edge.metadata ? JSON.parse(edge.metadata) : undefined,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     }));
 
     const graph: Graph = {
-      id: graphId.toString(),
+      id: graphId,
       config: {
-        id: graphId.toString(),
+        id: graphId,
         name: graphData.name,
         description: graphData.description,
-        defaultAgentId: graphData.defaultAgentId,
         maxConcurrency: graphData.maxConcurrency,
         timeout: graphData.timeout,
         retryAttempts: graphData.retryAttempts,

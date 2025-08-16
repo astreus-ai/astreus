@@ -24,6 +24,11 @@ interface AgentDbRow {
   vision: boolean;
   useTools: boolean;
   autoContextCompression: boolean;
+  // Context compression options
+  maxContextLength?: number;
+  preserveLastN?: number;
+  compressionRatio?: number;
+  compressionStrategy?: string;
   debug: boolean;
   created_at: string;
   updated_at: string;
@@ -160,6 +165,11 @@ export class Database {
         table.boolean('vision').defaultTo(false);
         table.boolean('useTools').defaultTo(true);
         table.boolean('autoContextCompression').defaultTo(false);
+        // Context compression options
+        table.integer('maxContextLength');
+        table.integer('preserveLastN');
+        table.float('compressionRatio');
+        table.string('compressionStrategy');
         table.boolean('debug').defaultTo(false);
         table.timestamps(true, true);
       });
@@ -176,6 +186,14 @@ export class Database {
       const hasDebug = await this.knex.schema.hasColumn('agents', 'debug');
       const hasEmbeddingModel = await this.knex.schema.hasColumn('agents', 'embeddingModel');
       const hasVisionModel = await this.knex.schema.hasColumn('agents', 'visionModel');
+      // Check for new context compression columns
+      const hasMaxContextLength = await this.knex.schema.hasColumn('agents', 'maxContextLength');
+      const hasPreserveLastN = await this.knex.schema.hasColumn('agents', 'preserveLastN');
+      const hasCompressionRatio = await this.knex.schema.hasColumn('agents', 'compressionRatio');
+      const hasCompressionStrategy = await this.knex.schema.hasColumn(
+        'agents',
+        'compressionStrategy'
+      );
 
       this.logger.debug('Checking agents table columns', {
         hasVision,
@@ -183,6 +201,10 @@ export class Database {
         hasDebug,
         hasEmbeddingModel,
         hasVisionModel,
+        hasMaxContextLength,
+        hasPreserveLastN,
+        hasCompressionRatio,
+        hasCompressionStrategy,
       });
 
       if (
@@ -190,7 +212,11 @@ export class Database {
         !hasAutoContextCompression ||
         !hasDebug ||
         !hasEmbeddingModel ||
-        !hasVisionModel
+        !hasVisionModel ||
+        !hasMaxContextLength ||
+        !hasPreserveLastN ||
+        !hasCompressionRatio ||
+        !hasCompressionStrategy
       ) {
         this.logger.info('Updating agents table schema');
 
@@ -217,6 +243,19 @@ export class Database {
           }
           if (!hasVisionModel) {
             table.string('visionModel');
+          }
+          // Add new context compression columns
+          if (!hasMaxContextLength) {
+            table.integer('maxContextLength');
+          }
+          if (!hasPreserveLastN) {
+            table.integer('preserveLastN');
+          }
+          if (!hasCompressionRatio) {
+            table.float('compressionRatio');
+          }
+          if (!hasCompressionStrategy) {
+            table.string('compressionStrategy');
           }
         });
 
@@ -384,6 +423,11 @@ export class Database {
       vision: data.vision || false,
       useTools: data.useTools !== undefined ? data.useTools : true,
       autoContextCompression: data.autoContextCompression || false,
+      // Context compression options
+      maxContextLength: data.maxContextLength,
+      preserveLastN: data.preserveLastN,
+      compressionRatio: data.compressionRatio,
+      compressionStrategy: data.compressionStrategy,
       debug: data.debug || false,
     };
 
@@ -490,6 +534,11 @@ export class Database {
       'vision',
       'useTools',
       'autoContextCompression',
+      // Context compression options
+      'maxContextLength',
+      'preserveLastN',
+      'compressionRatio',
+      'compressionStrategy',
       'debug',
     ] as const;
 
@@ -618,6 +667,15 @@ export class Database {
       vision: Boolean(agent.vision), // Convert SQLite 0/1 to boolean
       useTools: Boolean(agent.useTools), // Convert SQLite 0/1 to boolean
       autoContextCompression: Boolean(agent.autoContextCompression), // Convert SQLite 0/1 to boolean
+      // Context compression options
+      maxContextLength: agent.maxContextLength,
+      preserveLastN: agent.preserveLastN,
+      compressionRatio: agent.compressionRatio,
+      compressionStrategy: agent.compressionStrategy as
+        | 'summarize'
+        | 'selective'
+        | 'hybrid'
+        | undefined,
       debug: Boolean(agent.debug), // Convert SQLite 0/1 to boolean
       createdAt: new Date(agent.created_at),
       updatedAt: new Date(agent.updated_at),

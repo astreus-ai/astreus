@@ -202,6 +202,11 @@ export interface AgentConfigInput {
   vision?: boolean;
   useTools?: boolean;
   autoContextCompression?: boolean;
+  // Context compression options
+  maxContextLength?: number;
+  preserveLastN?: number;
+  compressionRatio?: number;
+  compressionStrategy?: 'summarize' | 'selective' | 'hybrid';
   debug?: boolean;
   subAgents?: IAgent[];
 }
