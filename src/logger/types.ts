@@ -1,4 +1,4 @@
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'success';
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'success' | 'silent';
 
 /**
  * Primitive values that can be logged
