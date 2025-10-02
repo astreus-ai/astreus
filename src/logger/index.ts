@@ -16,6 +16,12 @@ export class Logger implements ILogger {
       ...config,
     };
 
+    // If LOG_LEVEL is 'silent', create a silent logger
+    if (envLevel === 'silent') {
+      this.pino = pino({ level: 'silent' });
+      return;
+    }
+
     // Create pino instance with pretty printing in development
     const isProduction = process.env.NODE_ENV === 'production';
 

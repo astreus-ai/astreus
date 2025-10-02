@@ -734,13 +734,8 @@ async function ensureDatabaseInitialized(): Promise<Database> {
     return database;
   }
 
-  // Try to initialize from environment variable
-  const dbUrl = process.env.DB_URL;
-  if (!dbUrl) {
-    throw new Error(
-      'DB_URL environment variable is not set. Please set it before using the database.'
-    );
-  }
+  // Try to initialize from environment variable or use default SQLite
+  const dbUrl = process.env.DB_URL || 'sqlite://./astreus.db';
 
   // Start initialization with error handling
   isInitializing = initializeDatabase({ connectionString: dbUrl });
