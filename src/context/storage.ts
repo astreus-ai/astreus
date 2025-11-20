@@ -197,7 +197,9 @@ export class ContextStorage {
 
     if (row.contextData) {
       try {
-        contextData = JSON.parse(row.contextData);
+        // Handle both string and object (PostgreSQL returns JSON as object)
+        contextData =
+          typeof row.contextData === 'string' ? JSON.parse(row.contextData) : row.contextData;
       } catch (error) {
         this.logger.warn('Failed to parse context data', { error: String(error) });
         contextData = [];

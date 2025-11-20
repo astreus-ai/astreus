@@ -1,6 +1,7 @@
 import { Knex } from 'knex';
 import { getDatabase } from '../database/index';
 import { Graph, GraphNode, GraphEdge } from './types';
+import { encryptSensitiveFields, decryptSensitiveFields } from '../database/utils';
 
 export class GraphStorage {
   private knex: Knex;
@@ -105,25 +106,29 @@ export class GraphStorage {
 
   async saveGraph(graph: Graph): Promise<number> {
     await this.initialize();
-    const [savedGraph] = await this.knex('graphs')
-      .insert({
-        name: graph.config.name,
-        description: graph.config.description,
-        maxConcurrency: graph.config.maxConcurrency,
-        timeout: graph.config.timeout,
-        retryAttempts: graph.config.retryAttempts,
-        metadata: graph.config.metadata ? JSON.stringify(graph.config.metadata) : null,
-        status: graph.status,
-        startedAt: graph.startedAt,
-        completedAt: graph.completedAt,
-      })
-      .returning('id');
+
+    // Prepare and encrypt graph data
+    const graphData = {
+      name: graph.config.name,
+      description: graph.config.description,
+      maxConcurrency: graph.config.maxConcurrency,
+      timeout: graph.config.timeout,
+      retryAttempts: graph.config.retryAttempts,
+      metadata: graph.config.metadata ? JSON.stringify(graph.config.metadata) : null,
+      status: graph.status,
+      startedAt: graph.startedAt,
+      completedAt: graph.completedAt,
+    };
+
+    const encryptedGraphData = await encryptSensitiveFields(graphData, 'graphs');
+
+    const [savedGraph] = await this.knex('graphs').insert(encryptedGraphData).returning('id');
 
     const graphId = savedGraph.id || savedGraph;
 
-    // Save nodes
+    // Save nodes with encryption
     for (const node of graph.nodes) {
-      await this.knex('graph_nodes').insert({
+      const nodeData = {
         graphId,
         nodeId: node.id,
         type: node.type,
@@ -139,19 +144,25 @@ export class GraphStorage {
         result: node.result ? JSON.stringify(node.result) : null,
         error: node.error,
         metadata: node.metadata ? JSON.stringify(node.metadata) : null,
-      });
+      };
+
+      const encryptedNodeData = await encryptSensitiveFields(nodeData, 'graph_nodes');
+      await this.knex('graph_nodes').insert(encryptedNodeData);
     }
 
-    // Save edges
+    // Save edges with encryption
     for (const edge of graph.edges) {
-      await this.knex('graph_edges').insert({
+      const edgeData = {
         graphId,
         edgeId: edge.id,
         fromNodeId: edge.fromNodeId,
         toNodeId: edge.toNodeId,
         condition: edge.condition,
         metadata: edge.metadata ? JSON.stringify(edge.metadata) : null,
-      });
+      };
+
+      const encryptedEdgeData = await encryptSensitiveFields(edgeData, 'graph_edges');
+      await this.knex('graph_edges').insert(encryptedEdgeData);
     }
 
     return graphId;
@@ -166,57 +177,82 @@ export class GraphStorage {
       return null;
     }
 
+    // Decrypt graph data
+    const decryptedGraphData = await decryptSensitiveFields(graphData, 'graphs');
+
     // Load nodes
     const nodesData = await this.knex('graph_nodes').where({ graphId }).orderBy('id');
 
     // Load edges
     const edgesData = await this.knex('graph_edges').where({ graphId }).orderBy('id');
 
-    const nodes: GraphNode[] = nodesData.map((node) => ({
-      id: node.nodeId,
-      type: node.type,
-      name: node.name,
-      description: node.description,
-      agentId: node.agentId,
-      prompt: node.prompt,
-      model: node.model,
-      stream: node.stream,
-      status: node.status,
-      priority: node.priority,
-      dependencies: JSON.parse(node.dependencies || '[]'),
-      result: node.result ? JSON.parse(node.result) : undefined,
-      error: node.error,
-      metadata: node.metadata ? JSON.parse(node.metadata) : undefined,
-      createdAt: new Date(node.created_at),
-      updatedAt: new Date(node.updated_at),
-    }));
+    // Decrypt and map nodes
+    const nodes: GraphNode[] = await Promise.all(
+      nodesData.map(async (node) => {
+        const decryptedNode = await decryptSensitiveFields(node, 'graph_nodes');
+        return {
+          id: decryptedNode.nodeId as string,
+          type: decryptedNode.type as 'agent' | 'task',
+          name: decryptedNode.name as string,
+          description: decryptedNode.description as string | undefined,
+          agentId: decryptedNode.agentId as number | undefined,
+          prompt: decryptedNode.prompt as string | undefined,
+          model: decryptedNode.model as string | undefined,
+          stream: decryptedNode.stream as boolean | undefined,
+          status: decryptedNode.status as GraphNode['status'],
+          priority: decryptedNode.priority as number,
+          dependencies: JSON.parse((decryptedNode.dependencies as string) || '[]'),
+          result: decryptedNode.result ? JSON.parse(decryptedNode.result as string) : undefined,
+          error: decryptedNode.error as string | undefined,
+          metadata: decryptedNode.metadata
+            ? JSON.parse(decryptedNode.metadata as string)
+            : undefined,
+          createdAt: new Date(node.created_at),
+          updatedAt: new Date(node.updated_at),
+        };
+      })
+    );
 
-    const edges: GraphEdge[] = edgesData.map((edge) => ({
-      id: edge.edgeId,
-      fromNodeId: edge.fromNodeId,
-      toNodeId: edge.toNodeId,
-      condition: edge.condition,
-      metadata: edge.metadata ? JSON.parse(edge.metadata) : undefined,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    }));
+    // Decrypt and map edges
+    const edges: GraphEdge[] = await Promise.all(
+      edgesData.map(async (edge) => {
+        const decryptedEdge = await decryptSensitiveFields(edge, 'graph_edges');
+        return {
+          id: decryptedEdge.edgeId as string,
+          fromNodeId: decryptedEdge.fromNodeId as string,
+          toNodeId: decryptedEdge.toNodeId as string,
+          condition: decryptedEdge.condition as string | undefined,
+          metadata: decryptedEdge.metadata
+            ? JSON.parse(decryptedEdge.metadata as string)
+            : undefined,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+      })
+    );
 
     const graph: Graph = {
       id: graphId,
       config: {
         id: graphId,
-        name: graphData.name,
-        description: graphData.description,
-        maxConcurrency: graphData.maxConcurrency,
-        timeout: graphData.timeout,
-        retryAttempts: graphData.retryAttempts,
-        metadata: graphData.metadata ? JSON.parse(graphData.metadata) : undefined,
+        name: decryptedGraphData.name as string,
+        description: decryptedGraphData.description as string | undefined,
+        maxConcurrency: decryptedGraphData.maxConcurrency as number | undefined,
+        timeout: decryptedGraphData.timeout as number | undefined,
+        retryAttempts: decryptedGraphData.retryAttempts as number | undefined,
+        metadata: decryptedGraphData.metadata
+          ? JSON.parse(decryptedGraphData.metadata as string)
+          : undefined,
       },
       nodes,
       edges,
-      status: graphData.status,
-      startedAt: graphData.startedAt ? new Date(graphData.startedAt) : undefined,
-      completedAt: graphData.completedAt ? new Date(graphData.completedAt) : undefined,
+      status: decryptedGraphData.status as Graph['status'],
+      startedAt: decryptedGraphData.startedAt
+        ? new Date(decryptedGraphData.startedAt as string)
+        : undefined,
+      completedAt: decryptedGraphData.completedAt
+        ? new Date(decryptedGraphData.completedAt as string)
+        : undefined,
       executionLog: [], // Execution log is runtime only
       createdAt: new Date(graphData.created_at),
       updatedAt: new Date(graphData.updated_at),
@@ -227,22 +263,29 @@ export class GraphStorage {
 
   async updateGraph(graphId: number, graph: Graph): Promise<void> {
     await this.initialize();
-    // Update graph
-    await this.knex('graphs').where({ id: graphId }).update({
+
+    // Prepare and encrypt graph update data
+    const graphUpdateData = {
       status: graph.status,
       startedAt: graph.startedAt,
       completedAt: graph.completedAt,
-    });
+    };
 
-    // Update nodes
+    const encryptedGraphUpdate = await encryptSensitiveFields(graphUpdateData, 'graphs');
+    await this.knex('graphs').where({ id: graphId }).update(encryptedGraphUpdate);
+
+    // Update nodes with encryption
     for (const node of graph.nodes) {
+      const nodeUpdateData = {
+        status: node.status,
+        result: node.result ? JSON.stringify(node.result) : null,
+        error: node.error,
+      };
+
+      const encryptedNodeUpdate = await encryptSensitiveFields(nodeUpdateData, 'graph_nodes');
       await this.knex('graph_nodes')
         .where({ graphId, nodeId: node.id })
-        .update({
-          status: node.status,
-          result: node.result ? JSON.stringify(node.result) : null,
-          error: node.error,
-        });
+        .update(encryptedNodeUpdate);
     }
   }
 

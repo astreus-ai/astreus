@@ -75,6 +75,7 @@ export interface GraphConfig {
   subAgentAware?: boolean;
   optimizeSubAgentUsage?: boolean;
   subAgentCoordination?: 'parallel' | 'sequential' | 'adaptive';
+  autoLink?: boolean; // Automatically link new nodes to the previous node for linear flows
   metadata?: MetadataObject;
 }
 
