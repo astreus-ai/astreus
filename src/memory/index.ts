@@ -714,8 +714,16 @@ export class Memory implements IAgentModule {
       id: memory.id,
       agentId: memory.agentId,
       content: memory.content,
-      embedding: memory.embedding ? JSON.parse(memory.embedding) : undefined,
-      metadata: memory.metadata ? JSON.parse(memory.metadata) : undefined,
+      embedding: memory.embedding
+        ? typeof memory.embedding === 'string'
+          ? JSON.parse(memory.embedding)
+          : memory.embedding
+        : undefined,
+      metadata: memory.metadata
+        ? typeof memory.metadata === 'string'
+          ? JSON.parse(memory.metadata)
+          : memory.metadata
+        : undefined,
       createdAt: new Date(memory.created_at),
       updatedAt: new Date(memory.updated_at),
     };

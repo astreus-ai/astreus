@@ -1043,7 +1043,11 @@ export class Task implements IAgentModule {
       prompt: task.prompt,
       response: task.response ?? undefined,
       status: task.status,
-      metadata: task.metadata ? JSON.parse(task.metadata) : undefined,
+      metadata: task.metadata
+        ? typeof task.metadata === 'string'
+          ? JSON.parse(task.metadata)
+          : task.metadata
+        : undefined,
       createdAt: new Date(task.created_at),
       updatedAt: new Date(task.updated_at),
       completedAt: task.completedAt ? new Date(task.completedAt) : undefined,

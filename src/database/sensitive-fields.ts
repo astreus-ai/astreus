@@ -23,6 +23,11 @@ export const SENSITIVE_FIELDS: Record<string, string[]> = {
 
   // Scheduler system fields
   scheduled_items: ['metadata'],
+
+  // Graph system fields
+  graphs: ['description', 'metadata'],
+  graph_nodes: ['prompt', 'result', 'error', 'metadata'],
+  graph_edges: ['metadata'],
 };
 
 /**

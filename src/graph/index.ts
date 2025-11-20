@@ -49,6 +49,7 @@ export class Graph implements IAgentModule {
   private initialized: boolean = false;
   private agent?: IAgent;
   private logger?: Logger;
+  private lastNodeId: string | null = null; // Track last added node for auto-linking
 
   constructor(config: GraphConfig, agent?: IAgent) {
     // Note: knex will be initialized in initialize() method
@@ -93,6 +94,18 @@ export class Graph implements IAgentModule {
   addAgentNode(options: AddAgentNodeOptions): string {
     const nodeId = this.generateNodeId();
 
+    const dependencies: string[] = [...(options.dependencies || [])];
+    const explicitDependencies: string[] = [];
+
+    // Auto-link: Link to previous node if autoLink is enabled
+    if (this.graph.config.autoLink && this.lastNodeId && !dependencies.length) {
+      dependencies.push(this.lastNodeId);
+      explicitDependencies.push(this.lastNodeId);
+      this.log('debug', `Auto-linked node to previous: ${this.lastNodeId}`, nodeId);
+    } else if (dependencies.length > 0) {
+      explicitDependencies.push(...dependencies);
+    }
+
     const node: GraphNode = {
       id: nodeId,
       type: 'agent',
@@ -100,7 +113,7 @@ export class Graph implements IAgentModule {
       agentId: options.agentId,
       status: 'pending',
       priority: options.priority || 0,
-      dependencies: options.dependencies || [],
+      dependencies,
       metadata: options.metadata,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -108,6 +121,14 @@ export class Graph implements IAgentModule {
 
     this.graph.nodes.push(node);
     this.graph.updatedAt = new Date();
+
+    // Auto-create edges for dependencies
+    for (const depId of explicitDependencies) {
+      this.addEdge(depId, nodeId);
+    }
+
+    // Track this node as last added for auto-linking
+    this.lastNodeId = nodeId;
 
     this.log('debug', `Added agent node: ${node.name} (agentId: ${options.agentId})`, nodeId);
 
@@ -119,6 +140,8 @@ export class Graph implements IAgentModule {
 
     // Handle dependsOn (node names) vs dependencies (node IDs)
     let dependencies: string[] = options.dependencies || [];
+    const explicitDependencies: string[] = [];
+
     if (options.dependsOn && options.dependsOn.length > 0) {
       // Convert node names to node IDs
       const dependencyIds = options.dependsOn
@@ -135,6 +158,16 @@ export class Graph implements IAgentModule {
         .filter((id) => id !== null) as string[];
 
       dependencies = [...dependencies, ...dependencyIds];
+      explicitDependencies.push(...dependencyIds);
+    }
+
+    // Auto-link: Link to previous node if autoLink is enabled
+    if (this.graph.config.autoLink && this.lastNodeId && !explicitDependencies.length) {
+      if (!dependencies.includes(this.lastNodeId)) {
+        dependencies.push(this.lastNodeId);
+        explicitDependencies.push(this.lastNodeId);
+        this.log('debug', `Auto-linked node to previous: ${this.lastNodeId}`, nodeId);
+      }
     }
 
     // Check if schedule is provided (no validation needed - just store the string)
@@ -168,6 +201,14 @@ export class Graph implements IAgentModule {
 
     this.graph.nodes.push(node);
     this.graph.updatedAt = new Date();
+
+    // Auto-create edges for explicit dependencies (dependsOn or autoLink)
+    for (const depId of explicitDependencies) {
+      this.addEdge(depId, nodeId);
+    }
+
+    // Track this node as last added for auto-linking
+    this.lastNodeId = nodeId;
 
     const scheduleInfo = options.schedule ? ` (scheduled: ${options.schedule})` : '';
     this.log(
@@ -914,7 +955,7 @@ export class Graph implements IAgentModule {
   // Use simple schedule strings in addTaskNode() instead
 
   // Static methods
-  static async findById(graphId: number): Promise<Graph | null> {
+  static async findById(graphId: number, agent?: IAgent): Promise<Graph | null> {
     const storage = getGraphStorage();
     const graphData = await storage.loadGraph(graphId);
 
@@ -922,7 +963,7 @@ export class Graph implements IAgentModule {
       return null;
     }
 
-    const graph = new Graph(graphData.config);
+    const graph = new Graph(graphData.config, agent);
     graph.graph = graphData;
     return graph;
   }
