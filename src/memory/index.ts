@@ -25,7 +25,14 @@ export class Memory implements IAgentModule {
   readonly name = 'memory';
   private knex: Knex | null = null;
   private logger: Logger;
-  private encryption = getEncryptionService();
+  private _encryption?: ReturnType<typeof getEncryptionService>;
+
+  private get encryption() {
+    if (!this._encryption) {
+      this._encryption = getEncryptionService();
+    }
+    return this._encryption;
+  }
 
   constructor(private agent: IAgent) {
     this.logger = agent.logger;
