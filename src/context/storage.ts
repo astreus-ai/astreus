@@ -44,7 +44,14 @@ interface ContextDbRow {
 export class ContextStorage {
   private knex: Knex;
   private logger: Logger;
-  private encryption = getEncryptionService();
+  private _encryption?: ReturnType<typeof getEncryptionService>;
+
+  private get encryption() {
+    if (!this._encryption) {
+      this._encryption = getEncryptionService();
+    }
+    return this._encryption;
+  }
 
   constructor(knex: Knex, logger: Logger) {
     this.knex = knex;

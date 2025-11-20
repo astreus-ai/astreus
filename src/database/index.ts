@@ -38,7 +38,14 @@ export class Database {
   protected knex: Knex;
   protected config: DatabaseConfig;
   private logger: Logger;
-  private encryption = getEncryptionService();
+  private _encryption?: ReturnType<typeof getEncryptionService>;
+
+  private get encryption() {
+    if (!this._encryption) {
+      this._encryption = getEncryptionService();
+    }
+    return this._encryption;
+  }
 
   /**
    * Get the knex instance for direct database operations

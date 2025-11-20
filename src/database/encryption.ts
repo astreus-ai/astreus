@@ -233,21 +233,44 @@ export class EncryptionService {
   }
 }
 
-// Singleton instance
+// Singleton instance with cached config
 let encryptionService: EncryptionService | null = null;
+let cachedConfig: EncryptionConfig | null = null;
+
+/**
+ * Get current encryption config from environment
+ */
+function getCurrentConfig(): EncryptionConfig {
+  return {
+    enabled: process.env.ENCRYPTION_ENABLED === 'true',
+    masterKey: process.env.ENCRYPTION_MASTER_KEY || '',
+    algorithm: process.env.ENCRYPTION_ALGORITHM || 'aes-256-gcm',
+  };
+}
+
+/**
+ * Check if config has changed
+ */
+function hasConfigChanged(newConfig: EncryptionConfig): boolean {
+  if (!cachedConfig) return true;
+  return (
+    cachedConfig.enabled !== newConfig.enabled ||
+    cachedConfig.masterKey !== newConfig.masterKey ||
+    cachedConfig.algorithm !== newConfig.algorithm
+  );
+}
 
 /**
  * Get or create the encryption service instance
+ * Automatically reinitializes if environment variables change
  */
 export function getEncryptionService(): EncryptionService {
-  if (!encryptionService) {
-    const config: EncryptionConfig = {
-      enabled: process.env.ENCRYPTION_ENABLED === 'true',
-      masterKey: process.env.ENCRYPTION_MASTER_KEY || '',
-      algorithm: process.env.ENCRYPTION_ALGORITHM || 'aes-256-gcm',
-    };
+  const currentConfig = getCurrentConfig();
 
-    encryptionService = new EncryptionService(config);
+  // Reinitialize if config changed (e.g., after dotenv load)
+  if (!encryptionService || hasConfigChanged(currentConfig)) {
+    encryptionService = new EncryptionService(currentConfig);
+    cachedConfig = currentConfig;
   }
 
   return encryptionService;
