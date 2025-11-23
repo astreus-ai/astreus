@@ -318,7 +318,8 @@ export class Knowledge implements IAgentModule {
     return this.database;
   }
 
-  async addKnowledge(content: string, title?: string, metadata?: MetadataObject): Promise<number> {
+  async addKnowledge(content: string, title?: string, metadata?: MetadataObject): Promise<string> {
+    // Returns UUID
     const startTime = Date.now();
 
     // User-facing info log
@@ -527,7 +528,7 @@ export class Knowledge implements IAgentModule {
     return results.map((r) => r.content).join('\n\n---\n\n');
   }
 
-  async getKnowledgeDocuments(): Promise<Array<{ id: number; title: string; created_at: string }>> {
+  async getKnowledgeDocuments(): Promise<Array<{ id: string; title: string; created_at: string }>> {
     const db = await this.getDatabase();
     const documents = await db.getDocuments(this.agent.id);
 
@@ -539,7 +540,7 @@ export class Knowledge implements IAgentModule {
     }));
   }
 
-  async deleteKnowledgeDocument(documentId: number): Promise<boolean> {
+  async deleteKnowledgeDocument(documentId: string): Promise<boolean> {
     this.logger.info(`Deleting knowledge document: ${documentId}`);
 
     const db = await this.getDatabase();
@@ -560,7 +561,7 @@ export class Knowledge implements IAgentModule {
     return result;
   }
 
-  async deleteKnowledgeChunk(chunkId: number): Promise<boolean> {
+  async deleteKnowledgeChunk(chunkId: string): Promise<boolean> {
     const db = await this.getDatabase();
     return db.deleteChunk(chunkId);
   }
@@ -579,7 +580,7 @@ export class Knowledge implements IAgentModule {
   }
 
   async expandKnowledgeContext(
-    documentId: number,
+    documentId: string,
     chunkIndex: number,
     expandBefore: number = 1,
     expandAfter: number = 1

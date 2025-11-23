@@ -50,8 +50,9 @@ export class Logger implements ILogger {
             ignore: this.config.debug
               ? 'pid,hostname,framework,level,time,module,agent,err'
               : 'pid,hostname,framework,level,time,module,agent,data,err',
-            messageFormat: 'Astreus [{agent}] {module} → {msg}',
-            customColors: 'info:blue,warn:yellow,error:red,success:green',
+            messageFormat:
+              '\x1b[36mAstreus [\x1b[34m{agent}\x1b[36m] {module}\x1b[0m → \x1b[32m{msg}\x1b[0m',
+            customColors: 'info:cyan,warn:yellow,error:red',
             hideObject: !this.config.debug,
             singleLine: false,
             messageKey: 'msg',

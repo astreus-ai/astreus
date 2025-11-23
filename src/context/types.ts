@@ -60,7 +60,7 @@ export interface ContextManager {
     memoryModule: {
       listMemories: (options: { limit: number; orderBy: string; order: string }) => Promise<
         Array<{
-          id: number;
+          id: string; // UUID
           content: string;
           created_at: string;
           metadata?: MetadataObject;
@@ -73,10 +73,10 @@ export interface ContextManager {
     addMemory: (
       content: string,
       metadata?: MetadataObject
-    ) => Promise<{ id: number; content: string }>;
+    ) => Promise<{ id: string; content: string }>; // UUID
   }): Promise<void>;
   // New storage methods
-  initializeForAgent(agentId: number): Promise<void>;
+  initializeForAgent(agentId: string): Promise<void>; // UUID
   saveToStorage(): Promise<void>;
 }
 

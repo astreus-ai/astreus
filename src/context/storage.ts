@@ -9,8 +9,8 @@ import { getEncryptionService } from '../database/encryption';
 import { encryptSensitiveFields, decryptSensitiveFields } from '../database/utils';
 
 export interface ContextStorageData {
-  id: number;
-  agentId: number;
+  id: string;
+  agentId: string;
   contextData: ContextMessage[];
   summary?: string;
   tokensUsed: number;
@@ -21,7 +21,9 @@ export interface ContextStorageData {
 }
 
 export interface ContextStorageOptions {
-  agentId: number;
+  agentId: string; // UUID
+  graphId?: string; // Graph UUID context belongs to
+  sessionId?: string; // Conversation session ID
   contextData?: ContextMessage[];
   summary?: string;
   tokensUsed?: number;
@@ -30,8 +32,8 @@ export interface ContextStorageOptions {
 
 // Database row interface
 interface ContextDbRow {
-  id: number;
-  agentId: number;
+  id: string; // UUID
+  agentId: string; // UUID
   contextData: string | null;
   summary: string | null;
   tokensUsed: number;
@@ -73,6 +75,8 @@ export class ContextStorage {
 
     const insertData = {
       agentId: options.agentId,
+      graphId: options.graphId || null, // Graph relationship
+      sessionId: options.sessionId || null, // Session ID
       contextData: contextDataJson,
       summary: options.summary || null,
       tokensUsed: options.tokensUsed || 0,
@@ -106,16 +110,17 @@ export class ContextStorage {
 
     // Decrypt for return using centralized system
     const decryptedResult = await decryptSensitiveFields(
-      result as Record<string, string | number | boolean | null>,
+      result as unknown as Record<string, string | number | boolean | null | undefined | Date>,
       'contexts'
     );
-    return this.formatContextData(decryptedResult as ContextDbRow);
+    return this.formatContextData(decryptedResult as unknown as ContextDbRow);
   }
 
   /**
    * Load context data for an agent
    */
-  async loadContext(agentId: number): Promise<ContextStorageData | null> {
+  async loadContext(agentId: string): Promise<ContextStorageData | null> {
+    // UUID
     this.logger.debug('Loading context from storage', { agentId });
 
     const contextRow = await this.knex('contexts').where({ agentId }).first();
@@ -127,10 +132,10 @@ export class ContextStorage {
 
     // Decrypt sensitive fields using centralized system
     const decryptedRow = await decryptSensitiveFields(
-      contextRow as Record<string, string | number | boolean | null>,
+      contextRow as unknown as Record<string, string | number | boolean | null | undefined | Date>,
       'contexts'
     );
-    const formattedData = this.formatContextData(decryptedRow as ContextDbRow);
+    const formattedData = this.formatContextData(decryptedRow as unknown as ContextDbRow);
 
     this.logger.debug('Context loaded from storage', {
       agentId,
@@ -159,7 +164,7 @@ export class ContextStorage {
    * Update context tokens and compression info
    */
   async updateContextMetadata(
-    agentId: number,
+    agentId: string, // UUID
     metadata: {
       tokensUsed?: number;
       compressionVersion?: string;

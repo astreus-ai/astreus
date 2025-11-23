@@ -2,6 +2,7 @@ import { IAgentModule, IAgent } from '../agent/types';
 import { Agent } from '../agent';
 import { getDatabase } from '../database';
 import { Task } from '../task';
+import { Memory } from '../memory';
 import { getGraphStorage } from './storage';
 import { Logger, LogData } from '../logger/types';
 import {
@@ -15,13 +16,15 @@ import {
   AddTaskNodeOptions,
   GraphExecutionStatus,
   GraphSchedulingOptions,
+  GraphUsage,
+  NodeUsage,
 } from './types';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
 
 interface TaskExecutionResult {
   type: 'task';
-  taskId: number;
+  taskId: string; // UUID
   response: string;
   model?: string;
   usage?: {
@@ -37,7 +40,7 @@ interface TaskExecutionResult {
 
 interface AgentExecutionResult {
   type: 'agent';
-  agentId?: number;
+  agentId?: string; // UUID
 }
 
 type NodeExecutionResult = TaskExecutionResult | AgentExecutionResult;
@@ -49,7 +52,7 @@ export class Graph implements IAgentModule {
   private initialized: boolean = false;
   private agent?: IAgent;
   private logger?: Logger;
-  private lastNodeId: string | null = null; // Track last added node for auto-linking
+  public lastNodeId: string | null = null; // Track last added node for auto-linking
 
   constructor(config: GraphConfig, agent?: IAgent) {
     // Note: knex will be initialized in initialize() method
@@ -64,6 +67,7 @@ export class Graph implements IAgentModule {
 
     this.graph = {
       config,
+      defaultAgentId: agent?.id, // Store default agent ID
       nodes: [],
       edges: [],
       status: 'idle',
@@ -309,14 +313,21 @@ export class Graph implements IAgentModule {
       const executing = new Set<string>();
       let currentIndex = 0;
 
-      // Find the last node for streaming
-      const lastNode = sortedNodes[sortedNodes.length - 1];
+      // Find the last PENDING node for streaming (skip already completed nodes)
+      const pendingNodes = sortedNodes.filter((n) => n.status !== 'completed');
+      const lastNode = pendingNodes[pendingNodes.length - 1];
       const shouldStreamLastNode = options?.stream && lastNode?.type === 'task';
 
       while (currentIndex < sortedNodes.length || executing.size > 0) {
         // Start new nodes if we have capacity
         while (executing.size < maxConcurrency && currentIndex < sortedNodes.length) {
           const node = sortedNodes[currentIndex];
+
+          // Skip already completed nodes
+          if (node.status === 'completed') {
+            currentIndex++;
+            continue;
+          }
 
           // Check if node is ready to execute (dependencies only in ultra-simplified mode)
           if (this.areDependenciesCompleted(node)) {
@@ -348,7 +359,7 @@ export class Graph implements IAgentModule {
             // Special handling for last node with streaming
             if (shouldStreamLastNode && node.id === lastNode.id) {
               this.executeNode(node, true, options?.onChunk) // Pass stream=true and onChunk for last node
-                .then((result) => {
+                .then(async (result) => {
                   const timeoutId = nodeTimeouts.get(node.id);
                   if (timeoutId) {
                     clearTimeout(timeoutId);
@@ -357,9 +368,23 @@ export class Graph implements IAgentModule {
                   results[node.id] = result;
                   node.status = 'completed';
                   node.result = JSON.stringify(result);
+
+                  // Track usage for task nodes
+                  if (result.type === 'task' && result.usage) {
+                    node.usage = {
+                      promptTokens: result.usage.promptTokens,
+                      completionTokens: result.usage.completionTokens,
+                      totalTokens: result.usage.totalTokens,
+                      model: result.model,
+                    };
+                  }
+
                   completedNodes++;
                   executing.delete(node.id);
                   this.log('info', `Node ${node.name} completed (streamed)`, node.id);
+
+                  // Save assistant response to memory
+                  await this.saveResponseToMemory(node, result);
                 })
                 .catch((error) => {
                   const timeoutId = nodeTimeouts.get(node.id);
@@ -376,7 +401,7 @@ export class Graph implements IAgentModule {
                 });
             } else {
               this.executeNode(node, false, options?.onChunk)
-                .then((result) => {
+                .then(async (result) => {
                   const timeoutId = nodeTimeouts.get(node.id);
                   if (timeoutId) {
                     clearTimeout(timeoutId);
@@ -385,9 +410,23 @@ export class Graph implements IAgentModule {
                   results[node.id] = result;
                   node.status = 'completed';
                   node.result = JSON.stringify(result);
+
+                  // Track usage for task nodes
+                  if (result.type === 'task' && result.usage) {
+                    node.usage = {
+                      promptTokens: result.usage.promptTokens,
+                      completionTokens: result.usage.completionTokens,
+                      totalTokens: result.usage.totalTokens,
+                      model: result.model,
+                    };
+                  }
+
                   completedNodes++;
                   executing.delete(node.id);
                   this.log('info', `Node ${node.name} completed`, node.id);
+
+                  // Save assistant response to memory
+                  await this.saveResponseToMemory(node, result);
                 })
                 .catch((error) => {
                   const timeoutId = nodeTimeouts.get(node.id);
@@ -463,9 +502,13 @@ export class Graph implements IAgentModule {
     this.graph.completedAt = new Date();
     const duration = this.graph.completedAt.getTime() - this.graph.startedAt!.getTime();
 
+    // Aggregate usage statistics
+    const usage = this.aggregateUsage();
+    this.graph.usage = usage;
+
     this.log(
       'info',
-      `Graph execution ${this.graph.status}. Completed: ${completedNodes}, Failed: ${failedNodes} (${duration}ms)`
+      `Graph execution ${this.graph.status}. Completed: ${completedNodes}, Failed: ${failedNodes}, Tokens: ${usage.totalTokens} (${duration}ms)`
     );
 
     return {
@@ -476,7 +519,97 @@ export class Graph implements IAgentModule {
       duration,
       results: Object.fromEntries(Object.entries(results).map(([k, v]) => [k, JSON.stringify(v)])),
       errors,
+      usage,
     };
+  }
+
+  /**
+   * Aggregate usage statistics from all completed nodes
+   */
+  private aggregateUsage(): GraphUsage {
+    const nodeUsages: Record<string, NodeUsage> = {};
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+    let totalTokens = 0;
+    let totalContextTokens = 0;
+    let totalCost = 0;
+    const modelsUsed = new Set<string>();
+
+    for (const node of this.graph.nodes) {
+      if (node.usage) {
+        nodeUsages[node.id] = node.usage;
+        totalPromptTokens += node.usage.promptTokens;
+        totalCompletionTokens += node.usage.completionTokens;
+        totalTokens += node.usage.totalTokens;
+        totalContextTokens += node.usage.contextTokens || 0;
+        totalCost += node.usage.cost || 0;
+        if (node.usage.model) {
+          modelsUsed.add(node.usage.model);
+        }
+      }
+    }
+
+    return {
+      totalPromptTokens,
+      totalCompletionTokens,
+      totalTokens,
+      totalContextTokens,
+      totalCost,
+      nodeUsages,
+      modelsUsed: Array.from(modelsUsed),
+    };
+  }
+
+  /**
+   * Check context size and warn if approaching limits
+   */
+  private checkContextSize(node: GraphNode): void {
+    if (!this.agent) return;
+
+    try {
+      // Get context window info from agent
+      const contextWindow = (this.agent as Agent).getContextWindow?.();
+      if (!contextWindow) return;
+
+      const { totalTokens, maxTokens } = contextWindow;
+
+      // Check against graph config limits if set
+      const maxContextTokens = this.graph.config.maxContextTokens || maxTokens;
+      const warningThreshold = this.graph.config.contextWarningThreshold || 0.8;
+
+      const utilization = totalTokens / maxContextTokens;
+
+      if (utilization >= 1.0) {
+        this.log(
+          'error',
+          `Context limit exceeded! Using ${totalTokens}/${maxContextTokens} tokens (${(utilization * 100).toFixed(1)}%)`,
+          node.id
+        );
+      } else if (utilization >= warningThreshold) {
+        this.log(
+          'warn',
+          `Context approaching limit: ${totalTokens}/${maxContextTokens} tokens (${(utilization * 100).toFixed(1)}%)`,
+          node.id
+        );
+      } else {
+        this.log(
+          'debug',
+          `Context usage: ${totalTokens}/${maxContextTokens} tokens (${(utilization * 100).toFixed(1)}%)`,
+          node.id
+        );
+      }
+
+      // Track context tokens in node usage
+      if (node.usage) {
+        node.usage.contextTokens = totalTokens;
+      }
+    } catch (error) {
+      this.log(
+        'debug',
+        `Failed to check context size: ${error instanceof Error ? error.message : String(error)}`,
+        node.id
+      );
+    }
   }
 
   private async executeNode(
@@ -501,40 +634,53 @@ export class Graph implements IAgentModule {
         throw new Error(`Task node ${node.name} has no prompt`);
       }
 
-      // Build context from dependency results and agent context
-      let enhancedPrompt = node.prompt;
-
-      if (node.dependencies.length > 0) {
-        const dependencyResults: string[] = [];
-
-        for (const depId of node.dependencies) {
-          const depNode = this.graph.nodes.find((n) => n.id === depId);
-          if (depNode?.result) {
-            try {
-              const depResult = JSON.parse(String(depNode.result));
-              if (depResult.type === 'task' && depResult.response) {
-                dependencyResults.push(
-                  `Previous result from ${depNode.name}: ${depResult.response}`
-                );
-              }
-            } catch {
-              // If parsing fails, use raw result
-              dependencyResults.push(
-                `Previous result from ${depNode.name}: ${String(depNode.result)}`
-              );
-            }
-          }
-        }
-
-        if (dependencyResults.length > 0) {
-          enhancedPrompt = `${dependencyResults.join('\n\n')}\n\nBased on the above context, ${node.prompt}`;
+      // Load conversation history from Memory if agent has memory enabled
+      if (this.graph.id && this.agent && this.agent.loadGraphContext) {
+        try {
+          // Use isolated=true for graph-only memories (no general agent memories)
+          await this.agent.loadGraphContext(this.graph.id, 100, true);
           this.log(
             'debug',
-            `Enhanced prompt with ${dependencyResults.length} dependency results`,
+            `Loaded isolated conversation history for graph ${this.graph.id}`,
+            node.id
+          );
+
+          // Monitor context size and warn if approaching limits
+          this.checkContextSize(node);
+        } catch (error) {
+          this.log(
+            'warn',
+            `Failed to load conversation history: ${error instanceof Error ? error.message : String(error)}`,
             node.id
           );
         }
       }
+
+      // Save user prompt to memory before execution (this also adds to context)
+      if (this.graph.id && node.prompt && this.agent && this.agent.addMemory) {
+        try {
+          const metadata: Record<string, string | boolean | number> = {
+            type: 'user_message',
+            role: 'user',
+            graphId: this.graph.id,
+            graphNodeId: node.id,
+          };
+          if (node.taskId) {
+            metadata.taskId = node.taskId;
+          }
+          await this.agent.addMemory(node.prompt, metadata);
+          this.log('debug', `Saved user prompt to memory`, node.id);
+        } catch (error) {
+          this.log(
+            'warn',
+            `Failed to save user prompt: ${error instanceof Error ? error.message : String(error)}`,
+            node.id
+          );
+        }
+      }
+
+      // Use the original prompt (context is already loaded in ContextManager)
+      const enhancedPrompt = node.prompt;
 
       // Execute task using the assigned agent
       if (!this.agent) {
@@ -607,8 +753,13 @@ export class Graph implements IAgentModule {
 
         const createdTask = await taskModule.createTask({
           prompt: enhancedPrompt,
+          graphId: this.graph.id, // Link task to graph (UUID)
+          graphNodeId: node.id, // Node ID (string)
           metadata: node.metadata,
         });
+
+        // Update node with task ID
+        node.taskId = createdTask.id!;
 
         const taskResponse = await taskModule.executeTask(createdTask.id!, {
           model: node.model,
@@ -627,6 +778,41 @@ export class Graph implements IAgentModule {
     }
 
     throw new Error(`Unknown node type: ${node.type}`);
+  }
+
+  /**
+   * Save task response to memory with graph context
+   */
+  private async saveResponseToMemory(node: GraphNode, result: NodeExecutionResult): Promise<void> {
+    if (!this.agent || !this.agent.addMemory || !this.graph.id || result.type !== 'task') {
+      return;
+    }
+
+    try {
+      const metadata: Record<string, string | boolean | number> = {
+        type: 'assistant_response',
+        role: 'assistant',
+        graphId: this.graph.id,
+        graphNodeId: node.id,
+        taskId: result.taskId,
+      };
+      if (result.model) {
+        metadata.model = result.model;
+      }
+      if (result.usage) {
+        metadata.promptTokens = result.usage.promptTokens;
+        metadata.completionTokens = result.usage.completionTokens;
+        metadata.totalTokens = result.usage.totalTokens;
+      }
+      await this.agent.addMemory(result.response, metadata);
+      this.log('debug', `Saved assistant response to memory`, node.id);
+    } catch (error) {
+      this.log(
+        'warn',
+        `Failed to save response to memory: ${error instanceof Error ? error.message : String(error)}`,
+        node.id
+      );
+    }
   }
 
   private areDependenciesCompleted(node: GraphNode): boolean {
@@ -846,6 +1032,11 @@ export class Graph implements IAgentModule {
     return this.graph.status;
   }
 
+  setStatus(status: GraphExecutionStatus): void {
+    this.graph.status = status;
+    this.graph.updatedAt = new Date();
+  }
+
   getExecutionLog(): GraphExecutionLogEntry[] {
     return this.graph.executionLog;
   }
@@ -863,35 +1054,8 @@ export class Graph implements IAgentModule {
     return this.graph.nodes.filter((n) => n.status === status);
   }
 
-  // Memory methods for graph
-  async getMemories(): Promise<MemoryType[]> {
-    if (!this.agent) {
-      throw new Error('No agent available for this graph');
-    }
-
-    if (!this.agent.hasMemory()) {
-      return [];
-    }
-
-    // Check if agent has listMemories method (dynamically bound)
-    if (
-      'listMemories' in this.agent &&
-      typeof (
-        this.agent as Agent & {
-          listMemories?: (options: { orderBy: string; order: string }) => Promise<MemoryType[]>;
-        }
-      ).listMemories === 'function'
-    ) {
-      const agentWithMemory = this.agent as Agent & {
-        listMemories: (options: { orderBy: string; order: string }) => Promise<MemoryType[]>;
-      };
-      return await agentWithMemory.listMemories({
-        orderBy: 'createdAt',
-        order: 'asc',
-      });
-    }
-    return [];
-  }
+  // Memory methods for graph (kept for backward compatibility)
+  // Note: New version with graphId filtering is at the end of the class
 
   async searchMemories(query: string, limit?: number): Promise<MemoryType[]> {
     if (!this.agent) {
@@ -920,7 +1084,7 @@ export class Graph implements IAgentModule {
   }
 
   // Persistence methods
-  async save(): Promise<number> {
+  async save(): Promise<string> {
     await this.initialize();
     const storage = getGraphStorage();
     const graphId = await storage.saveGraph(this.graph);
@@ -955,7 +1119,7 @@ export class Graph implements IAgentModule {
   // Use simple schedule strings in addTaskNode() instead
 
   // Static methods
-  static async findById(graphId: number, agent?: IAgent): Promise<Graph | null> {
+  static async findById(graphId: string, agent?: IAgent): Promise<Graph | null> {
     const storage = getGraphStorage();
     const graphData = await storage.loadGraph(graphId);
 
@@ -965,10 +1129,23 @@ export class Graph implements IAgentModule {
 
     const graph = new Graph(graphData.config, agent);
     graph.graph = graphData;
+
+    // Restore lastNodeId for autoLink to work on loaded graphs
+    if (graphData.nodes.length > 0) {
+      // Find the most recently created node
+      const sortedNodes = [...graphData.nodes].sort((a, b) => {
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return timeB - timeA;
+      });
+      graph.lastNodeId = sortedNodes[0].id;
+    }
+
     return graph;
   }
 
-  static async list(): Promise<{ id: number; name: string; status: string; createdAt: Date }[]> {
+  static async list(): Promise<{ id: string; name: string; status: string; createdAt: Date }[]> {
+    // UUID
     const storage = getGraphStorage();
     return await storage.listGraphs();
   }
@@ -1384,6 +1561,165 @@ export class Graph implements IAgentModule {
     }
 
     return report.join('\n');
+  }
+
+  /**
+   * Get all tasks created by this graph
+   */
+  async getTasks(options?: {
+    limit?: number;
+    offset?: number;
+    status?: string;
+  }): Promise<unknown[]> {
+    if (!this.graph.id) {
+      throw new Error('Graph must be saved before querying tasks');
+    }
+
+    if (!this.agent) {
+      throw new Error('No agent available for this graph');
+    }
+
+    const taskModule = new Task(this.agent);
+    await taskModule.initialize();
+
+    return taskModule.listTasks({
+      graphId: this.graph.id,
+      limit: options?.limit,
+      offset: options?.offset,
+      status: options?.status as 'pending' | 'in_progress' | 'completed' | 'failed' | undefined,
+    });
+  }
+
+  /**
+   * Get task for a specific node
+   */
+  async getTaskByNode(nodeId: string): Promise<unknown | null> {
+    const node = this.getNode(nodeId);
+    if (!node || node.type !== 'task' || !node.taskId) {
+      return null;
+    }
+
+    if (!this.agent) {
+      throw new Error('No agent available for this graph');
+    }
+
+    const taskModule = new Task(this.agent);
+    await taskModule.initialize();
+
+    return taskModule.getTask(node.taskId);
+  }
+
+  /**
+   * Get aggregated usage statistics for the graph
+   */
+  getUsage(): GraphUsage | undefined {
+    return this.graph.usage || this.aggregateUsage();
+  }
+
+  /**
+   * Get usage statistics for a specific node
+   */
+  getNodeUsage(nodeId: string): NodeUsage | undefined {
+    const node = this.graph.nodes.find((n) => n.id === nodeId);
+    return node?.usage;
+  }
+
+  /**
+   * Get total token count across all nodes
+   */
+  getTotalTokens(): number {
+    const usage = this.getUsage();
+    return usage?.totalTokens || 0;
+  }
+
+  /**
+   * Get total cost across all nodes
+   */
+  getTotalCost(): number {
+    const usage = this.getUsage();
+    return usage?.totalCost || 0;
+  }
+
+  /**
+   * Get context size information
+   */
+  getContextInfo(): {
+    currentTokens: number;
+    maxTokens: number;
+    utilization: number;
+    isWarning: boolean;
+    isExceeded: boolean;
+  } | null {
+    if (!this.agent) return null;
+
+    try {
+      const contextWindow = (this.agent as Agent).getContextWindow?.();
+      if (!contextWindow) return null;
+
+      const { totalTokens, maxTokens } = contextWindow;
+      const maxContextTokens = this.graph.config.maxContextTokens || maxTokens;
+      const warningThreshold = this.graph.config.contextWarningThreshold || 0.8;
+      const utilization = totalTokens / maxContextTokens;
+
+      return {
+        currentTokens: totalTokens,
+        maxTokens: maxContextTokens,
+        utilization,
+        isWarning: utilization >= warningThreshold,
+        isExceeded: utilization >= 1.0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Get usage summary as formatted string
+   */
+  getUsageSummary(): string {
+    const usage = this.getUsage();
+    if (!usage) return 'No usage data available';
+
+    const lines = [
+      `Total Tokens: ${usage.totalTokens.toLocaleString()}`,
+      `  - Prompt: ${usage.totalPromptTokens.toLocaleString()}`,
+      `  - Completion: ${usage.totalCompletionTokens.toLocaleString()}`,
+      `  - Context: ${usage.totalContextTokens.toLocaleString()}`,
+    ];
+
+    if (usage.totalCost > 0) {
+      lines.push(`Total Cost: $${usage.totalCost.toFixed(4)}`);
+    }
+
+    if (usage.modelsUsed.length > 0) {
+      lines.push(`Models Used: ${usage.modelsUsed.join(', ')}`);
+    }
+
+    lines.push(`Nodes: ${Object.keys(usage.nodeUsages).length}`);
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Get all memories created during this graph execution
+   */
+  async getMemories(options?: { limit?: number; sessionId?: string }): Promise<unknown[]> {
+    if (!this.graph.id) {
+      throw new Error('Graph must be saved before querying memories');
+    }
+
+    if (!this.agent) {
+      throw new Error('No agent available for this graph');
+    }
+
+    const memoryModule = new Memory(this.agent);
+    await memoryModule.initialize();
+
+    return memoryModule.listMemories({
+      graphId: this.graph.id,
+      limit: options?.limit,
+      sessionId: options?.sessionId,
+    });
   }
 }
 

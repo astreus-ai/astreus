@@ -7,7 +7,6 @@ import {
   TaskRequest,
   TaskResponse,
 } from './types';
-import { MetadataObject } from '../types';
 import { getDatabase } from '../database';
 import {
   getLLM,
@@ -21,7 +20,7 @@ import { Memory } from '../memory';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
 import { Logger } from '../logger/types';
-import { getEncryptionService } from '../database/encryption';
+import { encryptSensitiveFields, decryptSensitiveFields } from '../database/utils';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { DEFAULT_AGENT_CONFIG } from '../agent/defaults';
@@ -30,8 +29,8 @@ import { convertToolParametersToJsonSchema } from '../plugin';
 
 // Database row interfaces
 interface TaskDbRow {
-  id: number;
-  agentId: number;
+  id: string; // UUID
+  agentId: string; // UUID
   prompt: string;
   response: string | null;
   status: TaskStatus;
@@ -45,14 +44,6 @@ export class Task implements IAgentModule {
   readonly name = 'task';
   private knex: Knex | null = null;
   private logger: Logger;
-  private _encryption?: ReturnType<typeof getEncryptionService>;
-
-  private get encryption() {
-    if (!this._encryption) {
-      this._encryption = getEncryptionService();
-    }
-    return this._encryption;
-  }
 
   constructor(private agent: IAgent) {
     this.logger = agent.logger;
@@ -73,75 +64,6 @@ export class Task implements IAgentModule {
   private async initializeTaskTable(): Promise<void> {
     // Tasks table is now shared and initialized in the main database module
     // This method is kept for compatibility but does nothing
-  }
-
-  /**
-   * Encrypt sensitive task fields before storing
-   */
-  private async encryptTaskData(
-    data: Record<string, string | number | boolean | null>
-  ): Promise<Record<string, string | number | boolean | null>> {
-    if (!this.encryption.isEnabled()) {
-      return data;
-    }
-
-    const encrypted = { ...data };
-
-    if (encrypted.prompt !== undefined && encrypted.prompt !== null) {
-      encrypted.prompt = await this.encryption.encrypt(String(encrypted.prompt), 'tasks.prompt');
-    }
-
-    if (encrypted.response !== undefined && encrypted.response !== null) {
-      encrypted.response = await this.encryption.encrypt(
-        String(encrypted.response),
-        'tasks.response'
-      );
-    }
-
-    if (encrypted.metadata !== undefined && encrypted.metadata !== null) {
-      // Convert metadata to JSON string first if needed
-      const metadataToEncrypt =
-        typeof encrypted.metadata === 'string'
-          ? encrypted.metadata
-          : JSON.stringify(encrypted.metadata);
-      encrypted.metadata = await this.encryption.encryptJSON(metadataToEncrypt, 'tasks.metadata');
-    }
-
-    return encrypted;
-  }
-
-  /**
-   * Decrypt sensitive task fields after retrieving
-   */
-  private async decryptTaskData(
-    data: Record<string, string | number | boolean | null>
-  ): Promise<Record<string, string | number | boolean | null>> {
-    if (!this.encryption.isEnabled() || !data) {
-      return data;
-    }
-
-    const decrypted = { ...data };
-
-    if (decrypted.prompt !== undefined && decrypted.prompt !== null) {
-      decrypted.prompt = await this.encryption.decrypt(String(decrypted.prompt), 'tasks.prompt');
-    }
-
-    if (decrypted.response !== undefined && decrypted.response !== null) {
-      decrypted.response = await this.encryption.decrypt(
-        String(decrypted.response),
-        'tasks.response'
-      );
-    }
-
-    if (decrypted.metadata !== undefined && decrypted.metadata !== null) {
-      const decryptedMetadata = await this.encryption.decryptJSON(
-        String(decrypted.metadata),
-        'tasks.metadata'
-      );
-      decrypted.metadata = decryptedMetadata ? JSON.stringify(decryptedMetadata) : null;
-    }
-
-    return decrypted;
   }
 
   async createTask(request: TaskRequest): Promise<TaskType> {
@@ -230,20 +152,24 @@ export class Task implements IAgentModule {
     // Prepare data for encryption
     const insertData = {
       agentId: this.agent.id,
+      graphId: request.graphId || null, // Graph relationship
+      graphNodeId: request.graphNodeId || null, // Graph node relationship
       prompt: enhancedPrompt,
       response: null,
       status: 'pending',
       metadata: Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null,
+      executionContext: request.executionContext ? JSON.stringify(request.executionContext) : null,
     };
 
-    // Encrypt sensitive fields
-    const encryptedData = await this.encryptTaskData(insertData);
+    // Encrypt sensitive fields using centralized encryption
+    const encryptedData = await encryptSensitiveFields(insertData, 'tasks');
 
     const [task] = await this.knex!(tableName).insert(encryptedData).returning('*');
 
     // Decrypt for response
-    const decryptedTask = await this.decryptTaskData(
-      task as Record<string, string | number | boolean | null>
+    const decryptedTask = await decryptSensitiveFields(
+      task as Record<string, string | number | boolean | null>,
+      'tasks'
     );
     const formattedTask = this.formatTask(decryptedTask as unknown as TaskDbRow);
 
@@ -260,7 +186,7 @@ export class Task implements IAgentModule {
   }
 
   async executeTask(
-    taskId: number,
+    taskId: string,
     options?: { model?: string; stream?: boolean; onChunk?: (chunk: string) => void }
   ): Promise<TaskResponse> {
     const startTime = Date.now();
@@ -593,6 +519,9 @@ export class Task implements IAgentModule {
               arguments: Record<string, string | number | boolean | null>;
             };
           }> = [];
+          let streamUsage:
+            | { promptTokens: number; completionTokens: number; totalTokens: number }
+            | undefined;
 
           for await (const chunk of llm.generateStreamResponse(llmOptions)) {
             fullContent += chunk.content;
@@ -606,6 +535,9 @@ export class Task implements IAgentModule {
             }
             if (chunk.toolCalls) {
               streamToolCalls = chunk.toolCalls;
+            }
+            if (chunk.usage) {
+              streamUsage = chunk.usage;
             }
           }
 
@@ -698,24 +630,50 @@ export class Task implements IAgentModule {
             };
 
             let finalStreamContent = '';
-            for await (const chunk of llm.generateStreamResponse(finalLlmOptions)) {
-              finalStreamContent += chunk.content;
-              if (chunk.content) {
-                // Use onChunk callback if available, otherwise fallback to process.stdout
-                if (options?.onChunk) {
-                  options.onChunk(chunk.content);
-                } else {
-                  process.stdout.write(chunk.content);
+            try {
+              for await (const chunk of llm.generateStreamResponse(finalLlmOptions)) {
+                finalStreamContent += chunk.content;
+                if (chunk.content) {
+                  // Use onChunk callback if available, otherwise fallback to process.stdout
+                  if (options?.onChunk) {
+                    options.onChunk(chunk.content);
+                  } else {
+                    process.stdout.write(chunk.content);
+                  }
+                }
+                // Capture usage from final tool response
+                if (chunk.usage) {
+                  // Accumulate usage from both calls
+                  if (streamUsage) {
+                    streamUsage.promptTokens += chunk.usage.promptTokens;
+                    streamUsage.completionTokens += chunk.usage.completionTokens;
+                    streamUsage.totalTokens += chunk.usage.totalTokens;
+                  } else {
+                    streamUsage = chunk.usage;
+                  }
                 }
               }
+              fullContent = finalStreamContent;
+            } catch (llmError) {
+              // If LLM fails after tool execution, return error message instead of failing the task
+              const errorMessage = llmError instanceof Error ? llmError.message : String(llmError);
+              const toolErrorResponse = `I apologize, but I encountered an error while processing your request after executing the tools. Error: ${errorMessage}`;
+              fullContent = toolErrorResponse;
+
+              // Still stream the error message to user
+              if (options?.onChunk) {
+                options.onChunk(toolErrorResponse);
+              } else {
+                process.stdout.write(toolErrorResponse);
+              }
             }
-            fullContent = finalStreamContent;
           }
 
           llmResponse = {
             content: fullContent,
             model: modelToUse,
             toolCalls: streamToolCalls,
+            usage: streamUsage,
           };
         } else {
           // Non-streaming with tool handling
@@ -820,8 +778,14 @@ export class Task implements IAgentModule {
               tools: undefined, // Don't include tools in follow-up
             };
 
-            const finalLlmResponse = await llm.generateResponse(finalLlmOptions);
-            finalResponse = finalLlmResponse.content;
+            try {
+              const finalLlmResponse = await llm.generateResponse(finalLlmOptions);
+              finalResponse = finalLlmResponse.content;
+            } catch (llmError) {
+              // If LLM fails after tool execution, return error message instead of failing the task
+              const errorMessage = llmError instanceof Error ? llmError.message : String(llmError);
+              finalResponse = `I apologize, but I encountered an error while processing your request after executing the tools. Error: ${errorMessage}`;
+            }
           }
 
           llmResponse = {
@@ -852,24 +816,14 @@ export class Task implements IAgentModule {
 
       // Add task conversation to memory/context
       if (this.agent && 'addMemory' in this.agent && typeof this.agent.addMemory === 'function') {
-        await (
-          this.agent.addMemory as (
-            content: string,
-            metadata?: MetadataObject
-          ) => Promise<{ id: number; content: string }>
-        )(task.prompt, {
+        await this.agent.addMemory(task.prompt, {
           role: 'user',
           type: 'task_execution',
           taskId: taskId,
           source: 'task',
         });
 
-        await (
-          this.agent.addMemory as (
-            content: string,
-            metadata?: MetadataObject
-          ) => Promise<{ id: number; content: string }>
-        )(llmResponse.content, {
+        await this.agent.addMemory(llmResponse.content, {
           role: 'assistant',
           type: 'task_response',
           taskId: taskId,
@@ -899,7 +853,7 @@ export class Task implements IAgentModule {
     }
   }
 
-  async getTask(id: number): Promise<TaskType | null> {
+  async getTask(id: string): Promise<TaskType | null> {
     await this.ensureDatabase();
     const tableName = 'tasks';
 
@@ -908,8 +862,9 @@ export class Task implements IAgentModule {
     if (!task) return null;
 
     // Decrypt sensitive fields
-    const decryptedTask = await this.decryptTaskData(
-      task as Record<string, string | number | boolean | null>
+    const decryptedTask = await decryptSensitiveFields(
+      task as Record<string, string | number | boolean | null>,
+      'tasks'
     );
     return this.formatTask(decryptedTask as unknown as TaskDbRow);
   }
@@ -921,6 +876,7 @@ export class Task implements IAgentModule {
       limit: options.limit || DEFAULT_TASK_CONFIG.searchLimit,
       offset: options.offset || DEFAULT_TASK_CONFIG.searchOffset,
       status: options.status || DEFAULT_TASK_CONFIG.logStatus,
+      graphId: options.graphId || 'all',
       orderBy: options.orderBy || DEFAULT_TASK_CONFIG.searchOrderBy,
       order: options.order || DEFAULT_TASK_CONFIG.searchOrder,
       agentId: this.agent.id,
@@ -929,7 +885,14 @@ export class Task implements IAgentModule {
     await this.ensureDatabase();
     const tableName = 'tasks';
 
-    const { limit = 100, offset = 0, status, orderBy = 'createdAt', order = 'desc' } = options;
+    const {
+      limit = 100,
+      offset = 0,
+      status,
+      graphId,
+      orderBy = 'createdAt',
+      order = 'desc',
+    } = options;
 
     const orderColumn =
       orderBy === 'createdAt'
@@ -950,31 +913,32 @@ export class Task implements IAgentModule {
       query = query.andWhere({ status });
     }
 
+    if (graphId !== undefined) {
+      query = query.andWhere({ graphId });
+    }
+
     const tasks = await query;
 
-    // Decrypt tasks if encryption is enabled
-    if (this.encryption.isEnabled()) {
-      const decryptedTasks = await Promise.all(
-        tasks.map(async (task) => {
-          try {
-            const decrypted = await this.decryptTaskData(
-              task as Record<string, string | number | boolean | null>
-            );
-            return this.formatTask(decrypted as unknown as TaskDbRow);
-          } catch {
-            // If decryption fails, return original task (might be unencrypted legacy data)
-            this.logger.debug('Failed to decrypt task during list', { taskId: task.id });
-            return this.formatTask(task);
-          }
-        })
-      );
-      return decryptedTasks;
-    } else {
-      return tasks.map((task) => this.formatTask(task));
-    }
+    // Decrypt tasks using centralized decryption
+    const decryptedTasks = await Promise.all(
+      tasks.map(async (task) => {
+        try {
+          const decrypted = await decryptSensitiveFields(
+            task as Record<string, string | number | boolean | null>,
+            'tasks'
+          );
+          return this.formatTask(decrypted as unknown as TaskDbRow);
+        } catch {
+          // If decryption fails, return original task (might be unencrypted legacy data)
+          this.logger.debug('Failed to decrypt task during list', { taskId: task.id });
+          return this.formatTask(task);
+        }
+      })
+    );
+    return decryptedTasks;
   }
 
-  async updateTask(id: number, updates: Partial<TaskType>): Promise<TaskType | null> {
+  async updateTask(id: string, updates: Partial<TaskType>): Promise<TaskType | null> {
     await this.ensureDatabase();
     const tableName = 'tasks';
 
@@ -995,7 +959,7 @@ export class Task implements IAgentModule {
     }
 
     // Encrypt sensitive fields in update data
-    const encryptedUpdateData = await this.encryptTaskData(updateData);
+    const encryptedUpdateData = await encryptSensitiveFields(updateData, 'tasks');
 
     const [task] = await this.knex!(tableName)
       .where({ id, agentId: this.agent.id })
@@ -1005,13 +969,14 @@ export class Task implements IAgentModule {
     if (!task) return null;
 
     // Decrypt for response
-    const decryptedTask = await this.decryptTaskData(
-      task as Record<string, string | number | boolean | null>
+    const decryptedTask = await decryptSensitiveFields(
+      task as Record<string, string | number | boolean | null>,
+      'tasks'
     );
     return this.formatTask(decryptedTask as unknown as TaskDbRow);
   }
 
-  private async updateTaskStatus(id: number, status: TaskStatus): Promise<TaskType | null> {
+  private async updateTaskStatus(id: string, status: TaskStatus): Promise<TaskType | null> {
     const updateData: Partial<TaskDbRow> = { status };
 
     if (status === 'completed') {
@@ -1027,7 +992,7 @@ export class Task implements IAgentModule {
     return this.updateTask(id, taskTypeUpdate);
   }
 
-  async deleteTask(id: number): Promise<boolean> {
+  async deleteTask(id: string): Promise<boolean> {
     await this.ensureDatabase();
     const tableName = 'tasks';
 
@@ -1047,6 +1012,8 @@ export class Task implements IAgentModule {
     return {
       id: task.id,
       agentId: task.agentId,
+      graphId: (task as unknown as Record<string, unknown>).graphId as string | undefined,
+      graphNodeId: (task as unknown as Record<string, unknown>).graphNodeId as string | undefined,
       prompt: task.prompt,
       response: task.response ?? undefined,
       status: task.status,
@@ -1054,6 +1021,11 @@ export class Task implements IAgentModule {
         ? typeof task.metadata === 'string'
           ? JSON.parse(task.metadata)
           : task.metadata
+        : undefined,
+      executionContext: (task as unknown as Record<string, unknown>).executionContext
+        ? typeof (task as unknown as Record<string, unknown>).executionContext === 'string'
+          ? JSON.parse((task as unknown as Record<string, unknown>).executionContext as string)
+          : (task as unknown as Record<string, unknown>).executionContext
         : undefined,
       createdAt: new Date(task.created_at),
       updatedAt: new Date(task.updated_at),

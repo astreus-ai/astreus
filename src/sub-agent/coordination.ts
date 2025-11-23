@@ -182,8 +182,8 @@ export class SubAgentCoordinator {
    */
   private sortTasksByDependencies(tasks: SubAgentTask[]): SubAgentTask[] {
     const sorted: SubAgentTask[] = [];
-    const visited = new Set<number>();
-    const visiting = new Set<number>();
+    const visited = new Set<string>(); // UUID strings
+    const visiting = new Set<string>(); // UUID strings
 
     const visit = (task: SubAgentTask) => {
       if (visiting.has(task.agentId)) {

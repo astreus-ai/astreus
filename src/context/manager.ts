@@ -24,7 +24,7 @@ export class ContextManager implements IContextManager {
   private maxTokens: number;
   private autoCompress: boolean;
   private model: string;
-  private agentId: number | null = null;
+  private agentId: string | null = null;
   private isDirty: boolean = false; // Track if context needs saving
 
   constructor(options: ContextCompressorOptions & { autoCompress?: boolean } = {}) {
@@ -45,7 +45,7 @@ export class ContextManager implements IContextManager {
   /**
    * Initialize storage and load context for a specific agent
    */
-  async initializeForAgent(agentId: number): Promise<void> {
+  async initializeForAgent(agentId: string): Promise<void> {
     this.agentId = agentId;
 
     try {
@@ -402,7 +402,7 @@ Return only valid JSON.`;
     memoryModule: {
       listMemories: (options: { limit: number; orderBy: string; order: string }) => Promise<
         Array<{
-          id: number;
+          id: string; // UUID
           content: string;
           created_at: string;
           metadata?: MetadataObject;
@@ -466,7 +466,7 @@ Return only valid JSON.`;
     addMemory: (
       content: string,
       metadata?: MetadataObject
-    ) => Promise<{ id: number; content: string }>;
+    ) => Promise<{ id: string; content: string }>; // UUID
   }): Promise<void> {
     try {
       // Save only new messages that are not in memory

@@ -211,7 +211,7 @@ export class EncryptionService {
   async decryptJSON(
     value: string | null,
     fieldName: string
-  ): Promise<Record<string, string | number | boolean | null> | null> {
+  ): Promise<string | Record<string, unknown> | null> {
     if (!value) return null;
 
     const decrypted = await this.decrypt(value, fieldName);
@@ -271,6 +271,15 @@ export function getEncryptionService(): EncryptionService {
   if (!encryptionService || hasConfigChanged(currentConfig)) {
     encryptionService = new EncryptionService(currentConfig);
     cachedConfig = currentConfig;
+
+    // Log encryption status with color
+    const status = currentConfig.enabled
+      ? '\x1b[32m🔒 ENABLED\x1b[0m'
+      : '\x1b[33m🔓 DISABLED\x1b[0m';
+    const keyStatus = currentConfig.masterKey
+      ? `(key: \x1b[90m${currentConfig.masterKey.substring(0, 8)}...\x1b[0m)`
+      : '\x1b[31m(no key)\x1b[0m';
+    console.log(`\x1b[36mAstreus [System] Encryption\x1b[0m → ${status} ${keyStatus}`);
   }
 
   return encryptionService;

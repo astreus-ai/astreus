@@ -19,8 +19,8 @@ interface KnowledgeSearchResult {
 }
 
 interface KnowledgeDocument {
-  id: number;
-  agent_id: number;
+  id: string; // UUID
+  agent_id: string; // UUID
   title: string | null;
   content: string;
   file_type: string | null;
@@ -33,9 +33,9 @@ interface KnowledgeDocument {
 }
 
 interface KnowledgeChunk {
-  id: number;
-  document_id: number;
-  agent_id: number;
+  id: string; // UUID
+  document_id: string; // UUID
+  agent_id: string; // UUID
   content: string;
   token_count: number;
   chunk_index: number;
@@ -177,14 +177,15 @@ export class KnowledgeDatabase {
 
     const client = await this.pool.connect();
     try {
-      // Enable vector extension
+      // Enable vector and UUID extensions
       await client.query('CREATE EXTENSION IF NOT EXISTS vector');
+      await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
 
       // Create documents table
       await client.query(`
         CREATE TABLE IF NOT EXISTS knowledge_documents (
-          id SERIAL PRIMARY KEY,
-          agent_id INTEGER NOT NULL,
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          agent_id UUID NOT NULL,
           title VARCHAR(255),
           content TEXT NOT NULL,
           file_type VARCHAR(20),
@@ -244,9 +245,9 @@ export class KnowledgeDatabase {
             await client.query('DROP TABLE knowledge_chunks CASCADE');
             await client.query(`
               CREATE TABLE knowledge_chunks (
-                id SERIAL PRIMARY KEY,
-                document_id INTEGER NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
-                agent_id INTEGER NOT NULL,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                document_id UUID NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+                agent_id UUID NOT NULL,
                 content TEXT NOT NULL,
                 token_count INTEGER,
                 chunk_index INTEGER,
@@ -264,9 +265,9 @@ export class KnowledgeDatabase {
         // Create new table with correct dimensions
         await client.query(`
           CREATE TABLE knowledge_chunks (
-            id SERIAL PRIMARY KEY,
-            document_id INTEGER NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
-            agent_id INTEGER NOT NULL,
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            document_id UUID NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+            agent_id UUID NOT NULL,
             content TEXT NOT NULL,
             token_count INTEGER,
             chunk_index INTEGER,
@@ -342,13 +343,14 @@ export class KnowledgeDatabase {
   }
 
   async addDocument(
-    agentId: number,
+    agentId: string, // UUID
     title: string,
     content: string,
     fileType?: string,
     fileSize?: number,
     metadata?: MetadataObject
-  ): Promise<number> {
+  ): Promise<string> {
+    // Returns UUID
     const client = await this.pool.connect();
     try {
       const tokenCount = countTokens(content);
@@ -396,13 +398,14 @@ export class KnowledgeDatabase {
   }
 
   async addChunk(
-    documentId: number,
-    agentId: number,
+    documentId: string, // UUID
+    agentId: string, // UUID
     content: string,
     embedding: number[],
     chunkIndex: number,
     metadata?: MetadataObject
-  ): Promise<number> {
+  ): Promise<string> {
+    // Returns UUID
     // Check dimension compatibility
     if (this.tableDimensions && embedding.length !== this.tableDimensions) {
       throw new Error(
@@ -467,7 +470,7 @@ export class KnowledgeDatabase {
   }
 
   async searchKnowledge(
-    agentId: number,
+    agentId: string, // UUID
     embedding: number[],
     limit: number = 10,
     threshold: number = 0.7
@@ -541,7 +544,8 @@ export class KnowledgeDatabase {
     }
   }
 
-  async getDocuments(agentId: number): Promise<KnowledgeDocument[]> {
+  async getDocuments(agentId: string): Promise<KnowledgeDocument[]> {
+    // UUID
     const client = await this.pool.connect();
     try {
       const result = await client.query(
@@ -573,7 +577,8 @@ export class KnowledgeDatabase {
     }
   }
 
-  async getDocumentChunks(documentId: number): Promise<KnowledgeChunk[]> {
+  async getDocumentChunks(documentId: string): Promise<KnowledgeChunk[]> {
+    // UUID
     const client = await this.pool.connect();
     try {
       const result = await client.query(
@@ -605,7 +610,8 @@ export class KnowledgeDatabase {
     }
   }
 
-  async deleteDocument(documentId: number): Promise<boolean> {
+  async deleteDocument(documentId: string): Promise<boolean> {
+    // UUID
     const client = await this.pool.connect();
     try {
       const result = await client.query(`DELETE FROM knowledge_documents WHERE id = $1`, [
@@ -617,7 +623,8 @@ export class KnowledgeDatabase {
     }
   }
 
-  async deleteChunk(chunkId: number): Promise<boolean> {
+  async deleteChunk(chunkId: string): Promise<boolean> {
+    // UUID
     const client = await this.pool.connect();
     try {
       const result = await client.query(`DELETE FROM knowledge_chunks WHERE id = $1`, [chunkId]);
@@ -627,7 +634,8 @@ export class KnowledgeDatabase {
     }
   }
 
-  async clearAgentKnowledge(agentId: number): Promise<void> {
+  async clearAgentKnowledge(agentId: string): Promise<void> {
+    // UUID
     const client = await this.pool.connect();
     try {
       await client.query(`DELETE FROM knowledge_documents WHERE agent_id = $1`, [agentId]);
@@ -637,7 +645,7 @@ export class KnowledgeDatabase {
   }
 
   async expandKnowledgeContext(
-    documentId: number,
+    documentId: string, // UUID
     chunkIndex: number,
     expandBefore: number = 1,
     expandAfter: number = 1

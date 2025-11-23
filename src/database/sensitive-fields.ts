@@ -13,7 +13,7 @@ export const SENSITIVE_FIELDS: Record<string, string[]> = {
   tasks: ['prompt', 'response', 'metadata'],
 
   // Knowledge system document fields
-  knowledge_documents: ['content', 'title', 'metadata', 'file_path'],
+  knowledge_documents: ['content', 'title', 'file_path', 'metadata'],
 
   // Knowledge system chunk fields
   knowledge_chunks: ['content', 'metadata'],

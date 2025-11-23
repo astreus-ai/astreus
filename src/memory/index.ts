@@ -9,8 +9,8 @@ import { getEncryptionService } from '../database/encryption';
 import { getLLM } from '../llm';
 
 interface MemoryDbRow {
-  id: number;
-  agentId: number;
+  id: string; // UUID
+  agentId: string; // UUID
   content: string;
   embedding: string | null;
   metadata: string | null;
@@ -153,7 +153,11 @@ export class Memory implements IAgentModule {
   /**
    * Add a memory
    */
-  async addMemory(content: string, metadata?: MetadataObject): Promise<MemoryType> {
+  async addMemory(
+    content: string,
+    metadata?: MetadataObject,
+    context?: { graphId?: number; taskId?: number; sessionId?: string }
+  ): Promise<MemoryType> {
     // User-facing info log
     const memoryType = metadata?.type || 'general';
     this.logger.info(`Adding new ${memoryType} memory`);
@@ -161,6 +165,9 @@ export class Memory implements IAgentModule {
     this.logger.debug('Adding memory', {
       contentLength: content.length,
       agentId: this.agent.id,
+      graphId: context?.graphId || 'none',
+      taskId: context?.taskId || 'none',
+      sessionId: context?.sessionId || 'none',
       contentPreview: content.slice(0, 100) + '...',
       type: metadata?.type ? String(metadata.type) : 'general',
       hasMetadata: !!metadata,
@@ -175,6 +182,9 @@ export class Memory implements IAgentModule {
     // Prepare data for encryption
     const insertData = {
       agentId: this.agent.id,
+      graphId: context?.graphId || null, // Graph relationship
+      taskId: context?.taskId || null, // Task relationship
+      sessionId: context?.sessionId || null, // Session ID
       content,
       embedding: embedding ? JSON.stringify(embedding) : null,
       metadata: metadata ? JSON.stringify(metadata) : null,
@@ -212,7 +222,7 @@ export class Memory implements IAgentModule {
   /**
    * Get a memory by ID
    */
-  async getMemory(id: number): Promise<MemoryType | null> {
+  async getMemory(id: string): Promise<MemoryType | null> {
     await this.ensureDatabase();
     const tableName = 'memories';
 
@@ -350,6 +360,9 @@ export class Memory implements IAgentModule {
 
     this.logger.debug('Listing memories', {
       ...(options?.limit && { limit: options.limit }),
+      ...(options?.graphId && { graphId: options.graphId }),
+      ...(options?.taskId && { taskId: options.taskId }),
+      ...(options?.sessionId && { sessionId: options.sessionId }),
       ...(options?.orderBy && { orderBy: options.orderBy }),
       ...(options?.startDate && { startDate: options.startDate }),
       ...(options?.endDate && { endDate: options.endDate }),
@@ -367,6 +380,18 @@ export class Memory implements IAgentModule {
       .orderBy('created_at', 'desc')
       .limit(limit)
       .offset(offset);
+
+    if (options?.graphId !== undefined) {
+      query = query.andWhere({ graphId: options.graphId });
+    }
+
+    if (options?.taskId !== undefined) {
+      query = query.andWhere({ taskId: options.taskId });
+    }
+
+    if (options?.sessionId) {
+      query = query.andWhere({ sessionId: options.sessionId });
+    }
 
     if (options?.startDate) {
       query = query.where('created_at', '>=', options.startDate);
@@ -404,7 +429,7 @@ export class Memory implements IAgentModule {
    * Update a memory
    */
   async updateMemory(
-    id: number,
+    id: string,
     updates: { content?: string; metadata?: MetadataObject }
   ): Promise<MemoryType | null> {
     await this.ensureDatabase();
@@ -448,7 +473,7 @@ export class Memory implements IAgentModule {
   /**
    * Delete a memory
    */
-  async deleteMemory(id: number): Promise<boolean> {
+  async deleteMemory(id: string): Promise<boolean> {
     this.logger.info(`Deleting memory: ${id}`);
 
     await this.ensureDatabase();
@@ -594,7 +619,7 @@ export class Memory implements IAgentModule {
   /**
    * Generate embedding for a specific memory
    */
-  async generateEmbeddingForMemory(memoryId: number): Promise<{
+  async generateEmbeddingForMemory(memoryId: string): Promise<{
     success: boolean;
     message: string;
     embedding?: number[];
@@ -720,6 +745,9 @@ export class Memory implements IAgentModule {
     return {
       id: memory.id,
       agentId: memory.agentId,
+      graphId: (memory as unknown as Record<string, unknown>).graphId as string | undefined,
+      taskId: (memory as unknown as Record<string, unknown>).taskId as string | undefined,
+      sessionId: (memory as unknown as Record<string, unknown>).sessionId as string | undefined,
       content: memory.content,
       embedding: memory.embedding
         ? typeof memory.embedding === 'string'
