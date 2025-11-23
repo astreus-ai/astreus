@@ -35,8 +35,8 @@ export interface ToolHandler {
 }
 
 export interface ToolContext {
-  agentId: number;
-  taskId?: number;
+  agentId: string; // UUID
+  taskId?: string; // UUID
   agent?: {
     hasKnowledge(): boolean;
     searchKnowledge?(
@@ -51,7 +51,7 @@ export interface ToolContext {
       }>
     >;
     expandKnowledgeContext?(
-      documentId: number,
+      documentId: string, // UUID
       chunkIndex: number,
       expandBefore?: number,
       expandAfter?: number

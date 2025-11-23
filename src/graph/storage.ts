@@ -2,14 +2,19 @@ import { Knex } from 'knex';
 import { getDatabase } from '../database/index';
 import { Graph, GraphNode, GraphEdge } from './types';
 import { encryptSensitiveFields, decryptSensitiveFields } from '../database/utils';
+import { Logger } from '../logger/types';
+import { getLogger } from '../logger';
+import { MetadataObject } from '../types';
 
 export class GraphStorage {
   private knex: Knex;
+  private logger: Logger;
   private initialized: boolean = false;
 
   constructor() {
     // Note: knex will be initialized in initialize() method
     this.knex = null!; // Will be initialized in initialize()
+    this.logger = getLogger();
   }
 
   private async initialize(): Promise<void> {
@@ -25,17 +30,23 @@ export class GraphStorage {
   }
 
   private async createTables(): Promise<void> {
+    // Enable UUID extension for PostgreSQL
+    if (process.env.DATABASE_URL?.includes('postgres')) {
+      await this.knex.raw('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+    }
+
     // Create graphs table
     const hasGraphsTable = await this.knex.schema.hasTable('graphs');
     if (!hasGraphsTable) {
       await this.knex.schema.createTable('graphs', (table) => {
-        table.increments('id').primary();
+        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
         table.string('name').notNullable();
         table.text('description').nullable();
-        table.integer('defaultAgentId').nullable();
+        table.uuid('defaultAgentId').nullable();
         table.integer('maxConcurrency').defaultTo(1);
         table.integer('timeout').nullable();
         table.integer('retryAttempts').defaultTo(0);
+        table.boolean('autoLink').defaultTo(false);
         table.json('metadata').nullable();
         table.enu('status', ['idle', 'running', 'completed', 'failed', 'paused']).defaultTo('idle');
         table.timestamp('startedAt').nullable();
@@ -50,51 +61,76 @@ export class GraphStorage {
     const hasNodesTable = await this.knex.schema.hasTable('graph_nodes');
     if (!hasNodesTable) {
       await this.knex.schema.createTable('graph_nodes', (table) => {
-        table.increments('id').primary();
-        table
-          .integer('graphId')
-          .notNullable()
-          .references('id')
-          .inTable('graphs')
-          .onDelete('CASCADE');
-        table.string('nodeId').notNullable();
+        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
+        table.uuid('graphId').notNullable().references('id').inTable('graphs').onDelete('CASCADE');
+        table.string('nodeId').notNullable(); // Internal node ID string (e.g., "node_1_abc")
         table.enu('type', ['agent', 'task']).notNullable();
         table.string('name').notNullable();
         table.text('description').nullable();
-        table.integer('agentId').nullable();
+        table.uuid('agentId').nullable();
         table.text('prompt').nullable();
         table.string('model').nullable();
         table.boolean('stream').defaultTo(false);
+        table.uuid('taskId').nullable(); // Task ID created during execution
         table
-          .enu('status', ['pending', 'running', 'completed', 'failed', 'skipped'])
+          .enu('status', ['pending', 'running', 'completed', 'failed', 'skipped', 'scheduled'])
           .defaultTo('pending');
         table.integer('priority').defaultTo(0);
         table.json('dependencies').nullable();
-        table.json('result').nullable();
+        table.text('result').nullable(); // TEXT - stores encrypted string
         table.text('error').nullable();
-        table.json('metadata').nullable();
+        table.json('metadata').nullable(); // JSONB - stores actual JSON data
         table.timestamps(true, true);
         table.index(['graphId']);
         table.index(['nodeId']);
+        table.index(['taskId']);
         table.index(['type']);
         table.index(['status']);
+        table.index(['graphId', 'status']); // Composite index for graph execution tracking
+        table.index(['graphId', 'priority']); // Composite index for priority queue
       });
+    } else {
+      // Check and add task relationship column
+      const hasTaskId = await this.knex.schema.hasColumn('graph_nodes', 'taskId');
+
+      if (!hasTaskId) {
+        await this.knex.schema.alterTable('graph_nodes', (table) => {
+          table.bigInteger('taskId').nullable();
+        });
+
+        // Add indexes
+        await this.knex.schema.alterTable('graph_nodes', (table) => {
+          table.index('taskId');
+          table.index(['graphId', 'status']); // Composite index for graph execution tracking
+          table.index(['graphId', 'priority']); // Composite index for priority queue
+        });
+      }
+
+      // Fix result column type (from JSONB to TEXT for encrypted data)
+      await this.knex.raw(`
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'graph_nodes'
+            AND column_name = 'result'
+            AND data_type = 'jsonb'
+          ) THEN
+            ALTER TABLE graph_nodes ALTER COLUMN result TYPE TEXT USING result::TEXT;
+          END IF;
+        END $$;
+      `);
     }
 
     // Create graph_edges table
     const hasEdgesTable = await this.knex.schema.hasTable('graph_edges');
     if (!hasEdgesTable) {
       await this.knex.schema.createTable('graph_edges', (table) => {
-        table.increments('id').primary();
-        table
-          .integer('graphId')
-          .notNullable()
-          .references('id')
-          .inTable('graphs')
-          .onDelete('CASCADE');
-        table.string('edgeId').notNullable();
-        table.string('fromNodeId').notNullable();
-        table.string('toNodeId').notNullable();
+        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
+        table.uuid('graphId').notNullable().references('id').inTable('graphs').onDelete('CASCADE');
+        table.string('edgeId').notNullable(); // Internal edge ID string (e.g., "edge_1_abc")
+        table.string('fromNodeId').notNullable(); // Internal node ID
+        table.string('toNodeId').notNullable(); // Internal node ID
         table.string('condition').nullable();
         table.json('metadata').nullable();
         table.timestamps(true, true);
@@ -104,27 +140,32 @@ export class GraphStorage {
     }
   }
 
-  async saveGraph(graph: Graph): Promise<number> {
+  async saveGraph(graph: Graph): Promise<string> {
     await this.initialize();
 
     // Prepare and encrypt graph data
     const graphData = {
       name: graph.config.name,
       description: graph.config.description,
+      defaultAgentId: graph.defaultAgentId || null, // Save default agent ID
       maxConcurrency: graph.config.maxConcurrency,
       timeout: graph.config.timeout,
       retryAttempts: graph.config.retryAttempts,
+      autoLink: graph.config.autoLink || false,
       metadata: graph.config.metadata ? JSON.stringify(graph.config.metadata) : null,
       status: graph.status,
       startedAt: graph.startedAt,
       completedAt: graph.completedAt,
     };
 
-    const encryptedGraphData = await encryptSensitiveFields(graphData, 'graphs');
+    const encryptedGraphData = await encryptSensitiveFields(
+      graphData as Record<string, string | number | boolean | null | undefined | Date>,
+      'graphs'
+    );
 
     const [savedGraph] = await this.knex('graphs').insert(encryptedGraphData).returning('id');
 
-    const graphId = savedGraph.id || savedGraph;
+    const graphId = savedGraph.id || savedGraph; // UUID string
 
     // Save nodes with encryption
     for (const node of graph.nodes) {
@@ -138,15 +179,20 @@ export class GraphStorage {
         prompt: node.prompt,
         model: node.model,
         stream: node.stream,
+        taskId: node.taskId, // Task ID created during execution
         status: node.status,
         priority: node.priority,
         dependencies: JSON.stringify(node.dependencies),
-        result: node.result ? JSON.stringify(node.result) : null,
+        result: node.result || null, // TEXT field - store as-is, no JSON.stringify
         error: node.error,
         metadata: node.metadata ? JSON.stringify(node.metadata) : null,
       };
 
-      const encryptedNodeData = await encryptSensitiveFields(nodeData, 'graph_nodes');
+      const encryptedNodeData = await encryptSensitiveFields(
+        nodeData as Record<string, string | number | boolean | null | undefined | Date>,
+        'graph_nodes'
+      );
+      // No need to stringify - prompt/result are TEXT, metadata is handled in encryptSensitiveFields
       await this.knex('graph_nodes').insert(encryptedNodeData);
     }
 
@@ -155,20 +201,24 @@ export class GraphStorage {
       const edgeData = {
         graphId,
         edgeId: edge.id,
-        fromNodeId: edge.fromNodeId,
-        toNodeId: edge.toNodeId,
+        fromNode: edge.fromNodeId,
+        toNode: edge.toNodeId,
         condition: edge.condition,
         metadata: edge.metadata ? JSON.stringify(edge.metadata) : null,
       };
 
-      const encryptedEdgeData = await encryptSensitiveFields(edgeData, 'graph_edges');
+      const encryptedEdgeData = await encryptSensitiveFields(
+        edgeData as Record<string, string | number | boolean | null | undefined | Date>,
+        'graph_edges'
+      );
+      // metadata is handled in encryptSensitiveFields
       await this.knex('graph_edges').insert(encryptedEdgeData);
     }
 
     return graphId;
   }
 
-  async loadGraph(graphId: number): Promise<Graph | null> {
+  async loadGraph(graphId: string): Promise<Graph | null> {
     await this.initialize();
     // Load graph config
     const graphData = await this.knex('graphs').where({ id: graphId }).first();
@@ -195,18 +245,31 @@ export class GraphStorage {
           type: decryptedNode.type as 'agent' | 'task',
           name: decryptedNode.name as string,
           description: decryptedNode.description as string | undefined,
-          agentId: decryptedNode.agentId as number | undefined,
+          agentId: decryptedNode.agentId as string | undefined,
           prompt: decryptedNode.prompt as string | undefined,
           model: decryptedNode.model as string | undefined,
           stream: decryptedNode.stream as boolean | undefined,
+          taskId: decryptedNode.taskId as string | undefined, // Task ID from execution
           status: decryptedNode.status as GraphNode['status'],
           priority: decryptedNode.priority as number,
-          dependencies: JSON.parse((decryptedNode.dependencies as string) || '[]'),
-          result: decryptedNode.result ? JSON.parse(decryptedNode.result as string) : undefined,
+          dependencies: (() => {
+            if (!decryptedNode.dependencies) return [];
+            // If already parsed by DB driver (PostgreSQL/Knex behavior)
+            if (typeof decryptedNode.dependencies === 'object') {
+              return decryptedNode.dependencies;
+            }
+            // If string, parse it
+            if (
+              typeof decryptedNode.dependencies === 'string' &&
+              decryptedNode.dependencies !== ''
+            ) {
+              return JSON.parse(decryptedNode.dependencies);
+            }
+            return [];
+          })(),
+          result: decryptedNode.result as string | undefined, // TEXT field - no JSON parse needed
           error: decryptedNode.error as string | undefined,
-          metadata: decryptedNode.metadata
-            ? JSON.parse(decryptedNode.metadata as string)
-            : undefined,
+          metadata: (decryptedNode.metadata as unknown as MetadataObject) || undefined, // Already parsed by decryptSensitiveFields
           createdAt: new Date(node.created_at),
           updatedAt: new Date(node.updated_at),
         };
@@ -219,12 +282,10 @@ export class GraphStorage {
         const decryptedEdge = await decryptSensitiveFields(edge, 'graph_edges');
         return {
           id: decryptedEdge.edgeId as string,
-          fromNodeId: decryptedEdge.fromNodeId as string,
-          toNodeId: decryptedEdge.toNodeId as string,
+          fromNodeId: decryptedEdge.fromNode as string,
+          toNodeId: decryptedEdge.toNode as string,
           condition: decryptedEdge.condition as string | undefined,
-          metadata: decryptedEdge.metadata
-            ? JSON.parse(decryptedEdge.metadata as string)
-            : undefined,
+          metadata: (decryptedEdge.metadata as unknown as MetadataObject) || undefined, // Already parsed by decryptSensitiveFields
           createdAt: new Date(),
           updatedAt: new Date(),
         };
@@ -233,6 +294,7 @@ export class GraphStorage {
 
     const graph: Graph = {
       id: graphId,
+      defaultAgentId: decryptedGraphData.defaultAgentId as string | undefined, // Load default agent ID
       config: {
         id: graphId,
         name: decryptedGraphData.name as string,
@@ -240,9 +302,8 @@ export class GraphStorage {
         maxConcurrency: decryptedGraphData.maxConcurrency as number | undefined,
         timeout: decryptedGraphData.timeout as number | undefined,
         retryAttempts: decryptedGraphData.retryAttempts as number | undefined,
-        metadata: decryptedGraphData.metadata
-          ? JSON.parse(decryptedGraphData.metadata as string)
-          : undefined,
+        autoLink: decryptedGraphData.autoLink as boolean | undefined,
+        metadata: (decryptedGraphData.metadata as unknown as MetadataObject) || undefined, // Already parsed by decryptSensitiveFields
       },
       nodes,
       edges,
@@ -261,8 +322,12 @@ export class GraphStorage {
     return graph;
   }
 
-  async updateGraph(graphId: number, graph: Graph): Promise<void> {
+  async updateGraph(graphId: string, graph: Graph): Promise<void> {
     await this.initialize();
+
+    this.logger.debug(
+      `Updating graph ${graphId} with ${graph.nodes.length} nodes and ${graph.edges.length} edges`
+    );
 
     // Prepare and encrypt graph update data
     const graphUpdateData = {
@@ -271,32 +336,110 @@ export class GraphStorage {
       completedAt: graph.completedAt,
     };
 
-    const encryptedGraphUpdate = await encryptSensitiveFields(graphUpdateData, 'graphs');
+    const encryptedGraphUpdate = await encryptSensitiveFields(
+      graphUpdateData as Record<string, string | number | boolean | null | undefined | Date>,
+      'graphs'
+    );
     await this.knex('graphs').where({ id: graphId }).update(encryptedGraphUpdate);
 
-    // Update nodes with encryption
+    // Update or insert nodes with encryption
     for (const node of graph.nodes) {
-      const nodeUpdateData = {
-        status: node.status,
-        result: node.result ? JSON.stringify(node.result) : null,
-        error: node.error,
-      };
-
-      const encryptedNodeUpdate = await encryptSensitiveFields(nodeUpdateData, 'graph_nodes');
-      await this.knex('graph_nodes')
+      // Check if node exists
+      const existingNode = await this.knex('graph_nodes')
         .where({ graphId, nodeId: node.id })
-        .update(encryptedNodeUpdate);
+        .first();
+
+      if (existingNode) {
+        // Update existing node
+        this.logger.debug(`Updating existing node ${node.id} in graph ${graphId}`);
+        const nodeUpdateData = {
+          status: node.status,
+          taskId: node.taskId,
+          result: node.result || null, // TEXT field - store as-is
+          error: node.error,
+        };
+
+        const encryptedNodeUpdate = await encryptSensitiveFields(
+          nodeUpdateData as Record<string, string | number | boolean | null | undefined | Date>,
+          'graph_nodes'
+        );
+        await this.knex('graph_nodes')
+          .where({ graphId, nodeId: node.id })
+          .update(encryptedNodeUpdate);
+      } else {
+        // Insert new node
+        this.logger.debug(`Inserting new node ${node.id} into graph ${graphId}`);
+        const nodeData = {
+          graphId,
+          nodeId: node.id,
+          type: node.type,
+          name: node.name,
+          description: node.description,
+          agentId: node.agentId,
+          prompt: node.prompt,
+          model: node.model,
+          stream: node.stream,
+          taskId: node.taskId,
+          status: node.status,
+          priority: node.priority,
+          dependencies: JSON.stringify(node.dependencies),
+          result: node.result || null, // TEXT field - store as-is
+          error: node.error,
+          metadata: node.metadata ? JSON.stringify(node.metadata) : null,
+        };
+
+        const encryptedNodeData = await encryptSensitiveFields(
+          nodeData as Record<string, string | number | boolean | null | undefined | Date>,
+          'graph_nodes'
+        );
+        // No need to stringify - prompt/result are TEXT, metadata is handled in encryptSensitiveFields
+        await this.knex('graph_nodes').insert(encryptedNodeData);
+        this.logger.debug(`Node ${node.id} inserted successfully`);
+      }
     }
+
+    // Update or insert edges with encryption
+    for (const edge of graph.edges) {
+      // Check if edge exists
+      const existingEdge = await this.knex('graph_edges')
+        .where({ graphId, edgeId: edge.id })
+        .first();
+
+      if (!existingEdge) {
+        // Insert new edge
+        this.logger.debug(
+          `Inserting new edge ${edge.id} into graph ${graphId} (${edge.fromNodeId} → ${edge.toNodeId})`
+        );
+        const edgeData = {
+          graphId,
+          edgeId: edge.id,
+          fromNode: edge.fromNodeId,
+          toNode: edge.toNodeId,
+          condition: edge.condition,
+          metadata: edge.metadata ? JSON.stringify(edge.metadata) : null,
+        };
+
+        const encryptedEdgeData = await encryptSensitiveFields(
+          edgeData as Record<string, string | number | boolean | null | undefined | Date>,
+          'graph_edges'
+        );
+        // metadata is handled in encryptSensitiveFields
+        await this.knex('graph_edges').insert(encryptedEdgeData);
+        this.logger.debug(`Edge ${edge.id} inserted successfully`);
+      }
+    }
+
+    this.logger.debug(`Graph ${graphId} update completed`);
   }
 
-  async deleteGraph(graphId: number): Promise<boolean> {
+  async deleteGraph(graphId: string): Promise<boolean> {
     await this.initialize();
     const deleted = await this.knex('graphs').where({ id: graphId }).delete();
 
     return deleted > 0;
   }
 
-  async listGraphs(): Promise<{ id: number; name: string; status: string; createdAt: Date }[]> {
+  async listGraphs(): Promise<{ id: string; name: string; status: string; createdAt: Date }[]> {
     await this.initialize();
     const graphs = await this.knex('graphs')
       .select('id', 'name', 'status', 'created_at')

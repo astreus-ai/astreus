@@ -79,6 +79,11 @@ export interface LLMStreamChunk {
   done: boolean;
   model: string;
   toolCalls?: ToolCall[];
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
 }
 
 export interface VisionAnalysisOptions {

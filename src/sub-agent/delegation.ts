@@ -142,10 +142,10 @@ Example response:
 
       // Convert to SubAgentTask format and validate
       const tasks: SubAgentTask[] = delegationResult.tasks
-        .filter((task: { agentId: number; task: string; priority?: number }) => {
+        .filter((task: { agentId: string; task: string; priority?: number }) => {
           // Validate each task
           const hasValidAgentId =
-            typeof task.agentId === 'number' &&
+            typeof task.agentId === 'string' &&
             subAgents.some((agent) => agent.id === task.agentId);
           const hasValidTask = typeof task.task === 'string' && task.task.trim().length > 0;
 
@@ -201,8 +201,8 @@ export class ManualDelegationStrategy implements DelegationStrategy {
     }
 
     // Create tasks based on manual assignment
-    for (const [agentIdStr, task] of Object.entries(options.taskAssignment)) {
-      const agentId = parseInt(agentIdStr);
+    for (const [agentId, task] of Object.entries(options.taskAssignment)) {
+      // agentId is already a UUID string, no need to parse
       const agent = subAgents.find((a) => a.id === agentId);
 
       if (!agent) {
@@ -210,7 +210,7 @@ export class ManualDelegationStrategy implements DelegationStrategy {
       }
 
       tasks.push({
-        agentId,
+        agentId, // UUID string
         task,
         priority: 5, // Default priority for manual tasks
       });

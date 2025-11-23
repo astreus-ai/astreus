@@ -18,17 +18,17 @@ export interface SubAgentRunOptions extends RunOptions {
  * Sub-agent task assignment
  */
 export interface SubAgentTask {
-  agentId: number;
+  agentId: string; // UUID
   task: string;
   priority?: number;
-  dependencies?: number[]; // Other agent IDs this task depends on
+  dependencies?: string[]; // Other agent UUIDs this task depends on
 }
 
 /**
  * Sub-agent execution result
  */
 export interface SubAgentResult {
-  agentId: number;
+  agentId: string; // UUID
   agentName: string;
   task: string;
   result: string;

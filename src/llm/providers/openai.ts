@@ -213,18 +213,50 @@ export class OpenAIProvider implements LLMProvider {
   async *generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const messages = this.prepareMessages(options);
 
-    const stream = await this.client.chat.completions.create({
-      model: options.model,
-      messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 4096,
-      stream: true,
-      ...(options.tools &&
-        options.tools.length > 0 && {
-          tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
-          tool_choice: 'auto',
+    let stream;
+    try {
+      stream = await this.client.chat.completions.create({
+        model: options.model,
+        messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+        temperature: options.temperature ?? 0.7,
+        max_tokens: options.maxTokens ?? 4096,
+        stream: true,
+        stream_options: { include_usage: true }, // Enable usage tracking in streaming
+        ...(options.tools &&
+          options.tools.length > 0 && {
+            tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
+            tool_choice: 'auto',
+          }),
+      });
+    } catch (error: unknown) {
+      // Log full error details including OpenAI API response
+      const errorObj = error as Record<string, unknown>;
+      console.error('❌ OPENAI API ERROR:', {
+        model: options.model,
+        messageCount: messages.length,
+        errorMessage: errorObj?.message || 'Unknown error',
+        errorType: errorObj?.constructor?.name || 'Unknown',
+        status: errorObj?.status || errorObj?.statusCode,
+        code: errorObj?.code,
+        type: errorObj?.type,
+        errorString: String(error),
+        // Log ALL messages for debugging
+        allMessages: messages.map((m) => {
+          const content = m.content || '';
+          const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
+          return {
+            role: m.role,
+            content: contentStr,
+            hasToolCalls: 'tool_calls' in m,
+            toolCalls: 'tool_calls' in m && m.tool_calls ? m.tool_calls : undefined,
+            tool_call_id: 'tool_call_id' in m ? m.tool_call_id : undefined,
+          };
         }),
-    });
+      });
+
+      this.logger.error('OpenAI API request failed: ' + (errorObj?.message || error));
+      throw error;
+    }
 
     const toolCalls: Array<{
       id: string;
@@ -232,10 +264,21 @@ export class OpenAIProvider implements LLMProvider {
       function: { name: string; arguments: string };
     }> = [];
 
+    let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined;
+
     try {
       for await (const chunk of stream) {
         const delta = chunk.choices?.[0]?.delta;
         const content = delta?.content || '';
+
+        // Capture usage from final chunk (OpenAI includes this when stream_options.include_usage is true)
+        if (chunk.usage) {
+          usage = {
+            promptTokens: chunk.usage.prompt_tokens,
+            completionTokens: chunk.usage.completion_tokens,
+            totalTokens: chunk.usage.total_tokens,
+          };
+        }
 
         // Handle tool calls in streaming
         if (delta?.tool_calls) {
@@ -264,7 +307,7 @@ export class OpenAIProvider implements LLMProvider {
         }
       }
 
-      // Final chunk with tool calls
+      // Final chunk with tool calls and usage
       yield {
         content: '',
         done: true,
@@ -283,11 +326,17 @@ export class OpenAIProvider implements LLMProvider {
                 },
               }))
             : undefined,
+        usage,
       };
     } catch (error) {
-      throw new Error(
-        `OpenAI streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      // Log full error details for debugging
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(
+        'OpenAI streaming error details',
+        new Error(`${errorMsg} - ${JSON.stringify(error, null, 2)}`)
       );
+
+      throw new Error(`OpenAI streaming error: ${errorMsg}`);
     }
   }
 

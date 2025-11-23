@@ -25,13 +25,13 @@ export type Constructor<T = object> = new (...args: never[]) => T;
  */
 export interface ITaskMethods {
   createTask(request: TaskRequest): Promise<Task>;
-  getTask(id: number): Promise<Task | null>;
+  getTask(id: string): Promise<Task | null>; // UUID
   listTasks(options?: TaskSearchOptions): Promise<Task[]>;
-  updateTask(id: number, updates: Partial<Task>): Promise<Task | null>;
-  deleteTask(id: number): Promise<boolean>;
+  updateTask(id: string, updates: Partial<Task>): Promise<Task | null>; // UUID
+  deleteTask(id: string): Promise<boolean>; // UUID
   clearTasks(): Promise<number>;
   executeTask(
-    taskId: number,
+    taskId: string, // UUID
     options?: { model?: string; stream?: boolean }
   ): Promise<TaskResponse>;
 }
@@ -41,19 +41,19 @@ export interface ITaskMethods {
  */
 export interface IMemoryMethods {
   addMemory(content: string, metadata?: MetadataObject): Promise<Memory>;
-  getMemory(id: number): Promise<Memory | null>;
+  getMemory(id: string): Promise<Memory | null>; // UUID
   searchMemories(query: string, options?: MemorySearchOptions): Promise<Memory[]>;
   listMemories(options?: MemorySearchOptions): Promise<Memory[]>;
   updateMemory(
-    id: number,
+    id: string, // UUID
     updates: { content?: string; metadata?: MetadataObject }
   ): Promise<Memory | null>;
-  deleteMemory(id: number): Promise<boolean>;
+  deleteMemory(id: string): Promise<boolean>; // UUID
   clearMemories(): Promise<number>;
   rememberConversation(content: string, role?: 'user' | 'assistant'): Promise<Memory>;
   searchMemoriesBySimilarity(query: string, options?: MemorySearchOptions): Promise<Memory[]>;
   generateEmbeddingForMemory(
-    memoryId: number
+    memoryId: string // UUID
   ): Promise<{ success: boolean; message: string; embedding?: number[] }>;
 }
 
@@ -61,21 +61,21 @@ export interface IMemoryMethods {
  * Knowledge module methods - bound when Knowledge module is available
  */
 export interface IKnowledgeMethods {
-  addKnowledge(content: string, title?: string, metadata?: MetadataObject): Promise<number>;
+  addKnowledge(content: string, title?: string, metadata?: MetadataObject): Promise<string>; // Returns UUID
   searchKnowledge(
     query: string,
     limit?: number,
     threshold?: number
   ): Promise<Array<{ content: string; metadata: MetadataObject; similarity: number }>>;
   getKnowledgeContext(query: string, limit?: number): Promise<string>;
-  getKnowledgeDocuments(): Promise<Array<{ id: number; title: string; created_at: string }>>;
-  deleteKnowledgeDocument(documentId: number): Promise<boolean>;
-  deleteKnowledgeChunk(chunkId: number): Promise<boolean>;
+  getKnowledgeDocuments(): Promise<Array<{ id: string; title: string; created_at: string }>>; // UUID
+  deleteKnowledgeDocument(documentId: string): Promise<boolean>; // UUID
+  deleteKnowledgeChunk(chunkId: string): Promise<boolean>; // UUID
   clearKnowledge(): Promise<void>;
   addKnowledgeFromFile(filePath: string, metadata?: MetadataObject): Promise<void>;
   addKnowledgeFromDirectory(dirPath: string, metadata?: MetadataObject): Promise<void>;
   expandKnowledgeContext(
-    documentId: number,
+    documentId: string, // UUID
     chunkIndex: number,
     expandBefore?: number,
     expandAfter?: number
@@ -156,7 +156,7 @@ export interface ISubAgentMethods {
  * Base interface that all agents must implement
  */
 export interface IAgent {
-  id: number;
+  id: string; // UUID
   name: string;
   config: AgentConfig;
   logger: Logger;
@@ -168,6 +168,9 @@ export interface IAgent {
   hasVision(): boolean;
   // Context methods (available on all agents)
   getContext(): ContextMessage[];
+  // Memory methods (when memory enabled)
+  addMemory?(content: string, metadata?: MetadataObject): Promise<Memory>;
+  loadGraphContext?(graphId: string, limit?: number, isolated?: boolean): Promise<void>;
 }
 
 /**
@@ -209,7 +212,7 @@ export interface AgentConfigInput {
  * Agent configuration (complete, from database)
  */
 export interface AgentConfig extends AgentConfigInput {
-  id: number;
+  id: string; // UUID
   memory: boolean;
   knowledge: boolean;
   vision: boolean;

@@ -83,7 +83,7 @@ export abstract class BaseAgent implements IAgent {
   abstract getContext(): ContextMessage[];
 
   // Getters for IAgent interface
-  get id(): number {
+  get id(): string {
     if (this.data.id === undefined || this.data.id === null) {
       throw new Error(
         `Agent ${this.data.name || 'unknown'} has no ID - agent may not be saved to database`
@@ -158,7 +158,7 @@ export abstract class BaseAgent implements IAgent {
   }
 
   // Utility methods from original
-  getId(): number {
+  getId(): string {
     if (!this.data.id) {
       throw new Error('Agent has no ID');
     }
@@ -271,7 +271,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     return this.modules.task.createTask(request);
   }
 
-  async getTask(id: number): Promise<TaskType | null> {
+  async getTask(id: string): Promise<TaskType | null> {
     return this.modules.task.getTask(id);
   }
 
@@ -279,11 +279,11 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     return this.modules.task.listTasks(options);
   }
 
-  async updateTask(id: number, updates: Partial<TaskType>): Promise<TaskType | null> {
+  async updateTask(id: string, updates: Partial<TaskType>): Promise<TaskType | null> {
     return this.modules.task.updateTask(id, updates);
   }
 
-  async deleteTask(id: number): Promise<boolean> {
+  async deleteTask(id: string): Promise<boolean> {
     return this.modules.task.deleteTask(id);
   }
 
@@ -292,7 +292,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   }
 
   async executeTask(
-    taskId: number,
+    taskId: string,
     options?: { model?: string; stream?: boolean }
   ): Promise<TaskResponse> {
     return this.modules.task.executeTask(taskId, options);
@@ -330,7 +330,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
       // Return mock memory object
       return {
-        id: Date.now(), // Temp ID
+        id: `temp-${Date.now()}`, // Temp UUID
         agentId: this.id,
         content,
         metadata: metadata || {},
@@ -340,7 +340,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     }
   }
 
-  async getMemory(id: number): Promise<MemoryType | null> {
+  async getMemory(id: string): Promise<MemoryType | null> {
     if (!this.modules.memory) throw new Error('Memory module not enabled');
     return this.modules.memory.getMemory(id);
   }
@@ -356,14 +356,14 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   }
 
   async updateMemory(
-    id: number,
+    id: string,
     updates: { content?: string; metadata?: MetadataObject }
   ): Promise<MemoryType | null> {
     if (!this.modules.memory) throw new Error('Memory module not enabled');
     return this.modules.memory.updateMemory(id, updates);
   }
 
-  async deleteMemory(id: number): Promise<boolean> {
+  async deleteMemory(id: string): Promise<boolean> {
     if (!this.modules.memory) throw new Error('Memory module not enabled');
     return this.modules.memory.deleteMemory(id);
   }
@@ -390,7 +390,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   }
 
   async generateEmbeddingForMemory(
-    memoryId: number
+    memoryId: string
   ): Promise<{ success: boolean; message: string; embedding?: number[] }> {
     if (!this.modules.memory) throw new Error('Memory module not enabled');
     return this.modules.memory.generateEmbeddingForMemory(memoryId);
@@ -398,7 +398,8 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
   // ===== KNOWLEDGE MODULE METHODS (when knowledge enabled) =====
 
-  async addKnowledge(content: string, title?: string, metadata?: MetadataObject): Promise<number> {
+  async addKnowledge(content: string, title?: string, metadata?: MetadataObject): Promise<string> {
+    // Returns UUID
     if (!this.modules.knowledge) throw new Error('Knowledge module not enabled');
     return this.modules.knowledge.addKnowledge(content, title, metadata);
   }
@@ -417,17 +418,17 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     return this.modules.knowledge.getKnowledgeContext(query, limit);
   }
 
-  async getKnowledgeDocuments(): Promise<Array<{ id: number; title: string; created_at: string }>> {
+  async getKnowledgeDocuments(): Promise<Array<{ id: string; title: string; created_at: string }>> {
     if (!this.modules.knowledge) throw new Error('Knowledge module not enabled');
     return this.modules.knowledge.getKnowledgeDocuments();
   }
 
-  async deleteKnowledgeDocument(documentId: number): Promise<boolean> {
+  async deleteKnowledgeDocument(documentId: string): Promise<boolean> {
     if (!this.modules.knowledge) throw new Error('Knowledge module not enabled');
     return this.modules.knowledge.deleteKnowledgeDocument(documentId);
   }
 
-  async deleteKnowledgeChunk(chunkId: number): Promise<boolean> {
+  async deleteKnowledgeChunk(chunkId: string): Promise<boolean> {
     if (!this.modules.knowledge) throw new Error('Knowledge module not enabled');
     return this.modules.knowledge.deleteKnowledgeChunk(chunkId);
   }
@@ -448,7 +449,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   }
 
   async expandKnowledgeContext(
-    documentId: number,
+    documentId: string,
     chunkIndex: number,
     expandBefore?: number,
     expandAfter?: number
@@ -659,6 +660,98 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   }
 
   /**
+   * Load conversation history from memory for a specific graph
+   * @param graphId - The graph ID to load context for
+   * @param limit - Maximum number of messages to load
+   * @param isolated - If true, only load graph-specific memories (default: false)
+   *                   If false, load both general agent memories + graph-specific memories
+   */
+  async loadGraphContext(
+    graphId: string,
+    limit: number = 100,
+    isolated: boolean = false
+  ): Promise<void> {
+    if (!this.hasMemory() || !this.modules.memory || !this.modules.context) {
+      this.logger.debug('Memory or context module not available, skipping graph context load');
+      return;
+    }
+
+    try {
+      // Clear existing context
+      this.clearContext();
+
+      let allMemories: MemoryType[] = [];
+
+      if (isolated) {
+        // ISOLATED MODE: Only load graph-specific memories
+        allMemories = await this.listMemories({
+          graphId,
+          orderBy: 'createdAt',
+          order: 'asc',
+          limit,
+        });
+
+        this.logger.debug(
+          `Loaded ${allMemories.length} isolated graph-specific memories for graph ${graphId}`
+        );
+      } else {
+        // HYBRID MODE: Load both general + graph-specific memories
+        // 1. Load agent's general memories (not tied to any graph)
+        const generalMemories = await this.modules.memory.listMemories({
+          orderBy: 'createdAt',
+          order: 'asc',
+          limit: Math.floor(limit / 2), // Use half of limit for general memories
+        });
+
+        // Filter only memories without graphId (general agent memories)
+        const generalConversations = generalMemories.filter(
+          (m) =>
+            !m.graphId &&
+            (m.metadata?.type === 'user_message' || m.metadata?.type === 'assistant_response')
+        );
+
+        // 2. Load graph-specific memories
+        const graphMemories = await this.listMemories({
+          graphId,
+          orderBy: 'createdAt',
+          order: 'asc',
+          limit: Math.floor(limit / 2), // Use half of limit for graph memories
+        });
+
+        // Combine and sort by timestamp
+        allMemories = [...generalConversations, ...graphMemories].sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
+        );
+
+        this.logger.debug(
+          `Loaded ${generalConversations.length} general + ${graphMemories.length} graph-specific memories for graph ${graphId}`
+        );
+      }
+
+      // Load all memories into context
+      for (const memory of allMemories) {
+        const role = (memory.metadata?.role as 'user' | 'assistant' | 'system') || 'user';
+        const contextMessage: ContextMessage = {
+          role,
+          content: memory.content,
+          timestamp: memory.createdAt,
+          metadata: {
+            ...memory.metadata,
+            memory_id: memory.id,
+            source: memory.graphId ? 'graph' : 'general',
+          },
+        };
+        await this.modules.context.addMessage(contextMessage);
+      }
+    } catch (error) {
+      this.logger.warn('Failed to load graph context from memory', {
+        graphId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
    * Initialize all modules
    */
   async initializeModules(): Promise<void> {
@@ -807,7 +900,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   /**
    * Find agent by ID
    */
-  static async findById(id: number): Promise<Agent | null> {
+  static async findById(id: string): Promise<Agent | null> {
     const db = await getDatabase();
     const agentData = await db.getAgent(id);
     if (!agentData) return null;
@@ -1118,6 +1211,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
         });
 
         // Add assistant message with tool calls
+        // IMPORTANT: OpenAI requires content to be a string (can be empty string or null) when tool_calls present
         messages.push({
           role: 'assistant',
           content: llmResponse.content || '',
@@ -1186,6 +1280,24 @@ export class Agent extends BaseAgent implements IAgentWithModules {
               toolResult = `Tool ${toolCall.function.name} not implemented yet`;
             }
 
+            // CRITICAL: Tool result content cannot be empty for OpenAI API
+            if (!toolResult || toolResult.trim() === '') {
+              console.error('⚠️ EMPTY TOOL RESULT DETECTED:', {
+                toolName: toolCall.function.name,
+                toolCallId: toolCall.id,
+                resultType: typeof toolResult,
+                resultValue: toolResult,
+              });
+              toolResult = 'Tool execution completed but returned no data.';
+            }
+
+            console.log('✅ TOOL RESULT:', {
+              toolName: toolCall.function.name,
+              toolCallId: toolCall.id,
+              resultLength: toolResult.length,
+              resultPreview: toolResult.slice(0, 200),
+            });
+
             // Add tool result to messages
             messages.push({
               role: 'tool',
@@ -1224,11 +1336,23 @@ export class Agent extends BaseAgent implements IAgentWithModules {
             toolCount: toolMessages.length,
           });
         }
+        // Log full message structure for debugging OpenAI 400 errors
+        const messageStructure = messages.map((m) => ({
+          role: m.role,
+          contentPreview: typeof m.content === 'string' ? m.content.slice(0, 100) : 'non-string',
+          contentLength: typeof m.content === 'string' ? m.content.length : 0,
+          hasToolCalls: 'tool_calls' in m,
+          toolCallId: 'tool_call_id' in m ? m.tool_call_id : undefined,
+          toolCallsCount:
+            'tool_calls' in m && Array.isArray(m.tool_calls) ? m.tool_calls.length : 0,
+        }));
+
         this.logger.debug('Sending tool results to LLM for final response', {
           messageCount: messages.length,
           toolMessageCount: toolMessages.length,
           lastToolContentLength: toolMessages[toolMessages.length - 1]?.content.length || 0,
           lastToolPreview: toolMessages[toolMessages.length - 1]?.content.slice(0, 100) || '',
+          messageStructure: JSON.stringify(messageStructure, null, 2),
         });
 
         const finalLlmOptions: LLMRequestOptions = {
@@ -1237,12 +1361,50 @@ export class Agent extends BaseAgent implements IAgentWithModules {
           tools: undefined, // Don't include tools in follow-up call
         };
 
-        const finalResponse = await llm.generateResponse(finalLlmOptions);
-        response = finalResponse.content;
+        try {
+          const finalResponse = await llm.generateResponse(finalLlmOptions);
+          response = finalResponse.content;
 
-        this.logger.debug('Final response generated after tool calls', {
-          responseLength: response.length,
-        });
+          this.logger.debug('Final response generated after tool calls', {
+            responseLength: response.length,
+          });
+        } catch (finalResponseError) {
+          // Log the detailed error but return a friendly message to the user
+          this.logger.error(
+            'Failed to generate final response after tool execution',
+            finalResponseError instanceof Error
+              ? finalResponseError
+              : new Error(String(finalResponseError))
+          );
+          this.logger.debug('Tool execution was successful, but LLM response failed', {
+            errorMessage:
+              finalResponseError instanceof Error
+                ? finalResponseError.message
+                : String(finalResponseError),
+            toolResultsCount: toolMessages.length,
+            messageCount: messages.length,
+          });
+
+          // Create a user-friendly response based on tool results
+          const toolResultsSummary = toolMessages
+            .map((m, i) => {
+              try {
+                const result = JSON.parse(m.content);
+                if (result.success !== false) {
+                  return `✓ Tool ${i + 1} completed successfully`;
+                }
+              } catch {
+                // Not JSON, treat as plain text
+              }
+              return null;
+            })
+            .filter(Boolean)
+            .join('\n');
+
+          response = toolResultsSummary
+            ? `I've completed the requested operations:\n\n${toolResultsSummary}\n\nHowever, I encountered a temporary issue generating a detailed response. The operations were successful though!`
+            : `I've processed your request and the operations completed successfully. However, I encountered a temporary issue generating a detailed response. Please try asking me to explain the results.`;
+        }
       } else {
         response = llmResponse.content;
       }

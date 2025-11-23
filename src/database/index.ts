@@ -10,7 +10,7 @@ import { encryptSensitiveFields, decryptSensitiveFields } from './utils';
 import { validateEncryptionConsistency } from './sensitive-fields';
 
 interface AgentDbRow {
-  id: number;
+  id: string; // UUID
   name: string;
   description?: string;
   model?: string;
@@ -156,8 +156,13 @@ export class Database {
 
       this.logger.debug('Creating agents table with full schema');
 
+      // Enable UUID extension for PostgreSQL
+      if (this.config.driver === 'pg' || this.config.driver === 'postgres') {
+        await this.knex.raw('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+      }
+
       await this.knex.schema.createTable('agents', (table) => {
-        table.increments('id').primary();
+        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
         table.string('name').notNullable().unique();
         table.text('description');
         table.string('model');
@@ -281,26 +286,76 @@ export class Database {
       this.logger.debug('Creating tasks table with schema');
 
       await this.knex.schema.createTable('tasks', (table) => {
-        table.increments('id').primary();
-        table
-          .integer('agentId')
-          .notNullable()
-          .references('id')
-          .inTable('agents')
-          .onDelete('CASCADE');
+        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
+        table.uuid('agentId').notNullable().references('id').inTable('agents').onDelete('CASCADE');
+        table.uuid('graphId').nullable();
+        table.uuid('graphNodeId').nullable();
         table.text('prompt').notNullable();
         table.text('response').nullable();
         table.enu('status', ['pending', 'in_progress', 'completed', 'failed']).defaultTo('pending');
         table.json('metadata');
+        table.json('executionContext');
         table.timestamps(true, true);
         table.timestamp('completedAt').nullable();
         table.index(['agentId']);
+        table.index(['graphId']);
+        table.index(['graphNodeId']);
         table.index(['status']);
         table.index(['created_at']);
       });
 
       this.logger.info('Tasks table created');
       this.logger.debug('Tasks table created successfully');
+    } else {
+      // Check and add graph relationship columns
+      const hasGraphId = await this.knex.schema.hasColumn('tasks', 'graphId');
+      const hasGraphNodeId = await this.knex.schema.hasColumn('tasks', 'graphNodeId');
+      const hasExecutionContext = await this.knex.schema.hasColumn('tasks', 'executionContext');
+
+      this.logger.debug('Checking tasks table columns', {
+        hasGraphId,
+        hasGraphNodeId,
+        hasExecutionContext,
+      });
+
+      if (!hasGraphId || !hasGraphNodeId || !hasExecutionContext) {
+        this.logger.info('Updating tasks table schema with graph relationships');
+
+        await this.knex.schema.alterTable('tasks', (table) => {
+          if (!hasGraphId) {
+            table.integer('graphId').nullable();
+            this.logger.debug('Adding graphId column to tasks table');
+          }
+          if (!hasGraphNodeId) {
+            table.bigInteger('graphNodeId').nullable();
+            this.logger.debug('Adding graphNodeId column (BIGINT) to tasks table');
+          }
+          if (!hasExecutionContext) {
+            table.json('executionContext').nullable();
+            this.logger.debug('Adding executionContext column to tasks table');
+          }
+        });
+
+        // Add indexes for new columns
+        if (hasGraphId) {
+          await this.knex.schema.alterTable('tasks', (table) => {
+            table.index('graphId');
+          });
+        }
+        if (hasGraphNodeId) {
+          await this.knex.schema.alterTable('tasks', (table) => {
+            table.index('graphNodeId');
+          });
+        }
+
+        // Add composite indexes
+        await this.knex.schema.alterTable('tasks', (table) => {
+          table.index(['agentId', 'status']);
+        });
+
+        this.logger.info('Tasks table updated with graph relationships');
+        this.logger.debug('Tasks table schema updated successfully');
+      }
     }
 
     // Initialize shared memories table
@@ -313,18 +368,19 @@ export class Database {
       this.logger.debug('Creating memories table with schema');
 
       await this.knex.schema.createTable('memories', (table) => {
-        table.increments('id').primary();
-        table
-          .integer('agentId')
-          .notNullable()
-          .references('id')
-          .inTable('agents')
-          .onDelete('CASCADE');
+        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
+        table.uuid('agentId').notNullable().references('id').inTable('agents').onDelete('CASCADE');
+        table.uuid('graphId').nullable();
+        table.uuid('taskId').nullable();
+        table.string('sessionId', 255).nullable();
         table.text('content').notNullable();
         table.text('embedding').nullable(); // For vector similarity search
         table.json('metadata');
         table.timestamps(true, true);
         table.index(['agentId']);
+        table.index(['graphId']);
+        table.index(['taskId']);
+        table.index(['sessionId']);
         table.index(['created_at']);
       });
 
@@ -333,24 +389,65 @@ export class Database {
     } else {
       // Check and add missing columns for memories
       const hasEmbedding = await this.knex.schema.hasColumn('memories', 'embedding');
+      const hasGraphId = await this.knex.schema.hasColumn('memories', 'graphId');
+      const hasTaskId = await this.knex.schema.hasColumn('memories', 'taskId');
+      const hasSessionId = await this.knex.schema.hasColumn('memories', 'sessionId');
 
       this.logger.debug('Checking memories table columns', {
         hasEmbedding,
+        hasGraphId,
+        hasTaskId,
+        hasSessionId,
       });
 
-      if (!hasEmbedding) {
+      if (!hasEmbedding || !hasGraphId || !hasTaskId || !hasSessionId) {
         this.logger.info('Updating memories table schema');
 
-        this.logger.debug('Adding embedding column to memories table');
-
         await this.knex.schema.alterTable('memories', (table) => {
-          // Add embedding column for vector similarity search
-          // Note: For SQLite, we'll store as TEXT (JSON array),
-          // for PostgreSQL, this should be vector type
-          table.text('embedding').nullable();
+          if (!hasEmbedding) {
+            // Add embedding column for vector similarity search
+            // Note: For SQLite, we'll store as TEXT (JSON array),
+            // for PostgreSQL, this should be vector type
+            table.text('embedding').nullable();
+            this.logger.debug('Adding embedding column to memories table');
+          }
+          if (!hasGraphId) {
+            table.integer('graphId').nullable();
+            this.logger.debug('Adding graphId column to memories table');
+          }
+          if (!hasTaskId) {
+            table.integer('taskId').nullable();
+            this.logger.debug('Adding taskId column to memories table');
+          }
+          if (!hasSessionId) {
+            table.string('sessionId', 255).nullable();
+            this.logger.debug('Adding sessionId column to memories table');
+          }
         });
 
-        this.logger.info('Memories table updated with embedding column');
+        // Add indexes for new columns
+        if (hasGraphId) {
+          await this.knex.schema.alterTable('memories', (table) => {
+            table.index('graphId');
+          });
+        }
+        if (hasTaskId) {
+          await this.knex.schema.alterTable('memories', (table) => {
+            table.index('taskId');
+          });
+        }
+        if (hasSessionId) {
+          await this.knex.schema.alterTable('memories', (table) => {
+            table.index('sessionId');
+          });
+        }
+
+        // Add composite index for agent + session queries
+        await this.knex.schema.alterTable('memories', (table) => {
+          table.index(['agentId', 'sessionId']);
+        });
+
+        this.logger.info('Memories table updated with embedding and relationship columns');
         this.logger.debug('Memories table schema updated successfully');
       }
     }
@@ -366,8 +463,10 @@ export class Database {
       this.logger.debug('Creating contexts table with full schema');
 
       await this.knex.schema.createTable('contexts', (table) => {
-        table.increments('id').primary();
-        table.integer('agentId').notNullable();
+        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
+        table.uuid('agentId').notNullable();
+        table.uuid('graphId').nullable();
+        table.string('sessionId', 255).nullable();
         table.json('contextData').nullable(); // Compressed context messages
         table.text('summary').nullable(); // Context summary for very large contexts
         table.integer('tokensUsed').defaultTo(0);
@@ -378,12 +477,58 @@ export class Database {
         // Add foreign key constraint to agents table
         table.foreign('agentId').references('id').inTable('agents').onDelete('CASCADE');
 
-        // Add index for agent-based queries
+        // Add indexes
         table.index('agentId');
+        table.index('graphId');
+        table.index('sessionId');
       });
 
       this.logger.info('Contexts table created');
       this.logger.debug('Contexts table created successfully');
+    } else {
+      // Check and add graph relationship columns
+      const hasGraphId = await this.knex.schema.hasColumn('contexts', 'graphId');
+      const hasSessionId = await this.knex.schema.hasColumn('contexts', 'sessionId');
+
+      this.logger.debug('Checking contexts table columns', {
+        hasGraphId,
+        hasSessionId,
+      });
+
+      if (!hasGraphId || !hasSessionId) {
+        this.logger.info('Updating contexts table schema with graph relationships');
+
+        await this.knex.schema.alterTable('contexts', (table) => {
+          if (!hasGraphId) {
+            table.integer('graphId').nullable();
+            this.logger.debug('Adding graphId column to contexts table');
+          }
+          if (!hasSessionId) {
+            table.string('sessionId', 255).nullable();
+            this.logger.debug('Adding sessionId column to contexts table');
+          }
+        });
+
+        // Add indexes for new columns
+        if (hasGraphId) {
+          await this.knex.schema.alterTable('contexts', (table) => {
+            table.index('graphId');
+          });
+        }
+        if (hasSessionId) {
+          await this.knex.schema.alterTable('contexts', (table) => {
+            table.index('sessionId');
+          });
+        }
+
+        // Add composite index for agent + session queries
+        await this.knex.schema.alterTable('contexts', (table) => {
+          table.index(['agentId', 'sessionId']);
+        });
+
+        this.logger.info('Contexts table updated with graph relationships');
+        this.logger.debug('Contexts table schema updated successfully');
+      }
     }
 
     // User-facing completion message
@@ -466,7 +611,7 @@ export class Database {
     return formattedAgent;
   }
 
-  async getAgent(id: number): Promise<AgentConfig | null> {
+  async getAgent(id: string): Promise<AgentConfig | null> {
     this.logger.debug('Retrieving agent by ID', { id });
 
     const agent = await this.knex('agents').where({ id }).first();
@@ -532,7 +677,7 @@ export class Database {
     return decryptedAgents;
   }
 
-  async updateAgent(id: number, data: Partial<AgentConfig>): Promise<AgentConfig | null> {
+  async updateAgent(id: string, data: Partial<AgentConfig>): Promise<AgentConfig | null> {
     // User-facing info log
     this.logger.info(`Updating agent: ${id}`);
 
@@ -653,7 +798,7 @@ export class Database {
     return null;
   }
 
-  async deleteAgent(id: number): Promise<boolean> {
+  async deleteAgent(id: string): Promise<boolean> {
     // User-facing info log
     this.logger.info(`Deleting agent: ${id}`);
 
