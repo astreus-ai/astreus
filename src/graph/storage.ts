@@ -1,4 +1,5 @@
 import { Knex } from 'knex';
+import crypto from 'crypto';
 import { getDatabase } from '../database/index';
 import { Graph, GraphNode, GraphEdge } from './types';
 import { encryptSensitiveFields, decryptSensitiveFields } from '../database/utils';
@@ -39,10 +40,10 @@ export class GraphStorage {
     const hasGraphsTable = await this.knex.schema.hasTable('graphs');
     if (!hasGraphsTable) {
       await this.knex.schema.createTable('graphs', (table) => {
-        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
+        table.string('id', 36).primary(); // UUID generated in application layer
         table.string('name').notNullable();
         table.text('description').nullable();
-        table.uuid('defaultAgentId').nullable();
+        table.string('defaultAgentId', 36).nullable();
         table.integer('maxConcurrency').defaultTo(1);
         table.integer('timeout').nullable();
         table.integer('retryAttempts').defaultTo(0);
@@ -61,17 +62,22 @@ export class GraphStorage {
     const hasNodesTable = await this.knex.schema.hasTable('graph_nodes');
     if (!hasNodesTable) {
       await this.knex.schema.createTable('graph_nodes', (table) => {
-        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
-        table.uuid('graphId').notNullable().references('id').inTable('graphs').onDelete('CASCADE');
+        table.string('id', 36).primary(); // UUID generated in application layer
+        table
+          .string('graphId', 36)
+          .notNullable()
+          .references('id')
+          .inTable('graphs')
+          .onDelete('CASCADE');
         table.string('nodeId').notNullable(); // Internal node ID string (e.g., "node_1_abc")
         table.enu('type', ['agent', 'task']).notNullable();
         table.string('name').notNullable();
         table.text('description').nullable();
-        table.uuid('agentId').nullable();
+        table.string('agentId', 36).nullable();
         table.text('prompt').nullable();
         table.string('model').nullable();
         table.boolean('stream').defaultTo(false);
-        table.uuid('taskId').nullable(); // Task ID created during execution
+        table.string('taskId', 36).nullable(); // Task ID created during execution
         table
           .enu('status', ['pending', 'running', 'completed', 'failed', 'skipped', 'scheduled'])
           .defaultTo('pending');
@@ -126,8 +132,13 @@ export class GraphStorage {
     const hasEdgesTable = await this.knex.schema.hasTable('graph_edges');
     if (!hasEdgesTable) {
       await this.knex.schema.createTable('graph_edges', (table) => {
-        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
-        table.uuid('graphId').notNullable().references('id').inTable('graphs').onDelete('CASCADE');
+        table.string('id', 36).primary(); // UUID generated in application layer
+        table
+          .string('graphId', 36)
+          .notNullable()
+          .references('id')
+          .inTable('graphs')
+          .onDelete('CASCADE');
         table.string('edgeId').notNullable(); // Internal edge ID string (e.g., "edge_1_abc")
         table.string('fromNodeId').notNullable(); // Internal node ID
         table.string('toNodeId').notNullable(); // Internal node ID
@@ -145,6 +156,7 @@ export class GraphStorage {
 
     // Prepare and encrypt graph data
     const graphData = {
+      id: crypto.randomUUID(),
       name: graph.config.name,
       description: graph.config.description,
       defaultAgentId: graph.defaultAgentId || null, // Save default agent ID
@@ -170,6 +182,7 @@ export class GraphStorage {
     // Save nodes with encryption
     for (const node of graph.nodes) {
       const nodeData = {
+        id: crypto.randomUUID(),
         graphId,
         nodeId: node.id,
         type: node.type,
@@ -199,6 +212,7 @@ export class GraphStorage {
     // Save edges with encryption
     for (const edge of graph.edges) {
       const edgeData = {
+        id: crypto.randomUUID(),
         graphId,
         edgeId: edge.id,
         fromNode: edge.fromNodeId,
@@ -370,6 +384,7 @@ export class GraphStorage {
         // Insert new node
         this.logger.debug(`Inserting new node ${node.id} into graph ${graphId}`);
         const nodeData = {
+          id: crypto.randomUUID(),
           graphId,
           nodeId: node.id,
           type: node.type,
@@ -411,6 +426,7 @@ export class GraphStorage {
           `Inserting new edge ${edge.id} into graph ${graphId} (${edge.fromNodeId} → ${edge.toNodeId})`
         );
         const edgeData = {
+          id: crypto.randomUUID(),
           graphId,
           edgeId: edge.id,
           fromNode: edge.fromNodeId,
