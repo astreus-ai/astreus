@@ -1,4 +1,5 @@
 import knex, { Knex } from 'knex';
+import crypto from 'crypto';
 import { DatabaseConfig } from './types';
 import { AgentConfig, AgentConfigInput } from '../agent/types';
 import { DEFAULT_DATABASE_CONFIG } from './defaults';
@@ -45,6 +46,20 @@ export class Database {
       this._encryption = getEncryptionService();
     }
     return this._encryption;
+  }
+
+  /**
+   * Check if using SQLite database
+   */
+  private isSQLite(): boolean {
+    return !this.config.connectionString || this.config.driver === 'sqlite';
+  }
+
+  /**
+   * Generate a new UUID
+   */
+  generateUUID(): string {
+    return crypto.randomUUID();
   }
 
   /**
@@ -162,7 +177,7 @@ export class Database {
       }
 
       await this.knex.schema.createTable('agents', (table) => {
-        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
+        table.string('id', 36).primary(); // UUID generated in application layer
         table.string('name').notNullable().unique();
         table.text('description');
         table.string('model');
@@ -286,10 +301,15 @@ export class Database {
       this.logger.debug('Creating tasks table with schema');
 
       await this.knex.schema.createTable('tasks', (table) => {
-        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
-        table.uuid('agentId').notNullable().references('id').inTable('agents').onDelete('CASCADE');
-        table.uuid('graphId').nullable();
-        table.uuid('graphNodeId').nullable();
+        table.string('id', 36).primary(); // UUID generated in application layer
+        table
+          .string('agentId', 36)
+          .notNullable()
+          .references('id')
+          .inTable('agents')
+          .onDelete('CASCADE');
+        table.string('graphId', 36).nullable();
+        table.string('graphNodeId', 36).nullable();
         table.text('prompt').notNullable();
         table.text('response').nullable();
         table.enu('status', ['pending', 'in_progress', 'completed', 'failed']).defaultTo('pending');
@@ -368,10 +388,15 @@ export class Database {
       this.logger.debug('Creating memories table with schema');
 
       await this.knex.schema.createTable('memories', (table) => {
-        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
-        table.uuid('agentId').notNullable().references('id').inTable('agents').onDelete('CASCADE');
-        table.uuid('graphId').nullable();
-        table.uuid('taskId').nullable();
+        table.string('id', 36).primary(); // UUID generated in application layer
+        table
+          .string('agentId', 36)
+          .notNullable()
+          .references('id')
+          .inTable('agents')
+          .onDelete('CASCADE');
+        table.string('graphId', 36).nullable();
+        table.string('taskId', 36).nullable();
         table.string('sessionId', 255).nullable();
         table.text('content').notNullable();
         table.text('embedding').nullable(); // For vector similarity search
@@ -463,9 +488,9 @@ export class Database {
       this.logger.debug('Creating contexts table with full schema');
 
       await this.knex.schema.createTable('contexts', (table) => {
-        table.uuid('id').primary().defaultTo(this.knex.raw('gen_random_uuid()'));
-        table.uuid('agentId').notNullable();
-        table.uuid('graphId').nullable();
+        table.string('id', 36).primary(); // UUID generated in application layer
+        table.string('agentId', 36).notNullable();
+        table.string('graphId', 36).nullable();
         table.string('sessionId', 255).nullable();
         table.json('contextData').nullable(); // Compressed context messages
         table.text('summary').nullable(); // Context summary for very large contexts
@@ -562,6 +587,7 @@ export class Database {
 
     // Prepare data for insertion with encryption
     const insertData = {
+      id: this.generateUUID(),
       name: data.name,
       description: data.description,
       model: data.model,
