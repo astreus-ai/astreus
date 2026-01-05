@@ -64,6 +64,20 @@ function initializeModelMappings() {
 
 export function getProviderForModel(model: string): ProviderType | null {
   initializeModelMappings();
+
+  if (process.env.OPENAI_BASE_URL) {
+    return 'openai';
+  }
+  if (process.env.GEMINI_BASE_URL) {
+    return 'gemini';
+  }
+  if (process.env.OLLAMA_BASE_URL) {
+    return 'ollama';
+  }
+  if (process.env.CLAUDE_BASE_URL) {
+    return 'claude';
+  }
+
   return MODEL_TO_PROVIDER[model] || null;
 }
 
