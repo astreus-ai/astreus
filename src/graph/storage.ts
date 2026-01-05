@@ -103,7 +103,7 @@ export class GraphStorage {
 
       if (!hasTaskId) {
         await this.knex.schema.alterTable('graph_nodes', (table) => {
-          table.bigInteger('taskId').nullable();
+          table.string('taskId', 36).nullable();
         });
 
         // Add indexes
@@ -220,8 +220,8 @@ export class GraphStorage {
         id: crypto.randomUUID(),
         graphId,
         edgeId: edge.id,
-        fromNode: edge.fromNodeId,
-        toNode: edge.toNodeId,
+        fromNodeId: edge.fromNodeId,
+        toNodeId: edge.toNodeId,
         condition: edge.condition,
         metadata: edge.metadata ? JSON.stringify(edge.metadata) : null,
       };
@@ -301,8 +301,8 @@ export class GraphStorage {
         const decryptedEdge = await decryptSensitiveFields(edge, 'graph_edges');
         return {
           id: decryptedEdge.edgeId as string,
-          fromNodeId: decryptedEdge.fromNode as string,
-          toNodeId: decryptedEdge.toNode as string,
+          fromNodeId: decryptedEdge.fromNodeId as string,
+          toNodeId: decryptedEdge.toNodeId as string,
           condition: decryptedEdge.condition as string | undefined,
           metadata: (decryptedEdge.metadata as unknown as MetadataObject) || undefined, // Already parsed by decryptSensitiveFields
           createdAt: new Date(),
@@ -434,8 +434,8 @@ export class GraphStorage {
           id: crypto.randomUUID(),
           graphId,
           edgeId: edge.id,
-          fromNode: edge.fromNodeId,
-          toNode: edge.toNodeId,
+          fromNodeId: edge.fromNodeId,
+          toNodeId: edge.toNodeId,
           condition: edge.condition,
           metadata: edge.metadata ? JSON.stringify(edge.metadata) : null,
         };

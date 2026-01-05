@@ -356,12 +356,12 @@ export class Database {
 
         await this.knex.schema.alterTable('tasks', (table) => {
           if (!hasGraphId) {
-            table.integer('graphId').nullable();
-            this.logger.debug('Adding graphId column to tasks table');
+            table.string('graphId', 36).nullable();
+            this.logger.debug('Adding graphId column (UUID) to tasks table');
           }
           if (!hasGraphNodeId) {
-            table.bigInteger('graphNodeId').nullable();
-            this.logger.debug('Adding graphNodeId column (BIGINT) to tasks table');
+            table.string('graphNodeId').nullable();
+            this.logger.debug('Adding graphNodeId column to tasks table');
           }
           if (!hasExecutionContext) {
             table.json('executionContext').nullable();
@@ -450,12 +450,12 @@ export class Database {
             this.logger.debug('Adding embedding column to memories table');
           }
           if (!hasGraphId) {
-            table.integer('graphId').nullable();
-            this.logger.debug('Adding graphId column to memories table');
+            table.string('graphId', 36).nullable();
+            this.logger.debug('Adding graphId column (UUID) to memories table');
           }
           if (!hasTaskId) {
-            table.integer('taskId').nullable();
-            this.logger.debug('Adding taskId column to memories table');
+            table.string('taskId', 36).nullable();
+            this.logger.debug('Adding taskId column (UUID) to memories table');
           }
           if (!hasSessionId) {
             table.string('sessionId', 255).nullable();
@@ -538,8 +538,8 @@ export class Database {
 
         await this.knex.schema.alterTable('contexts', (table) => {
           if (!hasGraphId) {
-            table.integer('graphId').nullable();
-            this.logger.debug('Adding graphId column to contexts table');
+            table.string('graphId', 36).nullable();
+            this.logger.debug('Adding graphId column (UUID) to contexts table');
           }
           if (!hasSessionId) {
             table.string('sessionId', 255).nullable();

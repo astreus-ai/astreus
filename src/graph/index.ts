@@ -511,6 +511,9 @@ export class Graph implements IAgentModule {
       `Graph execution ${this.graph.status}. Completed: ${completedNodes}, Failed: ${failedNodes}, Tokens: ${usage.totalTokens} (${duration}ms)`
     );
 
+    // Persist updated graph state (node statuses) to database
+    await this.update();
+
     return {
       graph: this.graph,
       success: this.graph.status === 'completed',
@@ -1008,11 +1011,11 @@ export class Graph implements IAgentModule {
   }
 
   private generateNodeId(): string {
-    return `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `node_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
 
   private generateEdgeId(): string {
-    return `edge_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `edge_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
 
   // Getters
