@@ -51,8 +51,21 @@ export class Database {
   /**
    * Check if using SQLite database
    */
-  private isSQLite(): boolean {
+  isSQLite(): boolean {
     return !this.config.connectionString || this.config.driver === 'sqlite';
+  }
+
+  /**
+   * Check if using PostgreSQL database
+   */
+  isPostgres(): boolean {
+    return (
+      this.config.driver === 'pg' ||
+      this.config.driver === 'postgres' ||
+      (!!this.config.connectionString &&
+        (this.config.connectionString.includes('postgres') ||
+          this.config.connectionString.includes('postgresql')))
+    );
   }
 
   /**
@@ -172,7 +185,7 @@ export class Database {
       this.logger.debug('Creating agents table with full schema');
 
       // Enable UUID extension for PostgreSQL
-      if (this.config.driver === 'pg' || this.config.driver === 'postgres') {
+      if (this.isPostgres()) {
         await this.knex.raw('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
       }
 

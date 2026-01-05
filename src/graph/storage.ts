@@ -1,6 +1,6 @@
 import { Knex } from 'knex';
 import crypto from 'crypto';
-import { getDatabase } from '../database/index';
+import { getDatabase, Database } from '../database/index';
 import { Graph, GraphNode, GraphEdge } from './types';
 import { encryptSensitiveFields, decryptSensitiveFields } from '../database/utils';
 import { Logger } from '../logger/types';
@@ -9,19 +9,21 @@ import { MetadataObject } from '../types';
 
 export class GraphStorage {
   private knex: Knex;
+  private db: Database;
   private logger: Logger;
   private initialized: boolean = false;
 
   constructor() {
-    // Note: knex will be initialized in initialize() method
+    // Note: knex and db will be initialized in initialize() method
     this.knex = null!; // Will be initialized in initialize()
+    this.db = null!; // Will be initialized in initialize()
     this.logger = getLogger();
   }
 
   private async initialize(): Promise<void> {
     if (this.initialized) return;
-    const db = await getDatabase();
-    this.knex = db.getKnex();
+    this.db = await getDatabase();
+    this.knex = this.db.getKnex();
     await this.createTables();
     this.initialized = true;
   }
@@ -32,7 +34,7 @@ export class GraphStorage {
 
   private async createTables(): Promise<void> {
     // Enable UUID extension for PostgreSQL
-    if (process.env.DATABASE_URL?.includes('postgres')) {
+    if (this.db.isPostgres()) {
       await this.knex.raw('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
     }
 
@@ -113,19 +115,22 @@ export class GraphStorage {
       }
 
       // Fix result column type (from JSONB to TEXT for encrypted data)
-      await this.knex.raw(`
-        DO $$
-        BEGIN
-          IF EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'graph_nodes'
-            AND column_name = 'result'
-            AND data_type = 'jsonb'
-          ) THEN
-            ALTER TABLE graph_nodes ALTER COLUMN result TYPE TEXT USING result::TEXT;
-          END IF;
-        END $$;
-      `);
+      // Only run this migration for PostgreSQL - SQLite doesn't have JSONB type
+      if (this.db.isPostgres()) {
+        await this.knex.raw(`
+          DO $$
+          BEGIN
+            IF EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'graph_nodes'
+              AND column_name = 'result'
+              AND data_type = 'jsonb'
+            ) THEN
+              ALTER TABLE graph_nodes ALTER COLUMN result TYPE TEXT USING result::TEXT;
+            END IF;
+          END $$;
+        `);
+      }
     }
 
     // Create graph_edges table
