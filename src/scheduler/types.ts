@@ -20,6 +20,7 @@ export interface Schedule {
   recurrence?: RecurrenceConfig;
   timezone?: string; // Timezone for execution (e.g., 'America/New_York')
   metadata?: MetadataObject;
+  delayMs?: number; // Delay in milliseconds for 'after:Xs/m/h' format
 }
 
 export interface ScheduledItem {

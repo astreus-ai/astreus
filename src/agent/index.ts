@@ -43,7 +43,7 @@ import { getDatabase } from '../database';
 import { getProviderForModel } from '../llm/models';
 import { getLLM } from '../llm';
 import { LLMRequestOptions, Tool, ToolCall } from '../llm/types';
-import { Logger } from '../logger';
+import { Logger, getLogger } from '../logger';
 import * as fs from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -1508,7 +1508,10 @@ export class Agent extends BaseAgent implements IAgentWithModules {
         } else {
           // Log initialization failure but continue with other agents
           const agentName = paginatedData[i]?.name ?? 'unknown';
-          console.warn(`Failed to initialize agent '${agentName}':`, result.reason);
+          const logger = getLogger();
+          logger.warn(`Failed to initialize agent '${agentName}'`, {
+            reason: result.reason instanceof Error ? result.reason.message : String(result.reason),
+          });
         }
       }
       return agents;

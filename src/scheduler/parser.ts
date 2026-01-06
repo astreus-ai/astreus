@@ -16,6 +16,9 @@ export interface ParsedSchedule {
  * - 'hourly' → every hour
  * - '@15:30' → once today at 3:30 PM
  * - 'once@2024-12-25@10:00' → once on specific date
+ * - 'after:5s' → run after 5 seconds delay
+ * - 'after:30m' → run after 30 minutes delay
+ * - 'after:2h' → run after 2 hours delay
  */
 export function parseScheduleString(scheduleStr: string, timezone: string = 'UTC'): ParsedSchedule {
   try {
@@ -28,7 +31,14 @@ export function parseScheduleString(scheduleStr: string, timezone: string = 'UTC
       };
     }
 
-    const parts = scheduleStr.trim().toLowerCase().split('@');
+    const trimmed = scheduleStr.trim().toLowerCase();
+
+    // Handle 'after:Xs/m/h' format for delayed execution
+    if (trimmed.startsWith('after:')) {
+      return parseAfterDelay(trimmed, timezone);
+    }
+
+    const parts = trimmed.split('@');
 
     if (parts.length === 0) {
       return {
@@ -398,4 +408,70 @@ function getNextMonthDay(targetDay: number, time: Date): Date {
   nextDate.setHours(time.getHours(), time.getMinutes(), 0, 0);
 
   return nextDate;
+}
+
+/**
+ * Parse 'after:Xs/m/h' format for delayed execution
+ * Examples:
+ * - 'after:5s' → run after 5 seconds
+ * - 'after:30m' → run after 30 minutes
+ * - 'after:2h' → run after 2 hours
+ */
+function parseAfterDelay(delayStr: string, timezone: string): ParsedSchedule {
+  // Remove 'after:' prefix
+  const delayPart = delayStr.slice(6);
+
+  // Parse number and unit
+  const match = delayPart.match(/^(\d+)(s|m|h)$/);
+  if (!match) {
+    return {
+      schedule: {} as Schedule,
+      isValid: false,
+      error: `Invalid delay format: ${delayStr}. Use after:Xs, after:Xm, or after:Xh (e.g., after:5s, after:30m, after:2h)`,
+    };
+  }
+
+  const value = parseInt(match[1]);
+  const unit = match[2];
+
+  if (value <= 0) {
+    return {
+      schedule: {} as Schedule,
+      isValid: false,
+      error: `Delay value must be positive: ${delayStr}`,
+    };
+  }
+
+  // Calculate delay in milliseconds
+  let delayMs: number;
+  switch (unit) {
+    case 's':
+      delayMs = value * 1000;
+      break;
+    case 'm':
+      delayMs = value * 60 * 1000;
+      break;
+    case 'h':
+      delayMs = value * 60 * 60 * 1000;
+      break;
+    default:
+      return {
+        schedule: {} as Schedule,
+        isValid: false,
+        error: `Unknown time unit: ${unit}`,
+      };
+  }
+
+  // Calculate execution time
+  const executeAt = new Date(Date.now() + delayMs);
+
+  return {
+    schedule: {
+      type: 'once',
+      executeAt,
+      timezone,
+      delayMs, // Store delay for reference
+    } as Schedule,
+    isValid: true,
+  };
 }

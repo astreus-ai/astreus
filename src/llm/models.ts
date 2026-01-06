@@ -27,40 +27,30 @@ function getProviderModels(): Record<ProviderType, string[]> {
     ollama: [],
   };
 
+  // Silently try to load providers - missing API keys are expected behavior
+  // Users only need API keys for providers they actually use
   try {
     providers.openai = new OpenAIProvider().getSupportedModels();
-  } catch (error) {
-    console.warn(
-      'OpenAI provider not available:',
-      error instanceof Error ? error.message : String(error)
-    );
+  } catch {
+    // OpenAI provider not available - API key may not be configured
   }
 
   try {
     providers.claude = new ClaudeProvider().getSupportedModels();
-  } catch (error) {
-    console.warn(
-      'Claude provider not available:',
-      error instanceof Error ? error.message : String(error)
-    );
+  } catch {
+    // Claude provider not available - API key may not be configured
   }
 
   try {
     providers.gemini = new GeminiProvider().getSupportedModels();
-  } catch (error) {
-    console.warn(
-      'Gemini provider not available:',
-      error instanceof Error ? error.message : String(error)
-    );
+  } catch {
+    // Gemini provider not available - API key may not be configured
   }
 
   try {
     providers.ollama = new OllamaProvider().getSupportedModels();
-  } catch (error) {
-    console.warn(
-      'Ollama provider not available:',
-      error instanceof Error ? error.message : String(error)
-    );
+  } catch {
+    // Ollama provider not available - Ollama may not be running
   }
 
   // Cache the result
