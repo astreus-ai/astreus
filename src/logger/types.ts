@@ -1,9 +1,9 @@
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'success' | 'silent';
 
 /**
- * Primitive values that can be logged
+ * Primitive values that can be logged (including undefined for optional properties)
  */
-export type LogDataPrimitive = string | number | boolean | null | Date;
+export type LogDataPrimitive = string | number | boolean | null | undefined | Date;
 
 /**
  * Complex log data that can contain primitives, arrays, or nested objects
@@ -46,4 +46,7 @@ export interface Logger {
   ): void;
   setLevel(level: LogLevel): void;
   setDebug(debug: boolean): void;
+  flush(): Promise<void>;
+  dispose(): void;
+  readonly config: LoggerConfig;
 }

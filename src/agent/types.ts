@@ -124,11 +124,20 @@ export interface IContextMethods {
   getContextWindow(): ContextWindow;
   analyzeContext(): ContextAnalysis;
   compressContext(): Promise<CompressionResult>;
-  clearContext(): void;
-  exportContext(): string;
-  importContext(data: string): void;
+  // Note: Signature must match IAgent's optional clearContext for interface extension compatibility
+  clearContext?(options?: { syncWithMemory?: boolean }): Promise<void>;
+  exportContext?(): string;
+  importContext?(data: string): void;
   generateContextSummary(): Promise<ContextSummary>;
   updateContextModel(model: string): void;
+  searchContext(options: {
+    query?: string;
+    graphId?: string;
+    taskId?: string;
+    sessionId?: string;
+    role?: 'user' | 'assistant' | 'system';
+    limit?: number;
+  }): ContextMessage[];
 }
 
 /**
@@ -166,8 +175,11 @@ export interface IAgent {
   hasMemory(): boolean;
   hasKnowledge(): boolean;
   hasVision(): boolean;
-  // Context methods (available on all agents)
+  // Context methods (available on all agents - optional to allow partial implementations)
   getContext(): ContextMessage[];
+  clearContext?(options?: { syncWithMemory?: boolean }): Promise<void>;
+  exportContext?(): string;
+  importContext?(data: string): void;
   // Memory methods (when memory enabled)
   addMemory?(content: string, metadata?: MetadataObject): Promise<Memory>;
   loadGraphContext?(graphId: string, limit?: number, isolated?: boolean): Promise<void>;
@@ -245,11 +257,13 @@ export interface AskOptions {
   stream?: boolean;
   useTools?: boolean;
   onChunk?: (chunk: string) => void;
+  timeout?: number; // Timeout in milliseconds for sub-agent execution
   // Sub-agent specific options
   useSubAgents?: boolean;
   delegation?: 'auto' | 'manual' | 'sequential';
-  taskAssignment?: Record<number, string>; // agentId -> task mapping
+  taskAssignment?: Record<string, string>; // agentId -> task mapping
   coordination?: 'parallel' | 'sequential'; // How to coordinate sub-agent execution
+  contextIsolation?: 'isolated' | 'shared' | 'merge'; // How to handle context between agents
   attachments?: Array<{
     type: 'image' | 'pdf' | 'text' | 'markdown' | 'code' | 'json' | 'file';
     path: string;
@@ -307,4 +321,9 @@ export interface IAgentWithModules
     Partial<ISubAgentMethods> {
   updateModel(model: string): void;
   getContext(): ContextMessage[];
+  /**
+   * Clear all data: both memory and context
+   * This ensures Memory and Context are always synchronized
+   */
+  clearAll(): Promise<{ memoriesCleared: number; contextCleared: boolean }>;
 }

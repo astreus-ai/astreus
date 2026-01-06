@@ -10,7 +10,7 @@ import { ToolDefinition } from '../plugin/types';
 import { Logger } from '../logger/types';
 import { DEFAULT_KNOWLEDGE_CONFIG } from './defaults';
 import type { TextItem, TextMarkedContent } from 'pdfjs-dist/types/src/display/api';
-import { getFileSize } from '../database/utils';
+import { getFileSizeAsync } from '../database/utils';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -22,6 +22,17 @@ export interface KnowledgeConfig {
   chunkSize?: number;
   chunkOverlap?: number;
 }
+
+/**
+ * Cache for LLM provider instances used during model detection.
+ * Prevents creating multiple instances of the same provider which is wasteful
+ * and can cause issues with connection pooling.
+ */
+const providerInstanceCache: {
+  openai?: OpenAIProvider;
+  gemini?: GeminiProvider;
+  ollama?: OllamaProvider;
+} = {};
 
 export class Knowledge implements IAgentModule {
   readonly name = 'knowledge';
@@ -40,9 +51,9 @@ export class Knowledge implements IAgentModule {
     private agent: IAgent,
     config?: KnowledgeConfig
   ) {
-    this.config = config || {};
-    this.chunkSize = config?.chunkSize || DEFAULT_KNOWLEDGE_CONFIG.chunkSize;
-    this.chunkOverlap = config?.chunkOverlap || DEFAULT_KNOWLEDGE_CONFIG.chunkOverlap;
+    this.config = config ?? {};
+    this.chunkSize = config?.chunkSize ?? DEFAULT_KNOWLEDGE_CONFIG.chunkSize;
+    this.chunkOverlap = config?.chunkOverlap ?? DEFAULT_KNOWLEDGE_CONFIG.chunkOverlap;
     this.logger = agent.logger;
     // Initialize embedding model from agent config or config parameter
     this.embeddingModel = this.agent.config.embeddingModel || config?.embeddingModel || '';
@@ -127,6 +138,36 @@ export class Knowledge implements IAgentModule {
     });
   }
 
+  /**
+   * Get or create a cached OpenAI provider instance
+   */
+  private getCachedOpenAIProvider(apiKey: string): OpenAIProvider {
+    if (!providerInstanceCache.openai) {
+      providerInstanceCache.openai = new OpenAIProvider({ apiKey });
+    }
+    return providerInstanceCache.openai;
+  }
+
+  /**
+   * Get or create a cached Gemini provider instance
+   */
+  private getCachedGeminiProvider(apiKey: string): GeminiProvider {
+    if (!providerInstanceCache.gemini) {
+      providerInstanceCache.gemini = new GeminiProvider({ apiKey });
+    }
+    return providerInstanceCache.gemini;
+  }
+
+  /**
+   * Get or create a cached Ollama provider instance
+   */
+  private getCachedOllamaProvider(baseUrl?: string): OllamaProvider {
+    if (!providerInstanceCache.ollama) {
+      providerInstanceCache.ollama = new OllamaProvider({ baseUrl });
+    }
+    return providerInstanceCache.ollama;
+  }
+
   private detectProviderFromModel(model: string): {
     provider: 'openai' | 'gemini' | 'ollama';
     apiKey?: string;
@@ -137,7 +178,7 @@ export class Knowledge implements IAgentModule {
       // Check OpenAI provider - prioritize dedicated embedding API key
       if (process.env.OPENAI_EMBEDDING_API_KEY) {
         const apiKey = process.env.OPENAI_EMBEDDING_API_KEY;
-        const openaiProvider = new OpenAIProvider({ apiKey });
+        const openaiProvider = this.getCachedOpenAIProvider(apiKey);
         if (openaiProvider.getEmbeddingModels().includes(model)) {
           return {
             provider: 'openai',
@@ -151,7 +192,7 @@ export class Knowledge implements IAgentModule {
       // Only use main OPENAI_API_KEY if it's not an OpenRouter key (which would have a base URL set)
       if (process.env.OPENAI_API_KEY && !process.env.OPENAI_BASE_URL) {
         const apiKey = process.env.OPENAI_API_KEY;
-        const openaiProvider = new OpenAIProvider({ apiKey });
+        const openaiProvider = this.getCachedOpenAIProvider(apiKey);
         if (openaiProvider.getEmbeddingModels().includes(model)) {
           return {
             provider: 'openai',
@@ -167,13 +208,13 @@ export class Knowledge implements IAgentModule {
 
     try {
       // Check Gemini provider
-      if (process.env.GEMINI_EMBEDDING_API_KEY || process.env.GEMINI_API_KEY) {
-        const apiKey = process.env.GEMINI_EMBEDDING_API_KEY || process.env.GEMINI_API_KEY;
-        const geminiProvider = new GeminiProvider({ apiKey });
+      const geminiApiKey = process.env.GEMINI_EMBEDDING_API_KEY || process.env.GEMINI_API_KEY;
+      if (geminiApiKey) {
+        const geminiProvider = this.getCachedGeminiProvider(geminiApiKey);
         if (geminiProvider.getEmbeddingModels().includes(model)) {
           return {
             provider: 'gemini',
-            apiKey,
+            apiKey: geminiApiKey,
             baseUrl: process.env.GEMINI_EMBEDDING_BASE_URL, // Only dedicated URL, no fallback
             model,
           };
@@ -185,9 +226,7 @@ export class Knowledge implements IAgentModule {
 
     try {
       // Check Ollama provider (always try as fallback)
-      const ollamaProvider = new OllamaProvider({
-        baseUrl: process.env.OLLAMA_BASE_URL,
-      });
+      const ollamaProvider = this.getCachedOllamaProvider(process.env.OLLAMA_BASE_URL);
       if (ollamaProvider.getEmbeddingModels().includes(model)) {
         return {
           provider: 'ollama',
@@ -214,7 +253,7 @@ export class Knowledge implements IAgentModule {
       // Try OpenAI first - prioritize dedicated embedding API key
       if (process.env.OPENAI_EMBEDDING_API_KEY) {
         const apiKey = process.env.OPENAI_EMBEDDING_API_KEY;
-        const openaiProvider = new OpenAIProvider({ apiKey });
+        const openaiProvider = this.getCachedOpenAIProvider(apiKey);
         const models = openaiProvider.getEmbeddingModels();
         if (models.length > 0) {
           return {
@@ -229,7 +268,7 @@ export class Knowledge implements IAgentModule {
       // Only use main OPENAI_API_KEY if it's not an OpenRouter key (which would have a base URL set)
       if (process.env.OPENAI_API_KEY && !process.env.OPENAI_BASE_URL) {
         const apiKey = process.env.OPENAI_API_KEY;
-        const openaiProvider = new OpenAIProvider({ apiKey });
+        const openaiProvider = this.getCachedOpenAIProvider(apiKey);
         const models = openaiProvider.getEmbeddingModels();
         if (models.length > 0) {
           return {
@@ -246,14 +285,14 @@ export class Knowledge implements IAgentModule {
 
     try {
       // Try Gemini second
-      if (process.env.GEMINI_EMBEDDING_API_KEY || process.env.GEMINI_API_KEY) {
-        const apiKey = process.env.GEMINI_EMBEDDING_API_KEY || process.env.GEMINI_API_KEY;
-        const geminiProvider = new GeminiProvider({ apiKey });
+      const geminiKey = process.env.GEMINI_EMBEDDING_API_KEY || process.env.GEMINI_API_KEY;
+      if (geminiKey) {
+        const geminiProvider = this.getCachedGeminiProvider(geminiKey);
         const models = geminiProvider.getEmbeddingModels();
         if (models.length > 0) {
           return {
             provider: 'gemini',
-            apiKey,
+            apiKey: geminiKey,
             baseUrl: process.env.GEMINI_EMBEDDING_BASE_URL, // Only dedicated URL, no fallback
             model: models[0], // Use first available model as default
           };
@@ -265,9 +304,7 @@ export class Knowledge implements IAgentModule {
 
     try {
       // Default to Ollama (local)
-      const ollamaProvider = new OllamaProvider({
-        baseUrl: process.env.OLLAMA_BASE_URL,
-      });
+      const ollamaProvider = this.getCachedOllamaProvider(process.env.OLLAMA_BASE_URL);
       const models = ollamaProvider.getEmbeddingModels();
       if (models.length > 0) {
         return {
@@ -357,11 +394,17 @@ export class Knowledge implements IAgentModule {
       chunkSize: this.chunkSize,
       chunkOverlap: this.chunkOverlap,
       totalChunks: chunks.length,
-      firstChunkPreview: chunks[0]?.slice(0, 100) + '...',
+      firstChunkPreview: chunks.length > 0 ? chunks[0].slice(0, 100) + '...' : '(empty)',
     });
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
+
+      // Bounds check for chunk array access
+      if (chunk === undefined) {
+        this.logger.warn(`Skipping undefined chunk at index ${i}`);
+        continue;
+      }
 
       // Show progress for long documents
       if (i % 5 === 0 && chunks.length > 10) {
@@ -483,7 +526,7 @@ export class Knowledge implements IAgentModule {
 
       this.logger.debug(`Found ${results.length} knowledge results`, {
         resultCount: results.length,
-        topSimilarity: results[0]?.similarity || 0,
+        topSimilarity: results.length > 0 ? results[0].similarity : 0,
         searchTime: Date.now() - startTime,
         hasResults: results.length > 0,
       });
@@ -598,7 +641,28 @@ export class Knowledge implements IAgentModule {
   }
 
   async addKnowledgeFromFile(filePath: string, metadata?: MetadataObject): Promise<void> {
-    const fileName = path.basename(filePath);
+    // Validate file path to prevent path injection attacks
+    const resolvedPath = path.resolve(filePath);
+    if (!resolvedPath || resolvedPath.includes('\0')) {
+      throw new Error('Invalid file path: path contains invalid characters');
+    }
+
+    // Validate that the path doesn't traverse outside expected boundaries
+    const normalizedPath = path.normalize(resolvedPath);
+    if (normalizedPath !== resolvedPath) {
+      this.logger.warn('File path normalization detected potential path traversal', {
+        originalPath: filePath,
+        resolvedPath,
+        normalizedPath,
+      });
+    }
+
+    const fileName = path.basename(resolvedPath);
+
+    // Validate filename is not empty and doesn't contain path separators
+    if (!fileName || fileName === '.' || fileName === '..') {
+      throw new Error('Invalid file path: invalid filename');
+    }
 
     // Check if document with same filename already exists for this agent
     const db = await this.getDatabase();
@@ -612,7 +676,21 @@ export class Knowledge implements IAgentModule {
 
     this.logger.info(`Adding knowledge from file: ${fileName}`);
 
-    const fileExtension = path.extname(filePath).toLowerCase();
+    const fileExtension = path.extname(resolvedPath).toLowerCase();
+
+    // Validate file exists and is accessible before processing
+    try {
+      await fs.promises.access(resolvedPath, fs.constants.R_OK);
+    } catch {
+      throw new Error(`File does not exist or is not readable: ${resolvedPath}`);
+    }
+
+    // Validate file is actually a file (not a directory or symlink to directory)
+    const fileStat = await fs.promises.stat(resolvedPath);
+    if (!fileStat.isFile()) {
+      throw new Error(`Path is not a file: ${resolvedPath}`);
+    }
+
     let content: string;
 
     try {
@@ -620,10 +698,10 @@ export class Knowledge implements IAgentModule {
         case '.txt':
         case '.md':
         case '.json':
-          content = await this.readTextFile(filePath);
+          content = await this.readTextFile(resolvedPath);
           break;
         case '.pdf':
-          content = await this.readPdfFile(filePath);
+          content = await this.readPdfFile(resolvedPath);
           break;
         default:
           throw new Error(
@@ -631,61 +709,103 @@ export class Knowledge implements IAgentModule {
           );
       }
 
-      const fileName = path.basename(filePath);
+      // Validate content is not empty
+      if (!content || content.trim().length === 0) {
+        throw new Error('File content is empty');
+      }
+
       const title = typeof metadata?.title === 'string' ? metadata.title : fileName;
 
       const fileMetadata = {
         ...metadata,
         fileName,
         fileType: fileExtension,
-        fileSize: getFileSize(filePath),
+        fileSize: await getFileSizeAsync(resolvedPath),
         addedAt: new Date().toISOString(),
       };
 
       await this.addKnowledge(content, title, fileMetadata);
     } catch (error) {
       throw new Error(
-        `Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to process file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
 
   async addKnowledgeFromDirectory(dirPath: string, metadata?: MetadataObject): Promise<void> {
-    this.logger.info(`Adding knowledge from directory: ${dirPath}`);
-
-    try {
-      await fs.promises.access(dirPath);
-    } catch {
-      throw new Error(`Directory does not exist: ${dirPath}`);
+    // Validate directory path to prevent path injection attacks
+    const resolvedDirPath = path.resolve(dirPath);
+    if (!resolvedDirPath || resolvedDirPath.includes('\0')) {
+      throw new Error('Invalid directory path: path contains invalid characters');
     }
 
-    const files = await fs.promises.readdir(dirPath);
+    this.logger.info(`Adding knowledge from directory: ${resolvedDirPath}`);
+
+    try {
+      await fs.promises.access(resolvedDirPath, fs.constants.R_OK);
+    } catch {
+      throw new Error(`Directory does not exist or is not readable: ${resolvedDirPath}`);
+    }
+
+    // Validate that path is actually a directory
+    const dirStat = await fs.promises.stat(resolvedDirPath);
+    if (!dirStat.isDirectory()) {
+      throw new Error(`Path is not a directory: ${resolvedDirPath}`);
+    }
+
+    const files = await fs.promises.readdir(resolvedDirPath);
     const supportedExtensions = ['.txt', '.md', '.json', '.pdf'];
     let processedCount = 0;
 
     for (const file of files) {
-      const fullPath = path.join(dirPath, file);
-      const stat = await fs.promises.stat(fullPath);
+      // Validate filename to prevent path traversal via directory entries
+      if (
+        !file ||
+        file === '.' ||
+        file === '..' ||
+        file.includes('\0') ||
+        file.includes(path.sep)
+      ) {
+        this.logger.warn(`Skipping invalid filename: ${file}`);
+        continue;
+      }
 
-      if (stat.isFile()) {
-        const ext = path.extname(file).toLowerCase();
-        if (supportedExtensions.includes(ext)) {
-          try {
-            await this.addKnowledgeFromFile(fullPath, metadata);
-            processedCount++;
-          } catch (error) {
-            this.logger.warn(`Failed to process file ${file}`, {
-              error: error instanceof Error ? error.message : String(error),
-            });
+      const fullPath = path.join(resolvedDirPath, file);
+
+      // Verify the resolved path is still within the target directory
+      const resolvedFullPath = path.resolve(fullPath);
+      if (!resolvedFullPath.startsWith(resolvedDirPath + path.sep)) {
+        this.logger.warn(`Skipping file with path traversal attempt: ${file}`);
+        continue;
+      }
+
+      try {
+        const stat = await fs.promises.stat(resolvedFullPath);
+
+        if (stat.isFile()) {
+          const ext = path.extname(file).toLowerCase();
+          if (supportedExtensions.includes(ext)) {
+            try {
+              await this.addKnowledgeFromFile(resolvedFullPath, metadata);
+              processedCount++;
+            } catch (error) {
+              this.logger.warn(`Failed to process file ${file}`, {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
           }
         }
+      } catch (statError) {
+        this.logger.warn(`Failed to stat file ${file}`, {
+          error: statError instanceof Error ? statError.message : String(statError),
+        });
       }
     }
 
     this.logger.info(`Processed ${processedCount} files from directory`);
 
     this.logger.debug('Directory processing complete', {
-      directory: dirPath,
+      directory: resolvedDirPath,
       totalFiles: files.length,
       processedFiles: processedCount,
       agentId: this.agent.id,
@@ -693,14 +813,29 @@ export class Knowledge implements IAgentModule {
   }
 
   private async readTextFile(filePath: string): Promise<string> {
-    return fs.promises.readFile(filePath, 'utf-8');
+    try {
+      const content = await fs.promises.readFile(filePath, 'utf-8');
+      return content;
+    } catch (error) {
+      if (error instanceof Error) {
+        if ('code' in error && error.code === 'ENOENT') {
+          throw new Error(`File not found: ${filePath}`);
+        }
+        if ('code' in error && error.code === 'EACCES') {
+          throw new Error(`Permission denied reading file: ${filePath}`);
+        }
+        throw new Error(`Failed to read text file: ${error.message}`);
+      }
+      throw new Error(`Failed to read text file: ${String(error)}`);
+    }
   }
 
   private async readPdfFile(filePath: string): Promise<string> {
     try {
       const pdfBuffer = await fs.promises.readFile(filePath);
 
-      // Dynamic import for ES Module compatibility - use legacy build for Node.js
+      // Dynamic import for ES Module compatibility
+      // Note: Using legacy build required for Node.js environment (no browser APIs)
       const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
 
       // Convert Buffer to Uint8Array for pdfjs-dist
@@ -777,27 +912,6 @@ export class Knowledge implements IAgentModule {
 
     // Filter out very short chunks that won't be useful
     return chunks.filter((chunk) => chunk.length >= 50);
-  }
-}
-
-// Legacy exports for backward compatibility
-export type EmbeddingConfig = {
-  provider?: 'openai' | 'gemini' | 'ollama';
-  model?: string;
-  apiKey?: string;
-};
-
-export class EmbeddingService {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  constructor(_config?: EmbeddingConfig) {
-    // Legacy compatibility wrapper - functionality moved to LLM providers
-    // Config parameter kept for backward compatibility
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async embedSingle(_text: string): Promise<number[]> {
-    // Text parameter kept for backward compatibility
-    throw new Error('EmbeddingService is deprecated. Use LLM provider embeddings instead.');
   }
 }
 

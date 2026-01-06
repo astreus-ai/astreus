@@ -108,6 +108,8 @@ export interface GraphConfig {
   // Context limits
   maxContextTokens?: number; // Maximum context tokens before warning
   contextWarningThreshold?: number; // Warning threshold (0-1, e.g., 0.8 = 80%)
+  // Timeout configuration for sub-agent nodes
+  subAgentNodeTimeout?: number; // Extended timeout for nodes using sub-agents (default: 5 minutes)
   metadata?: MetadataObject;
 }
 
@@ -175,3 +177,31 @@ export interface GraphSchedulingOptions {
   schedulingCheckInterval?: number; // How often to check for scheduled nodes (ms)
   onChunk?: (chunk: string) => void; // Callback for streaming chunks
 }
+
+/**
+ * State change event for graph execution tracking
+ * Allows Agent to track state changes during graph execution
+ */
+export interface GraphStateChangeEvent {
+  type:
+    | 'node_started'
+    | 'node_completed'
+    | 'node_failed'
+    | 'graph_started'
+    | 'graph_completed'
+    | 'graph_failed';
+  nodeId?: string;
+  nodeName?: string;
+  graphId?: string;
+  status: GraphExecutionStatus;
+  result?: GraphResultValue;
+  error?: string;
+  usage?: NodeUsage;
+  timestamp: Date;
+}
+
+/**
+ * Callback type for graph state change events
+ * This allows Agent to track state changes during graph execution
+ */
+export type GraphStateChangeCallback = (event: GraphStateChangeEvent) => void | Promise<void>;

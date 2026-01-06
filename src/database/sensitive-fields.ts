@@ -1,3 +1,5 @@
+import { getLogger } from '../logger';
+
 /**
  * Centralized configuration for sensitive database fields that require encryption
  */
@@ -59,7 +61,8 @@ export function validateSensitiveFieldsConfig(): void {
     }
 
     if (fields.length === 0) {
-      console.warn(`Warning: No sensitive fields defined for table '${table}'`);
+      const logger = getLogger();
+      logger.warn(`No sensitive fields defined for table '${table}'`);
     }
 
     // Check for duplicate field names
@@ -106,16 +109,21 @@ export function validateEncryptionConsistency(): {
     );
   }
 
-  // Check for common sensitive field patterns
-  const commonSensitiveFields = ['password', 'secret', 'key', 'token', 'credential'];
+  // Check for common sensitive field patterns that might be missing
+  const commonSensitivePatterns = ['password', 'secret', 'key', 'token', 'credential'];
 
-  for (const [, fields] of Object.entries(SENSITIVE_FIELDS)) {
-    for (const commonField of commonSensitiveFields) {
-      if (fields.some((field) => field.toLowerCase().includes(commonField))) {
-        // Good - sensitive field patterns are included
-        continue;
+  for (const [tableName, fields] of Object.entries(SENSITIVE_FIELDS)) {
+    for (const commonPattern of commonSensitivePatterns) {
+      // Check if any field in this table matches the sensitive pattern
+      const hasPattern = fields.some((field) => field.toLowerCase().includes(commonPattern));
+      if (hasPattern) {
+        // Good - table has fields matching sensitive patterns, no warning needed
+        break;
       }
     }
+    // Note: Not having common patterns is not necessarily a warning -
+    // the table might legitimately not have such fields
+    void tableName; // Acknowledge we intentionally don't warn here
   }
 
   // Check for tables that might need encryption but aren't configured

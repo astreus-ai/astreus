@@ -20,10 +20,6 @@ export { Task } from './task';
 export { getDatabase } from './database';
 export type { DatabaseConfig } from './database/types';
 
-// Embedding exports (legacy compatibility)
-export { EmbeddingService } from './knowledge';
-export type { EmbeddingConfig } from './knowledge';
-
 // Memory types
 export type { Memory as MemoryType, MemorySearchOptions } from './memory/types';
 
@@ -41,7 +37,7 @@ export { getLLM } from './llm';
 export type { LLMProvider, LLMRequestOptions, LLMResponse } from './llm/types';
 
 // Logger exports
-export { getLogger, initializeLogger } from './logger';
+export { getLogger, initializeLogger, shutdownLogger, resetLogger } from './logger';
 export type { Logger, LoggerConfig, LogLevel } from './logger/types';
 
 // Graph exports

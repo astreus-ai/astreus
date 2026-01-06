@@ -51,7 +51,7 @@ export interface ContextManager {
   getContextWindow(): ContextWindow;
   analyzeContext(): ContextAnalysis;
   compressContext(): Promise<CompressionResult>;
-  clearContext(): void;
+  clearContext(): Promise<void>;
   shouldCompress(): boolean;
   exportContext(): string;
   importContext(data: string): void;
@@ -63,18 +63,22 @@ export interface ContextManager {
           id: string; // UUID
           content: string;
           created_at: string;
+          graphId?: string; // UUID - Graph relationship
+          taskId?: string; // UUID - Task relationship
+          sessionId?: string; // Session ID
           metadata?: MetadataObject;
         }>
       >;
     },
     limit?: number
-  ): Promise<void>;
+  ): Promise<boolean>;
   saveToMemory(memoryModule: {
     addMemory: (
       content: string,
-      metadata?: MetadataObject
+      metadata?: MetadataObject,
+      context?: { graphId?: string; taskId?: string; sessionId?: string }
     ) => Promise<{ id: string; content: string }>; // UUID
-  }): Promise<void>;
+  }): Promise<boolean>;
   // New storage methods
   initializeForAgent(agentId: string): Promise<void>; // UUID
   saveToStorage(): Promise<void>;

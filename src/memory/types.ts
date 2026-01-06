@@ -16,6 +16,7 @@ export interface Memory {
 export interface MemorySearchOptions {
   limit?: number;
   offset?: number;
+  pageSize?: number; // Page size for paginated queries (prevents memory leaks)
   graphId?: string; // UUID - Filter by graph ID
   taskId?: string; // UUID - Filter by task ID
   sessionId?: string; // Filter by session ID
@@ -27,6 +28,3 @@ export interface MemorySearchOptions {
   similarityThreshold?: number;
   useEmbedding?: boolean;
 }
-
-// Export Memory as MemoryType for backward compatibility
-export type MemoryType = Memory;

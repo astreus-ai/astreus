@@ -1,7 +1,94 @@
 import { ToolDefinition, ToolResult, ToolParameterValue } from '../plugin/types';
-import { Vision } from './index';
+import { Vision, ALLOWED_IMAGE_EXTENSIONS } from './index';
 import * as fs from 'fs';
 import * as path from 'path';
+
+// Agent-based Vision instances with proper lifecycle management
+// Instances are stored with timestamps for TTL-based cleanup
+interface VisionInstanceEntry {
+  instance: Vision;
+  lastAccessed: number;
+}
+
+const visionInstances = new Map<string, VisionInstanceEntry>();
+const INSTANCE_TTL_MS = 30 * 60 * 1000; // 30 minutes TTL
+let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Starts the periodic cleanup timer if not already running
+ */
+function ensureCleanupTimer(): void {
+  if (cleanupIntervalId === null) {
+    cleanupIntervalId = setInterval(
+      () => {
+        const now = Date.now();
+        for (const [key, entry] of visionInstances.entries()) {
+          if (now - entry.lastAccessed > INSTANCE_TTL_MS) {
+            visionInstances.delete(key);
+          }
+        }
+        // Stop timer if no instances remain
+        if (visionInstances.size === 0 && cleanupIntervalId !== null) {
+          clearInterval(cleanupIntervalId);
+          cleanupIntervalId = null;
+        }
+      },
+      5 * 60 * 1000
+    ); // Check every 5 minutes
+    // Allow Node.js to exit even if timer is running
+    if (cleanupIntervalId.unref) {
+      cleanupIntervalId.unref();
+    }
+  }
+}
+
+export function getVision(agentId?: string): Vision {
+  const key = agentId || 'default';
+  const entry = visionInstances.get(key);
+
+  if (entry) {
+    // Update last accessed time
+    entry.lastAccessed = Date.now();
+    return entry.instance;
+  }
+
+  // Create new instance
+  const newInstance = new Vision();
+  visionInstances.set(key, {
+    instance: newInstance,
+    lastAccessed: Date.now(),
+  });
+
+  // Start cleanup timer
+  ensureCleanupTimer();
+
+  return newInstance;
+}
+
+export function cleanupVision(agentId?: string): void {
+  const key = agentId || 'default';
+  visionInstances.delete(key);
+}
+
+/**
+ * Cleanup all vision instances - call during shutdown
+ */
+export function cleanupAllVisionInstances(): void {
+  visionInstances.clear();
+  if (cleanupIntervalId !== null) {
+    clearInterval(cleanupIntervalId);
+    cleanupIntervalId = null;
+  }
+}
+
+// Valid detail levels for image analysis
+const VALID_DETAIL_LEVELS = ['low', 'high'] as const;
+type DetailLevel = (typeof VALID_DETAIL_LEVELS)[number];
+
+function validateDetail(detail: string | undefined): DetailLevel | undefined {
+  if (!detail) return undefined;
+  return VALID_DETAIL_LEVELS.includes(detail as DetailLevel) ? (detail as DetailLevel) : 'low';
+}
 
 interface AnalysisParams {
   image_path: string;
@@ -94,18 +181,17 @@ export const analyzeImageTool: ToolDefinition = {
 
       // Resolve and normalize path to prevent traversal attacks
       const normalizedPath = path.resolve(path.normalize(image_path));
-      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
       const fileExtension = path.extname(normalizedPath).toLowerCase();
 
-      if (!allowedExtensions.includes(fileExtension)) {
+      if (!ALLOWED_IMAGE_EXTENSIONS.includes(fileExtension)) {
         return {
           success: false,
           data: null,
-          error: `Unsupported image format: ${fileExtension}`,
+          error: `Unsupported image format: ${fileExtension}. Allowed: ${ALLOWED_IMAGE_EXTENSIONS.join(', ')}`,
         };
       }
 
-      const visionService = new Vision();
+      const visionService = getVision();
 
       try {
         await fs.promises.access(normalizedPath);
@@ -117,9 +203,12 @@ export const analyzeImageTool: ToolDefinition = {
         };
       }
 
+      // Validate detail level - default to 'low' if invalid
+      const safeDetail = validateDetail(detail);
+
       const analysis = await visionService.analyzeImage(normalizedPath, {
         prompt,
-        detail: detail as 'low' | 'high',
+        detail: safeDetail,
         maxTokens: 1000,
       });
 
@@ -135,10 +224,11 @@ export const analyzeImageTool: ToolDefinition = {
         },
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         success: false,
         data: null,
-        error: `Image analysis failed: ${error}`,
+        error: `Image analysis failed: ${errorMessage}`,
       };
     }
   },
@@ -184,18 +274,17 @@ export const describeImageTool: ToolDefinition = {
 
       // Resolve and normalize path to prevent traversal attacks
       const normalizedPath = path.resolve(path.normalize(image_path));
-      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
       const fileExtension = path.extname(normalizedPath).toLowerCase();
 
-      if (!allowedExtensions.includes(fileExtension)) {
+      if (!ALLOWED_IMAGE_EXTENSIONS.includes(fileExtension)) {
         return {
           success: false,
           data: null,
-          error: `Unsupported image format: ${fileExtension}`,
+          error: `Unsupported image format: ${fileExtension}. Allowed: ${ALLOWED_IMAGE_EXTENSIONS.join(', ')}`,
         };
       }
 
-      const visionService = new Vision();
+      const visionService = getVision();
 
       try {
         await fs.promises.access(normalizedPath);
@@ -236,10 +325,11 @@ export const describeImageTool: ToolDefinition = {
         },
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         success: false,
         data: null,
-        error: `Image description failed: ${error}`,
+        error: `Image description failed: ${errorMessage}`,
       };
     }
   },
@@ -284,18 +374,17 @@ export const extractTextFromImageTool: ToolDefinition = {
 
       // Resolve and normalize path to prevent traversal attacks
       const normalizedPath = path.resolve(path.normalize(image_path));
-      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
       const fileExtension = path.extname(normalizedPath).toLowerCase();
 
-      if (!allowedExtensions.includes(fileExtension)) {
+      if (!ALLOWED_IMAGE_EXTENSIONS.includes(fileExtension)) {
         return {
           success: false,
           data: null,
-          error: `Unsupported image format: ${fileExtension}`,
+          error: `Unsupported image format: ${fileExtension}. Allowed: ${ALLOWED_IMAGE_EXTENSIONS.join(', ')}`,
         };
       }
 
-      const visionService = new Vision();
+      const visionService = getVision();
 
       try {
         await fs.promises.access(normalizedPath);
@@ -327,10 +416,11 @@ export const extractTextFromImageTool: ToolDefinition = {
         },
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         success: false,
         data: null,
-        error: `Text extraction failed: ${error}`,
+        error: `Text extraction failed: ${errorMessage}`,
       };
     }
   },
@@ -363,14 +453,13 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
 
         // Resolve and normalize path to prevent traversal attacks
         const normalizedPath = path.resolve(path.normalize(image_path));
-        const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
         const fileExtension = path.extname(normalizedPath).toLowerCase();
 
-        if (!allowedExtensions.includes(fileExtension)) {
+        if (!ALLOWED_IMAGE_EXTENSIONS.includes(fileExtension)) {
           return {
             success: false,
             data: null,
-            error: `Unsupported image format: ${fileExtension}`,
+            error: `Unsupported image format: ${fileExtension}. Allowed: ${ALLOWED_IMAGE_EXTENSIONS.join(', ')}`,
           };
         }
 
@@ -382,9 +471,12 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           };
         }
 
+        // Validate detail level - default to undefined if not 'low' or 'high'
+        const safeDetail = detail === 'low' || detail === 'high' ? detail : undefined;
+
         const analysis = await visionInstance.analyzeImage(normalizedPath, {
           prompt,
-          detail: detail as 'low' | 'high',
+          detail: safeDetail,
           maxTokens: 1000,
         });
 
@@ -400,10 +492,11 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           },
         };
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         return {
           success: false,
           data: null,
-          error: `Image analysis failed: ${error}`,
+          error: `Image analysis failed: ${errorMessage}`,
         };
       }
     },
@@ -434,14 +527,13 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
 
         // Resolve and normalize path to prevent traversal attacks
         const normalizedPath = path.resolve(path.normalize(image_path));
-        const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
         const fileExtension = path.extname(normalizedPath).toLowerCase();
 
-        if (!allowedExtensions.includes(fileExtension)) {
+        if (!ALLOWED_IMAGE_EXTENSIONS.includes(fileExtension)) {
           return {
             success: false,
             data: null,
-            error: `Unsupported image format: ${fileExtension}`,
+            error: `Unsupported image format: ${fileExtension}. Allowed: ${ALLOWED_IMAGE_EXTENSIONS.join(', ')}`,
           };
         }
 
@@ -482,10 +574,11 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           },
         };
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         return {
           success: false,
           data: null,
-          error: `Image description failed: ${error}`,
+          error: `Image description failed: ${errorMessage}`,
         };
       }
     },
@@ -516,14 +609,13 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
 
         // Resolve and normalize path to prevent traversal attacks
         const normalizedPath = path.resolve(path.normalize(image_path));
-        const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
         const fileExtension = path.extname(normalizedPath).toLowerCase();
 
-        if (!allowedExtensions.includes(fileExtension)) {
+        if (!ALLOWED_IMAGE_EXTENSIONS.includes(fileExtension)) {
           return {
             success: false,
             data: null,
-            error: `Unsupported image format: ${fileExtension}`,
+            error: `Unsupported image format: ${fileExtension}. Allowed: ${ALLOWED_IMAGE_EXTENSIONS.join(', ')}`,
           };
         }
 
@@ -555,10 +647,11 @@ export function createVisionTools(visionInstance: Vision): ToolDefinition[] {
           },
         };
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         return {
           success: false,
           data: null,
-          error: `Text extraction failed: ${error}`,
+          error: `Text extraction failed: ${errorMessage}`,
         };
       }
     },

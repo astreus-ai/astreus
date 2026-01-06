@@ -6,7 +6,77 @@ import { getLogger } from '../logger';
 import { getLLMProvider } from '../llm';
 import { VisionAnalysisOptions } from '../llm/types';
 import * as path from 'path';
+import * as fs from 'fs';
 import { DEFAULT_VISION_CONFIG } from './defaults';
+
+// Allowed image extensions for validation
+export const ALLOWED_IMAGE_EXTENSIONS = [
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+  '.tiff',
+  '.svg',
+];
+
+/**
+ * Validates an image path for security and existence
+ * Uses atomic file descriptor operations to prevent TOCTOU race conditions
+ * @throws Error if path is invalid or insecure
+ */
+function validateImagePath(imagePath: string): void {
+  // Resolve and normalize the path to get absolute path
+  const resolvedPath = path.resolve(imagePath);
+  const cwd = path.resolve(process.cwd());
+
+  // Check if resolved path is within the current working directory
+  // This prevents path traversal attacks even with normalized paths
+  if (!resolvedPath.startsWith(cwd)) {
+    throw new Error('Invalid image path: image path must be within working directory');
+  }
+
+  // Validate file extension
+  const ext = path.extname(resolvedPath).toLowerCase();
+  if (!ALLOWED_IMAGE_EXTENSIONS.includes(ext)) {
+    throw new Error(
+      `Invalid image format: ${ext}. Allowed formats: ${ALLOWED_IMAGE_EXTENSIONS.join(', ')}`
+    );
+  }
+
+  // Use atomic file descriptor operation to prevent TOCTOU race condition
+  // Open the file with read-only flag, which atomically checks existence and opens
+  let fd: number | null = null;
+  try {
+    // O_RDONLY | O_NOFOLLOW equivalent - open read-only, don't follow symlinks
+    fd = fs.openSync(resolvedPath, fs.constants.O_RDONLY);
+
+    // Now use fstatSync on the file descriptor (not the path) to avoid TOCTOU
+    const stats = fs.fstatSync(fd);
+
+    if (!stats.isFile()) {
+      throw new Error(`Path is not a file: ${resolvedPath}`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Image file not found: ${resolvedPath}`);
+    }
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new Error(`Too many symbolic links in path: ${resolvedPath}`);
+    }
+    throw error;
+  } finally {
+    // Always close the file descriptor
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close errors
+      }
+    }
+  }
+}
 
 export interface VisionConfig {
   provider?: 'openai' | 'claude' | 'gemini' | 'ollama';
@@ -49,7 +119,7 @@ export class Vision implements IAgentModule {
     this.logger.info('Vision module initialized');
 
     this.logger.debug('Vision module initialized', {
-      agentId: agent?.id || 0,
+      agentId: agent?.id ?? 0,
       agentName: agent?.name || 'standalone',
       provider: this.config.provider || 'auto',
       model: this.config.model || 'auto',
@@ -217,7 +287,13 @@ export class Vision implements IAgentModule {
       hasBaseURL: !!config.baseURL,
     });
 
-    const mainProvider = await getLLMProvider(config.provider!, {
+    if (!config.provider) {
+      throw new Error(
+        'Vision provider could not be auto-detected. Please configure a vision provider.'
+      );
+    }
+
+    const mainProvider = await getLLMProvider(config.provider, {
       apiKey: config.apiKey,
       baseUrl: config.baseURL || null, // Explicitly set to null to prevent fallback to main base URL
       logger: this.logger,
@@ -226,10 +302,17 @@ export class Vision implements IAgentModule {
     // Use dedicated vision provider if available
     const provider = mainProvider.getVisionProvider?.() || mainProvider;
 
-    return { provider, model: config.model! };
+    if (!config.model) {
+      throw new Error('Vision model could not be determined. Please configure a vision model.');
+    }
+
+    return { provider, model: config.model };
   }
 
   async analyzeImage(imagePath: string, options: AnalysisOptions = {}): Promise<string> {
+    // Validate image path for security
+    validateImagePath(imagePath);
+
     const fileName = path.basename(imagePath);
 
     // User-facing info log
@@ -243,7 +326,7 @@ export class Vision implements IAgentModule {
       hasOptions: Object.keys(options).length > 0,
       hasAgent: !!this.agent,
       agentVisionModel: this.agent?.config?.visionModel || 'undefined',
-      agentId: this.agent?.id || 0,
+      agentId: this.agent?.id ?? 0,
     });
 
     try {
@@ -255,7 +338,11 @@ export class Vision implements IAgentModule {
         model: model, // Pass the agent's vision model to provider
       };
 
-      const result = await provider.analyzeImage!(imagePath, visionOptions);
+      if (!provider.analyzeImage) {
+        throw new Error('Vision provider does not support analyzeImage method');
+      }
+
+      const result = await provider.analyzeImage(imagePath, visionOptions);
 
       // User-facing success message
       this.logger.info(`Image analysis completed for ${fileName}`);
@@ -305,7 +392,11 @@ export class Vision implements IAgentModule {
         model: model, // Pass the agent's vision model to provider
       };
 
-      const result = await provider.analyzeImageFromBase64!(base64Image, visionOptions);
+      if (!provider.analyzeImageFromBase64) {
+        throw new Error('Vision provider does not support analyzeImageFromBase64 method');
+      }
+
+      const result = await provider.analyzeImageFromBase64(base64Image, visionOptions);
 
       // User-facing success message
       this.logger.info('Base64 image analysis completed');

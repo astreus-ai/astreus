@@ -49,7 +49,7 @@ export interface TaskRequest {
   useSubAgents?: boolean; // Enable sub-agent delegation for this task
   subAgentDelegation?: 'auto' | 'manual' | 'sequential'; // Delegation strategy
   subAgentCoordination?: 'parallel' | 'sequential'; // How sub-agents coordinate
-  taskAssignment?: Record<number, string>; // Manual task assignment (agentId -> task)
+  taskAssignment?: Record<string, string>; // Manual task assignment (agentId -> task) - uses string keys for JSON serialization compatibility
 }
 
 export interface TaskResponse {

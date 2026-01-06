@@ -19,6 +19,15 @@ export interface ParsedSchedule {
  */
 export function parseScheduleString(scheduleStr: string, timezone: string = 'UTC'): ParsedSchedule {
   try {
+    // Check for empty or whitespace-only input first
+    if (!scheduleStr || scheduleStr.trim() === '') {
+      return {
+        schedule: {} as Schedule,
+        isValid: false,
+        error: 'Empty schedule string',
+      };
+    }
+
     const parts = scheduleStr.trim().toLowerCase().split('@');
 
     if (parts.length === 0) {
@@ -79,7 +88,9 @@ export function parseScheduleString(scheduleStr: string, timezone: string = 'UTC
       case '':
         // Handle '@15:30' format (once today)
         if (parts.length >= 2) {
-          const today = new Date().toISOString().split('T')[0];
+          const isoString = new Date().toISOString();
+          const dateParts = isoString.split('T');
+          const today = dateParts[0] ?? isoString.slice(0, 10); // Fallback to slice if split fails
           return parseOnce(today, parts[1], timezone);
         }
         return {
@@ -125,19 +136,19 @@ function parseHourly(timezone: string): ParsedSchedule {
 }
 
 function parseDaily(timeStr: string, timezone: string): ParsedSchedule {
-  const executeAt = parseTime(timeStr);
-  if (!executeAt.isValid) {
+  const executeAt = parseTime(timeStr, timezone);
+  if (!executeAt.isValid || !executeAt.time) {
     return {
       schedule: {} as Schedule,
       isValid: false,
-      error: executeAt.error,
+      error: executeAt.error ?? 'Failed to parse time',
     };
   }
 
   return {
     schedule: {
       type: 'recurring',
-      executeAt: executeAt.time!,
+      executeAt: executeAt.time,
       recurrence: {
         pattern: 'daily' as RecurrencePattern,
         interval: 1,
@@ -158,17 +169,17 @@ function parseWeekly(dayStr: string, timeStr: string, timezone: string): ParsedS
     };
   }
 
-  const executeAt = parseTime(timeStr);
-  if (!executeAt.isValid) {
+  const executeAt = parseTime(timeStr, timezone);
+  if (!executeAt.isValid || !executeAt.time) {
     return {
       schedule: {} as Schedule,
       isValid: false,
-      error: executeAt.error,
+      error: executeAt.error ?? 'Failed to parse time',
     };
   }
 
   // Find next occurrence of this day
-  const nextDate = getNextWeekday(dayOfWeek, executeAt.time!);
+  const nextDate = getNextWeekday(dayOfWeek, executeAt.time);
 
   return {
     schedule: {
@@ -195,17 +206,17 @@ function parseMonthly(dayStr: string, timeStr: string, timezone: string): Parsed
     };
   }
 
-  const executeAt = parseTime(timeStr);
-  if (!executeAt.isValid) {
+  const executeAt = parseTime(timeStr, timezone);
+  if (!executeAt.isValid || !executeAt.time) {
     return {
       schedule: {} as Schedule,
       isValid: false,
-      error: executeAt.error,
+      error: executeAt.error ?? 'Failed to parse time',
     };
   }
 
   // Find next occurrence of this day of month
-  const nextDate = getNextMonthDay(dayOfMonth, executeAt.time!);
+  const nextDate = getNextMonthDay(dayOfMonth, executeAt.time);
 
   return {
     schedule: {
@@ -232,18 +243,18 @@ function parseOnce(dateStr: string, timeStr: string, timezone: string): ParsedSc
     };
   }
 
-  const executeAt = parseTime(timeStr);
-  if (!executeAt.isValid) {
+  const executeAt = parseTime(timeStr, timezone);
+  if (!executeAt.isValid || !executeAt.time) {
     return {
       schedule: {} as Schedule,
       isValid: false,
-      error: executeAt.error,
+      error: executeAt.error ?? 'Failed to parse time',
     };
   }
 
   // Combine date and time
   const finalDate = new Date(date);
-  finalDate.setHours(executeAt.time!.getHours(), executeAt.time!.getMinutes(), 0, 0);
+  finalDate.setHours(executeAt.time.getHours(), executeAt.time.getMinutes(), 0, 0);
 
   return {
     schedule: {
@@ -261,7 +272,7 @@ interface ParsedTime {
   error?: string;
 }
 
-function parseTime(timeStr: string): ParsedTime {
+function parseTime(timeStr: string, timezone?: string): ParsedTime {
   const timeMatch = timeStr.match(/^(\d{1,2}):(\d{2})$/);
   if (!timeMatch) {
     return {
@@ -280,10 +291,13 @@ function parseTime(timeStr: string): ParsedTime {
     };
   }
 
-  const date = new Date();
-  date.setHours(hours, minutes, 0, 0);
+  // Use timezone parameter for proper timezone-aware date creation
+  const now = timezone
+    ? new Date(new Date().toLocaleString('en-US', { timeZone: timezone }))
+    : new Date();
+  now.setHours(hours, minutes, 0, 0);
 
-  return { isValid: true, time: date };
+  return { isValid: true, time: now };
 }
 
 function parseDayOfWeek(dayStr: string): number {
@@ -313,8 +327,13 @@ function getNextWeekday(targetDay: number, time: Date): Date {
   const now = new Date();
   const currentDay = now.getDay();
 
+  // Check if the target time has already passed today
+  const todayTargetTime = new Date(now);
+  todayTargetTime.setHours(time.getHours(), time.getMinutes(), 0, 0);
+  const hasTimePassed = now >= todayTargetTime;
+
   let daysUntilTarget = targetDay - currentDay;
-  if (daysUntilTarget <= 0) {
+  if (daysUntilTarget < 0 || (daysUntilTarget === 0 && hasTimePassed)) {
     daysUntilTarget += 7; // Next week
   }
 
@@ -325,18 +344,57 @@ function getNextWeekday(targetDay: number, time: Date): Date {
   return nextDate;
 }
 
+/**
+ * Get the last day of a given month
+ */
+function getLastDayOfMonth(year: number, month: number): number {
+  // Create a date for the first day of the next month, then go back one day
+  return new Date(year, month + 1, 0).getDate();
+}
+
+/**
+ * Clamp the target day to the last valid day of the month
+ * This handles cases like scheduling for day 31 in months with fewer days
+ */
+function clampDayToMonth(targetDay: number, year: number, month: number): number {
+  const lastDay = getLastDayOfMonth(year, month);
+  return Math.min(targetDay, lastDay);
+}
+
 function getNextMonthDay(targetDay: number, time: Date): Date {
   const now = new Date();
   const currentDay = now.getDate();
 
+  // Check if the target time has already passed today
+  const todayTargetTime = new Date(now);
+  todayTargetTime.setHours(time.getHours(), time.getMinutes(), 0, 0);
+  const hasTimePassed = now >= todayTargetTime;
+
   const nextDate = new Date(now);
 
-  if (targetDay <= currentDay) {
-    // Next month
-    nextDate.setMonth(now.getMonth() + 1);
+  // Clamp target day to valid day for current month
+  const clampedTargetDayThisMonth = clampDayToMonth(targetDay, now.getFullYear(), now.getMonth());
+
+  if (clampedTargetDayThisMonth > currentDay) {
+    // Target day is later this month (clamped to valid day)
+    nextDate.setDate(clampedTargetDayThisMonth);
+  } else if (clampedTargetDayThisMonth === currentDay && !hasTimePassed) {
+    // Today is the target day and time hasn't passed yet
+    nextDate.setDate(clampedTargetDayThisMonth);
+  } else {
+    // Target day has passed this month, go to next month
+    const nextMonth = now.getMonth() + 1;
+    const nextYear = nextMonth > 11 ? now.getFullYear() + 1 : now.getFullYear();
+    const normalizedMonth = nextMonth % 12;
+
+    // Clamp target day to valid day for next month
+    const clampedTargetDayNextMonth = clampDayToMonth(targetDay, nextYear, normalizedMonth);
+
+    nextDate.setFullYear(nextYear);
+    nextDate.setMonth(normalizedMonth);
+    nextDate.setDate(clampedTargetDayNextMonth);
   }
 
-  nextDate.setDate(targetDay);
   nextDate.setHours(time.getHours(), time.getMinutes(), 0, 0);
 
   return nextDate;

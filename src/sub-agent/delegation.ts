@@ -20,11 +20,13 @@ export class AutoDelegationStrategy implements DelegationStrategy {
 
   async delegate(
     prompt: string,
-    subAgents: IAgent[],
+    subAgents?: IAgent[],
     options?: SubAgentRunOptions,
     model?: string
   ): Promise<SubAgentTask[]> {
-    if (subAgents.length === 0) {
+    // Null/empty check with warning
+    if (!subAgents || subAgents.length === 0) {
+      this.logger?.warn('No sub-agents provided for delegation');
       return [];
     }
 
@@ -102,13 +104,13 @@ Example response:
 {
   "tasks": [
     {
-      "agentId": 123,
+      "agentId": "agent-uuid-1234",
       "task": "Research current AI trends in healthcare",
       "priority": 8,
       "reasoning": "Researcher agent best suited for information gathering"
     },
     {
-      "agentId": 124,
+      "agentId": "agent-uuid-5678",
       "task": "Write a comprehensive report based on the research findings",
       "priority": 6,
       "reasoning": "Writer agent specialized in content creation"
@@ -158,7 +160,7 @@ Example response:
 
           return hasValidAgentId && hasValidTask;
         })
-        .map((task: { agentId: number; task: string; priority?: number }) => ({
+        .map((task: { agentId: string; task: string; priority?: number }) => ({
           agentId: task.agentId,
           task: task.task.trim(),
           priority: typeof task.priority === 'number' ? task.priority : 5,
@@ -191,10 +193,15 @@ export class ManualDelegationStrategy implements DelegationStrategy {
 
   async delegate(
     _prompt: string,
-    subAgents: IAgent[],
+    subAgents?: IAgent[],
     options?: SubAgentRunOptions
   ): Promise<SubAgentTask[]> {
     const tasks: SubAgentTask[] = [];
+
+    // Null/empty check
+    if (!subAgents || subAgents.length === 0) {
+      return [];
+    }
 
     if (!options?.taskAssignment) {
       throw new Error('Manual delegation requires taskAssignment in options');
@@ -226,10 +233,11 @@ export class ManualDelegationStrategy implements DelegationStrategy {
 export class SequentialDelegationStrategy implements DelegationStrategy {
   name = 'sequential' as const;
 
-  async delegate(prompt: string, subAgents: IAgent[]): Promise<SubAgentTask[]> {
+  async delegate(prompt: string, subAgents?: IAgent[]): Promise<SubAgentTask[]> {
     const tasks: SubAgentTask[] = [];
 
-    if (subAgents.length === 0) {
+    // Null/empty check
+    if (!subAgents || subAgents.length === 0) {
       return tasks;
     }
 

@@ -29,4 +29,9 @@ export interface DatabaseConfig {
   client?: string;
   connection?: DatabaseConnection;
   pool?: DatabasePool;
+  // Connection pool configuration
+  /** Maximum number of connections in the pool (default: 10) */
+  maxPoolSize?: number;
+  /** Minimum number of connections in the pool (default: 2) */
+  minPoolSize?: number;
 }

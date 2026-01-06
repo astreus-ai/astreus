@@ -11,6 +11,7 @@ import {
 } from '../types';
 import { getLogger } from '../../logger';
 import { Logger } from '../../logger/types';
+import { LLMApiError, VisionError } from '../../errors';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -31,7 +32,16 @@ interface OllamaToolParameter {
   enum?: Array<string | number>;
   properties?: Record<string, OllamaToolParameter>;
 }
-import { Ollama, Message, ChatResponse, ToolCall } from 'ollama';
+import { Ollama, Message, ChatResponse } from 'ollama';
+
+// Helper type for vision generation options
+interface VisionGenerateOptions {
+  model: string;
+  prompt: string;
+  cleanBase64: string;
+  maxTokens?: number;
+  temperature?: number;
+}
 
 export class OllamaProvider implements LLMProvider {
   name = 'ollama';
@@ -115,6 +125,71 @@ export class OllamaProvider implements LLMProvider {
     return ['nomic-embed-text', 'mxbai-embed-large', 'all-minilm', 'snowflake-arctic-embed'];
   }
 
+  /**
+   * Helper function for vision generation with retry logic for model-not-found errors
+   * Consolidates duplicate retry logic from analyzeImageFromBase64 and analyzeImageFromBase64WithClient
+   */
+  private async executeVisionWithRetry(
+    client: Ollama,
+    opts: VisionGenerateOptions,
+    maxRetries = 2
+  ): Promise<{
+    response: string;
+    promptEvalCount: number;
+    evalCount: number;
+    totalDuration: number;
+  }> {
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await client.generate({
+          model: opts.model,
+          prompt: opts.prompt,
+          images: [opts.cleanBase64],
+          options: {
+            num_predict: opts.maxTokens || 1000,
+            temperature: opts.temperature || 0.1,
+          },
+          stream: false,
+        });
+
+        return {
+          response: response.response || 'No analysis available',
+          promptEvalCount: response.prompt_eval_count || 0,
+          evalCount: response.eval_count || 0,
+          totalDuration: response.total_duration || 0,
+        };
+      } catch (error) {
+        lastError = error as Error;
+        const errorMessage = lastError.message.toLowerCase();
+
+        // If it's a model not found error and we have retries left
+        if (
+          (errorMessage.includes('model') && errorMessage.includes('not found')) ||
+          errorMessage.includes('does not exist')
+        ) {
+          if (attempt < maxRetries) {
+            this.logger.warn(
+              `Model ${opts.model} not found, retrying... (attempt ${attempt + 1}/${maxRetries})`
+            );
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            continue;
+          }
+          // After retries exhausted, provide helpful error message
+          const availableModels = await client.list();
+          throw new Error(
+            `Model '${opts.model}' not found after ${maxRetries + 1} attempts. Available models: ${availableModels.models.map((m) => m.name).join(', ')}`
+          );
+        }
+        throw lastError;
+      }
+    }
+
+    // This should not be reached, but TypeScript needs it
+    throw lastError || new Error('Unknown error during image analysis');
+  }
+
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const messages = this.prepareMessages(options);
 
@@ -136,16 +211,30 @@ export class OllamaProvider implements LLMProvider {
       })),
     })) as ChatResponse;
 
-    // Extract tool calls from Ollama's response (if supported)
-    const toolCalls =
-      response.message?.tool_calls?.map((tc: ToolCall) => ({
-        id: tc.function?.name || 'tool-call',
-        type: 'function' as const,
-        function: {
-          name: tc.function.name,
-          arguments: tc.function.arguments || {},
-        },
-      })) || [];
+    // Extract tool calls from Ollama's response (if supported) with proper type safety
+    const toolCalls: Array<{
+      id: string;
+      type: 'function';
+      function: { name: string; arguments: Record<string, string | number | boolean | null> };
+    }> = [];
+
+    if (response.message?.tool_calls) {
+      for (const tc of response.message.tool_calls) {
+        // Skip tool calls with null/undefined function
+        if (tc.function == null || tc.function.name == null) {
+          continue;
+        }
+        toolCalls.push({
+          id: tc.function.name || `tool-${Date.now()}`,
+          type: 'function' as const,
+          function: {
+            name: tc.function.name,
+            arguments:
+              (tc.function.arguments as Record<string, string | number | boolean | null>) || {},
+          },
+        });
+      }
+    }
 
     return {
       content: response.message?.content || '',
@@ -193,8 +282,12 @@ export class OllamaProvider implements LLMProvider {
         // Handle tool calls if present
         if (chunk.message?.tool_calls) {
           for (const tc of chunk.message.tool_calls) {
+            // Skip tool calls with null/undefined function
+            if (tc.function == null) {
+              continue;
+            }
             toolCalls.push({
-              id: tc.function?.name || 'tool-call',
+              id: tc.function.name || 'tool-call',
               type: 'function',
               function: {
                 name: tc.function.name,
@@ -217,8 +310,11 @@ export class OllamaProvider implements LLMProvider {
         }
       }
     } catch (error) {
-      throw new Error(
-        `Ollama streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      throw new LLMApiError(
+        `Ollama streaming error: ${originalError.message}`,
+        this.name,
+        originalError
       );
     }
   }
@@ -294,14 +390,18 @@ export class OllamaProvider implements LLMProvider {
 
       return result;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
       this.logger.error('Embedding generation failed');
       this.logger.debug('Ollama embedding error', {
         model: embeddingModel,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
-      throw new Error(`Ollama embedding generation failed: ${errorMessage}`);
+      throw new LLMApiError(
+        `Ollama embedding generation failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 
@@ -319,8 +419,10 @@ export class OllamaProvider implements LLMProvider {
       maxTokens: options.maxTokens || 1000,
     });
 
-    // Validate image file
-    if (!fs.existsSync(imagePath)) {
+    // Validate image file (async)
+    try {
+      await fs.promises.access(imagePath);
+    } catch {
       this.logger.error(`Image file not found: ${imagePath}`);
       throw new Error(`Image file not found: ${imagePath}`);
     }
@@ -334,8 +436,8 @@ export class OllamaProvider implements LLMProvider {
       );
     }
 
-    // Read and encode image
-    const imageBuffer = fs.readFileSync(imagePath);
+    // Read and encode image (async)
+    const imageBuffer = await fs.promises.readFile(imagePath);
     const base64Image = imageBuffer.toString('base64');
 
     return this.analyzeImageFromBase64(base64Image, options);
@@ -355,48 +457,32 @@ export class OllamaProvider implements LLMProvider {
     });
 
     try {
-      const model = options.model || this.getVisionModels()[0]; // Use agent's model or fallback to first available
+      const model = options.model || this.getVisionModels()[0];
       const prompt = options.prompt || 'Analyze this image and describe what you see in detail.';
-
-      // Remove data URL prefix if present
       const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
 
-      // Check if model is available
-      const availableModels = await this.client.list();
-      const modelExists = availableModels.models.some((m) => m.name.includes(model.split(':')[0]));
-
-      if (!modelExists) {
-        this.logger.error(`Model not found: ${model}`);
-        throw new Error(
-          `Model '${model}' not found. Available models: ${availableModels.models.map((m) => m.name).join(', ')}`
-        );
-      }
-
-      const response = await this.client.generate({
+      // Use consolidated retry helper
+      const response = await this.executeVisionWithRetry(this.client, {
         model,
         prompt,
-        images: [cleanBase64],
-        options: {
-          num_predict: options.maxTokens || 1000,
-          temperature: options.temperature || 0.1,
-        },
-        stream: false,
+        cleanBase64,
+        maxTokens: options.maxTokens,
+        temperature: options.temperature,
       });
 
       const processingTime = Date.now() - startTime;
-      const content = response.response || 'No analysis available';
 
       const result: VisionAnalysisResult = {
-        content,
+        content: response.response,
         confidence: 1.0,
         metadata: {
           model,
           provider: this.name,
           processingTime,
           tokenUsage: {
-            promptTokens: response.prompt_eval_count || 0,
-            completionTokens: response.eval_count || 0,
-            totalTokens: (response.prompt_eval_count || 0) + (response.eval_count || 0),
+            promptTokens: response.promptEvalCount,
+            completionTokens: response.evalCount,
+            totalTokens: response.promptEvalCount + response.evalCount,
           },
         },
       };
@@ -405,25 +491,29 @@ export class OllamaProvider implements LLMProvider {
       this.logger.debug('Ollama image analysis result', {
         model,
         processingTime,
-        contentLength: content.length,
-        promptEvalCount: response.prompt_eval_count || 0,
-        evalCount: response.eval_count || 0,
-        totalDuration: response.total_duration || 0,
+        contentLength: response.response.length,
+        promptEvalCount: response.promptEvalCount,
+        evalCount: response.evalCount,
+        totalDuration: response.totalDuration,
       });
 
       return result;
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
 
       this.logger.error('Image analysis failed');
       this.logger.debug('Ollama image analysis error', {
         processingTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
-      throw new Error(`Ollama vision analysis failed: ${errorMessage}`);
+      throw new VisionError(
+        `Ollama vision analysis failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 
@@ -469,7 +559,7 @@ export class OllamaProvider implements LLMProvider {
       getVisionModels: this.getVisionModels.bind(this),
       getEmbeddingModels: () => [],
       analyzeImage: async (imagePath: string, options?: VisionAnalysisOptions) => {
-        const imageBuffer = fs.readFileSync(imagePath);
+        const imageBuffer = await fs.promises.readFile(imagePath);
         const base64Image = imageBuffer.toString('base64');
 
         return this.analyzeImageFromBase64WithClient(base64Image, options, this.client);
@@ -493,63 +583,52 @@ export class OllamaProvider implements LLMProvider {
     });
 
     try {
-      const model = options.model || this.getVisionModels()[0]; // Use agent's model or fallback to first available
+      const model = options.model || this.getVisionModels()[0];
       const prompt = options.prompt || 'Analyze this image and describe what you see in detail.';
-
-      // Remove data URL prefix if present
       const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
 
-      // Check if model is available
-      const availableModels = await client.list();
-      const modelExists = availableModels.models.some((m) => m.name.includes(model.split(':')[0]));
-
-      if (!modelExists) {
-        this.logger.error(`Model not found: ${model}`);
-        throw new Error(
-          `Model '${model}' not found. Available models: ${availableModels.models.map((m) => m.name).join(', ')}`
-        );
-      }
-
-      const response = await client.generate({
+      // Use consolidated retry helper
+      const response = await this.executeVisionWithRetry(client, {
         model,
         prompt,
-        images: [cleanBase64],
-        options: {
-          num_predict: options.maxTokens || 1000,
-          temperature: options.temperature || 0.1,
-        },
-        stream: false,
+        cleanBase64,
+        maxTokens: options.maxTokens,
+        temperature: options.temperature,
       });
 
       const processingTime = Date.now() - startTime;
-      const content = response.response || 'No analysis available';
 
       return {
-        content,
+        content: response.response,
         confidence: 1.0,
         metadata: {
           model,
           provider: this.name,
           processingTime,
           tokenUsage: {
-            promptTokens: response.prompt_eval_count || 0,
-            completionTokens: response.eval_count || 0,
-            totalTokens: (response.prompt_eval_count || 0) + (response.eval_count || 0),
+            promptTokens: response.promptEvalCount,
+            completionTokens: response.evalCount,
+            totalTokens: response.promptEvalCount + response.evalCount,
           },
         },
       };
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
 
       this.logger.error('Ollama image analysis failed');
       this.logger.debug('Ollama image analysis error', {
         processingTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
-      throw new Error(`Ollama vision analysis failed: ${errorMessage}`);
+      // Use VisionError for consistency with other providers
+      throw new VisionError(
+        `Ollama vision analysis failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 }

@@ -27,7 +27,7 @@ export interface ScheduledItem {
   type: 'task' | 'graph' | 'graph_node';
   schedule: Schedule;
   targetId: string | number; // Task ID, Graph ID, or Node ID
-  agentId: number;
+  agentId: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   executionCount: number;
   lastExecutedAt?: Date;

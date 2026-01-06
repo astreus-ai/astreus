@@ -142,17 +142,48 @@ export class KnowledgeDatabase {
       if (decrypted[field] !== undefined && decrypted[field] !== null) {
         if (field === 'metadata') {
           // Handle JSON metadata fields
-          const decryptedMetadata = await this.encryption.decryptJSON(
-            String(decrypted[field]),
-            `${tableName}.${field}`
-          );
-          decrypted[field] = decryptedMetadata ? JSON.stringify(decryptedMetadata) : null;
+          try {
+            const decryptedMetadata = await this.encryption.decryptJSON(
+              String(decrypted[field]),
+              `${tableName}.${field}`
+            );
+            // Handle null/undefined decryption result gracefully
+            if (decryptedMetadata !== null && decryptedMetadata !== undefined) {
+              decrypted[field] = JSON.stringify(decryptedMetadata);
+            } else {
+              // Keep original value if decryption returns null (might be unencrypted data)
+              this.logger.debug(
+                `Decryption returned null for ${tableName}.${field}, keeping original value`
+              );
+            }
+          } catch (metadataError) {
+            // Handle unencrypted data gracefully - keep original value
+            this.logger.debug(`Failed to decrypt ${tableName}.${field}, keeping original value`, {
+              error: metadataError instanceof Error ? metadataError.message : String(metadataError),
+            });
+          }
         } else {
           // Handle string fields
-          decrypted[field] = await this.encryption.decrypt(
-            String(decrypted[field]),
-            `${tableName}.${field}`
-          );
+          try {
+            const decryptedValue = await this.encryption.decrypt(
+              String(decrypted[field]),
+              `${tableName}.${field}`
+            );
+            // Handle null/undefined decryption result gracefully
+            if (decryptedValue !== null && decryptedValue !== undefined) {
+              decrypted[field] = decryptedValue;
+            } else {
+              // Keep original value if decryption returns null
+              this.logger.debug(
+                `Decryption returned null for ${tableName}.${field}, keeping original value`
+              );
+            }
+          } catch (fieldError) {
+            // Handle unencrypted data gracefully - keep original value
+            this.logger.debug(`Failed to decrypt ${tableName}.${field}, keeping original value`, {
+              error: fieldError instanceof Error ? fieldError.message : String(fieldError),
+            });
+          }
         }
       }
     }
@@ -177,6 +208,9 @@ export class KnowledgeDatabase {
 
     const client = await this.pool.connect();
     try {
+      // Start transaction for atomic initialization
+      await client.query('BEGIN');
+
       // Enable vector and UUID extensions
       await client.query('CREATE EXTENSION IF NOT EXISTS vector');
       await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
@@ -333,8 +367,21 @@ export class KnowledgeDatabase {
         `);
       }
 
+      // Commit transaction on success
+      await client.query('COMMIT');
       // Knowledge database initialized successfully
     } catch (error) {
+      // Rollback transaction on failure
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        // Logger.error signature: (message, error?, data?, agentName?)
+        const rollbackErr =
+          rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+        this.logger.error('Failed to rollback knowledge database initialization', rollbackErr, {
+          originalError: error instanceof Error ? error.message : String(error),
+        });
+      }
       // Failed to initialize knowledge database
       throw new Error(`Knowledge database initialization failed: ${error}`);
     } finally {
@@ -526,7 +573,7 @@ export class KnowledgeDatabase {
                 document_metadata: decryptedDoc.metadata,
               };
             } catch {
-              // If decryption fails, return original row (might be unencrypted legacy data)
+              // Handle unencrypted data gracefully
               this.logger.debug('Failed to decrypt knowledge search result', {
                 chunkId: row.id,
                 documentId: row.document_id,
@@ -562,7 +609,7 @@ export class KnowledgeDatabase {
             try {
               return await this.decryptKnowledgeData(document, 'knowledge_documents');
             } catch {
-              // If decryption fails, return original document (might be unencrypted legacy data)
+              // Handle unencrypted data gracefully
               this.logger.debug('Failed to decrypt document', { documentId: document.id });
               return document;
             }
@@ -595,7 +642,7 @@ export class KnowledgeDatabase {
             try {
               return await this.decryptKnowledgeData(chunk, 'knowledge_chunks');
             } catch {
-              // If decryption fails, return original chunk (might be unencrypted legacy data)
+              // Handle unencrypted data gracefully
               this.logger.debug('Failed to decrypt chunk', { chunkId: chunk.id });
               return chunk;
             }
@@ -672,15 +719,69 @@ export class KnowledgeDatabase {
   }
 }
 
-// Singleton instance
+// Singleton instance with mutex for race condition prevention
 let knowledgeDb: KnowledgeDatabase | null = null;
+let initializationPromise: Promise<KnowledgeDatabase> | null = null;
+let currentConfig: KnowledgeDatabaseConfig | undefined = undefined;
 
+/**
+ * Get the singleton knowledge database instance.
+ * Uses a mutex pattern to prevent race conditions when multiple
+ * callers request the database simultaneously.
+ *
+ * @param config - Optional configuration for the database.
+ *                 Note: If the database is already initialized, a new config
+ *                 will be ignored. A warning will be logged if configs differ.
+ * @returns Promise resolving to the KnowledgeDatabase instance
+ */
 export async function getKnowledgeDatabase(
   config?: KnowledgeDatabaseConfig
 ): Promise<KnowledgeDatabase> {
-  if (!knowledgeDb) {
-    knowledgeDb = new KnowledgeDatabase(config);
-    await knowledgeDb.initialize();
+  // If already initialized, return existing instance
+  if (knowledgeDb) {
+    // Warn if different config is provided after initialization
+    if (config && currentConfig) {
+      const configChanged =
+        config.url !== currentConfig.url ||
+        config.embeddingModel !== currentConfig.embeddingModel ||
+        config.embeddingProvider?.name !== currentConfig.embeddingProvider?.name;
+
+      if (configChanged) {
+        const logger = getLogger();
+        logger.warn(
+          'getKnowledgeDatabase called with different config after initialization. ' +
+            'The new config will be ignored. To use a different config, restart the application.',
+          {
+            existingProvider: currentConfig.embeddingProvider?.name,
+            newProvider: config.embeddingProvider?.name,
+            existingModel: currentConfig.embeddingModel,
+            newModel: config.embeddingModel,
+          }
+        );
+      }
+    }
+    return knowledgeDb;
   }
-  return knowledgeDb;
+
+  // If initialization is in progress, wait for it (mutex pattern)
+  if (initializationPromise) {
+    return initializationPromise;
+  }
+
+  // Start initialization with mutex
+  initializationPromise = (async () => {
+    try {
+      const db = new KnowledgeDatabase(config);
+      await db.initialize();
+      knowledgeDb = db;
+      currentConfig = config;
+      return db;
+    } catch (error) {
+      // Reset on failure so next call can retry
+      initializationPromise = null;
+      throw error;
+    }
+  })();
+
+  return initializationPromise;
 }

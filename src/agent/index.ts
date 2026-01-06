@@ -19,7 +19,8 @@ import {
   PluginConfig,
   ToolCallResult,
 } from '../plugin/types';
-import { convertToolParametersToJsonSchema } from '../plugin';
+import { convertToolParametersToJsonSchema, cleanupPlugin } from '../plugin';
+import { ToolError } from '../errors';
 
 import { Task } from '../task';
 import { Memory } from '../memory';
@@ -28,6 +29,7 @@ import { Plugin } from '../plugin';
 import { MCP } from '../mcp';
 import { Knowledge } from '../knowledge';
 import { Vision } from '../vision';
+import { cleanupVision } from '../vision/tools';
 import { SubAgent } from '../sub-agent';
 import { ContextManager } from '../context';
 import {
@@ -43,6 +45,70 @@ import { getLLM } from '../llm';
 import { LLMRequestOptions, Tool, ToolCall } from '../llm/types';
 import { Logger } from '../logger';
 import * as fs from 'fs/promises';
+import path from 'path';
+import { randomUUID } from 'crypto';
+
+// Maximum file size for attachments (10MB)
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+// Cached base directory for path safety checks - computed once at module load
+// This prevents TOCTOU issues where cwd could change between checks
+const SAFE_BASE_DIR = path.resolve(process.cwd());
+
+/**
+ * Validate that a file path is safe and doesn't traverse outside allowed directories.
+ * Prevents path traversal attacks (e.g., ../../etc/passwd).
+ * @param filePath - The file path to validate
+ * @param allowedBase - Optional base directory to restrict paths to (defaults to cached cwd)
+ * @returns true if path is safe, false otherwise
+ */
+function isPathSafe(filePath: string, allowedBase?: string): boolean {
+  // Validate input
+  if (!filePath || typeof filePath !== 'string') {
+    return false;
+  }
+
+  // Reject paths with null bytes (common attack vector)
+  if (filePath.includes('\0')) {
+    return false;
+  }
+
+  // Normalize and resolve the path
+  const normalizedPath = path.normalize(filePath);
+  const resolved = path.resolve(normalizedPath);
+
+  // Use provided base or cached base directory (not live cwd)
+  const base = allowedBase ? path.resolve(allowedBase) : SAFE_BASE_DIR;
+  const normalizedBase = path.normalize(base);
+
+  // Check if resolved path starts with base directory
+  // Use normalizedBase + path.sep to prevent prefix attacks (e.g., /base-other matching /base)
+  const isWithinBase =
+    resolved === normalizedBase || resolved.startsWith(normalizedBase + path.sep);
+
+  // Additional check: reject symbolic link attempts in path components
+  // (actual symlink following would require async fs.realpath which is beyond this sync check)
+  const pathParts = normalizedPath.split(path.sep);
+  const hasTraversal = pathParts.some((part) => part === '..' || part === '.');
+
+  // If there are explicit traversal components, verify the final path is still safe
+  if (hasTraversal && !isWithinBase) {
+    return false;
+  }
+
+  return isWithinBase;
+}
+
+/**
+ * Type guard for validating role values.
+ * Ensures type safety when casting unknown values to role types.
+ */
+function isValidRole(role: unknown): role is 'user' | 'assistant' | 'system' {
+  return role === 'user' || role === 'assistant' || role === 'system';
+}
+
+// Maximum session messages to prevent unbounded memory growth
+const MAX_SESSION_MESSAGES = 1000;
 
 /**
  * Abstract base class for all agents
@@ -81,6 +147,9 @@ export abstract class BaseAgent implements IAgent {
    * Abstract context methods that must be implemented by concrete agent classes
    */
   abstract getContext(): ContextMessage[];
+  abstract clearContext(options?: { syncWithMemory?: boolean }): Promise<void>;
+  abstract exportContext(): string;
+  abstract importContext(data: string): void;
 
   // Getters for IAgent interface
   get id(): string {
@@ -136,6 +205,11 @@ export abstract class BaseAgent implements IAgent {
 
     // Update logger debug mode if changed
     if (updates.debug !== undefined) {
+      // Dispose old logger if exists (Logger class has dispose method)
+      const loggerWithDispose = this.logger as Logger & { dispose?: () => void };
+      if (loggerWithDispose.dispose) {
+        loggerWithDispose.dispose();
+      }
       const debugMode = updates.debug === true;
       const agentName = this.data.name || 'unknown';
       this.logger = new Logger({
@@ -178,11 +252,11 @@ export abstract class BaseAgent implements IAgent {
   }
 
   getTemperature(): number {
-    return this.config.temperature || DEFAULT_AGENT_CONFIG.temperature;
+    return this.config.temperature ?? DEFAULT_AGENT_CONFIG.temperature ?? 0.7;
   }
 
   getMaxTokens(): number {
-    return this.config.maxTokens || DEFAULT_AGENT_CONFIG.maxTokens;
+    return this.config.maxTokens ?? DEFAULT_AGENT_CONFIG.maxTokens ?? 2000;
   }
 
   getSystemPrompt(): string | null {
@@ -196,10 +270,10 @@ export abstract class BaseAgent implements IAgent {
     const llm = getLLM(this.logger);
 
     const response = await llm.generateResponse({
-      model: options?.model || this.getModel(),
+      model: options?.model ?? this.getModel(),
       messages: [{ role: 'user', content: prompt }],
-      temperature: options?.temperature || this.getTemperature(),
-      maxTokens: options?.maxTokens || this.getMaxTokens(),
+      temperature: options?.temperature ?? this.getTemperature(),
+      maxTokens: options?.maxTokens ?? this.getMaxTokens(),
       systemPrompt: this.getSystemPrompt() || undefined,
       stream: options?.stream,
     });
@@ -212,6 +286,17 @@ export abstract class BaseAgent implements IAgent {
  * Main Agent class with module system
  */
 export class Agent extends BaseAgent implements IAgentWithModules {
+  // Static lock map to prevent race conditions during agent creation
+  private static creationLock = new Map<string, Promise<Agent>>();
+
+  // Instance-level operation lock to prevent concurrent chat/run operations
+  // This prevents state corruption when multiple calls happen simultaneously
+  private operationLock: Promise<void> | null = null;
+  private operationQueue: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
+
   private modules: {
     task: Task;
     memory?: Memory;
@@ -253,9 +338,10 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     this.modules.subAgent = new SubAgent(this.logger);
 
     // Always initialize context manager (core component)
+    // Use nullish coalescing (??) to properly handle 0 values for numeric fields
     this.modules.context = new ContextManager({
-      maxContextLength: data.maxContextLength || data.maxTokens || 8000,
-      autoCompress: data.autoContextCompression || false,
+      maxContextLength: data.maxContextLength ?? data.maxTokens ?? 8000,
+      autoCompress: data.autoContextCompression ?? false,
       model: this.getModel(), // Use agent's effective model
       preserveLastN: data.preserveLastN,
       compressionRatio: data.compressionRatio,
@@ -302,16 +388,37 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
   async addMemory(content: string, metadata?: MetadataObject): Promise<MemoryType> {
     if (this.modules.memory) {
-      // Memory enabled: Save to database
-      const memory = await this.modules.memory.addMemory(content, metadata);
+      // Extract context fields from metadata for proper DB storage
+      const context: { graphId?: string; taskId?: string; sessionId?: string } = {};
+      if (metadata?.graphId) {
+        context.graphId = String(metadata.graphId);
+      }
+      if (metadata?.taskId) {
+        context.taskId = String(metadata.taskId);
+      }
+      if (metadata?.sessionId) {
+        context.sessionId = String(metadata.sessionId);
+      }
+
+      // Memory enabled: Save to database with context
+      const memory = await this.modules.memory.addMemory(
+        content,
+        metadata,
+        Object.keys(context).length > 0 ? context : undefined
+      );
 
       // Also add to context manager (for non-memory-fed scenarios)
+      // Mark as 'memory' source so saveContextToMemory won't re-save it
       if (this.modules.context) {
         const contextMessage: ContextMessage = {
-          role: (metadata?.role as 'user' | 'assistant') || 'user',
+          role: isValidRole(metadata?.role) ? metadata.role : 'user',
           content,
           timestamp: new Date(),
-          metadata,
+          metadata: {
+            ...metadata,
+            source: 'memory', // Mark as already saved to memory to prevent duplicate saves
+            memory_id: memory.id,
+          },
         };
         await this.modules.context.addMessage(contextMessage);
       }
@@ -320,17 +427,27 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     } else {
       // Memory disabled: Add to session-only messages
       const contextMessage: ContextMessage = {
-        role: (metadata?.role as 'user' | 'assistant') || 'user',
+        role: isValidRole(metadata?.role) ? metadata.role : 'user',
         content,
         timestamp: new Date(),
         metadata,
       };
 
+      // Enforce session messages size limit to prevent unbounded memory growth
+      if (this.sessionMessages.length >= MAX_SESSION_MESSAGES) {
+        // Remove oldest messages from the beginning (not from the middle)
+        const removeCount = Math.floor(MAX_SESSION_MESSAGES / 2);
+        this.sessionMessages = this.sessionMessages.slice(removeCount);
+        this.logger.debug('Truncated session messages', {
+          removed: removeCount,
+          remaining: this.sessionMessages.length,
+        });
+      }
       this.sessionMessages.push(contextMessage);
 
-      // Return mock memory object
+      // Return mock memory object with proper UUID
       return {
-        id: `temp-${Date.now()}`, // Temp UUID
+        id: randomUUID(),
         agentId: this.id,
         content,
         metadata: metadata || {},
@@ -371,6 +488,227 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   async clearMemories(): Promise<number> {
     if (!this.modules.memory) throw new Error('Memory module not enabled');
     return this.modules.memory.clearMemories();
+  }
+
+  /**
+   * Clear all data: both memory and context
+   * This ensures Memory and Context are always synchronized
+   */
+  async clearAll(): Promise<{ memoriesCleared: number; contextCleared: boolean }> {
+    let memoriesCleared = 0;
+    let contextCleared = false;
+
+    // Clear memory if enabled
+    if (this.modules.memory) {
+      memoriesCleared = await this.modules.memory.clearMemories();
+      // Note: Memory callback will automatically clear context
+    }
+
+    // Clear context (in case memory is not enabled or callback didn't fire)
+    if (this.modules.context) {
+      await this.modules.context.clearContext();
+      contextCleared = true;
+    }
+
+    // Clear session messages
+    this.sessionMessages = [];
+
+    this.logger.info(
+      `Cleared all data: ${memoriesCleared} memories, context cleared: ${contextCleared}`
+    );
+
+    return { memoriesCleared, contextCleared };
+  }
+
+  /**
+   * Clear session messages to free memory.
+   * Call this when conversation context is no longer needed.
+   */
+  clearSessionMessages(): void {
+    this.sessionMessages = [];
+  }
+
+  /**
+   * Destroy agent resources and free memory.
+   * Call this when the agent is no longer needed.
+   * All cleanup operations are performed even if some fail.
+   */
+  async destroy(): Promise<void> {
+    const cleanupErrors: Array<{ module: string; error: string }> = [];
+
+    // Clear session messages
+    this.sessionMessages = [];
+
+    // Clear operation queue - reject pending operations
+    while (this.operationQueue.length > 0) {
+      const pending = this.operationQueue.shift();
+      if (pending) {
+        pending.reject(new Error('Agent destroyed while operation was pending'));
+      }
+    }
+
+    // Clear operation lock
+    this.operationLock = null;
+
+    // Clear context if available
+    if (this.modules.context) {
+      try {
+        await this.clearContext();
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'context',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      // Always delete reference even if cleanup fails
+      delete this.modules.context;
+    }
+
+    // Memory module cleanup
+    if (this.modules.memory) {
+      try {
+        // Call Memory.destroy() for proper cleanup
+        this.modules.memory.destroy();
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'memory',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      delete this.modules.memory;
+    }
+
+    // Knowledge module cleanup
+    if (this.modules.knowledge) {
+      try {
+        // Knowledge module cleanup - clear internal references
+        const knowledgeModule = this.modules.knowledge as Knowledge & {
+          knex?: unknown;
+          vectorStore?: unknown;
+        };
+        knowledgeModule.knex = null;
+        knowledgeModule.vectorStore = null;
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'knowledge',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      delete this.modules.knowledge;
+    }
+
+    // Vision module cleanup
+    if (this.modules.vision) {
+      try {
+        // Vision module cleanup - call cleanupVision to remove from instance cache
+        cleanupVision(this.data.id);
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'vision',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      delete this.modules.vision;
+    }
+
+    // SubAgent module cleanup
+    if (this.modules.subAgent) {
+      try {
+        // SubAgent has async destroy method
+        await this.modules.subAgent.destroy();
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'subAgent',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      delete this.modules.subAgent;
+    }
+
+    // Task module cleanup
+    if (this.modules.task) {
+      try {
+        // Task module cleanup - clear agent reference
+        // Use type-safe approach with unknown cast to avoid intersection type issues
+        const taskModule = this.modules.task as unknown as {
+          agent?: unknown;
+          knex?: unknown;
+        };
+        taskModule.agent = null;
+        taskModule.knex = null;
+        // Note: We don't delete task module as it's required by interface
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'task',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // MCP cleanup
+    if (this.modules.mcp) {
+      try {
+        // MCP module cleanup - remove all servers and wait for processes to exit
+        await this.modules.mcp.cleanup();
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'mcp',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      delete this.modules.mcp;
+    }
+
+    // Plugin cleanup
+    if (this.modules.plugin) {
+      try {
+        if (this.data.id) {
+          await cleanupPlugin(this.data.id);
+        }
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'plugin',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      delete this.modules.plugin;
+    }
+
+    // Graph module cleanup (if exists)
+    if (this.modules.graph) {
+      try {
+        await this.modules.graph.destroy();
+      } catch (error) {
+        cleanupErrors.push({
+          module: 'graph',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      delete this.modules.graph;
+    }
+
+    // Log cleanup errors if any occurred
+    if (cleanupErrors.length > 0) {
+      this.logger.warn('Agent destroy completed with errors', {
+        agentName: this.data.name,
+        errorCount: cleanupErrors.length,
+        // Serialize errors array to string for LogData compatibility
+        errors: JSON.stringify(cleanupErrors),
+      });
+    }
+
+    this.logger.info(`Agent ${this.data.name} destroyed`);
+
+    // Logger dispose - must be last to allow logging above
+    try {
+      this.logger.dispose();
+    } catch (error) {
+      // Can't log here since logger is being disposed
+      console.warn(
+        'Logger dispose failed:',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
   }
 
   async rememberConversation(
@@ -440,11 +778,21 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
   async addKnowledgeFromFile(filePath: string, metadata?: MetadataObject): Promise<void> {
     if (!this.modules.knowledge) throw new Error('Knowledge module not enabled');
+    // Security: Validate file path to prevent path traversal attacks
+    if (!isPathSafe(filePath)) {
+      this.logger.error('Invalid file path: path traversal detected', undefined, { filePath });
+      throw new Error('Invalid file path: path traversal detected');
+    }
     return this.modules.knowledge.addKnowledgeFromFile(filePath, metadata);
   }
 
   async addKnowledgeFromDirectory(dirPath: string, metadata?: MetadataObject): Promise<void> {
     if (!this.modules.knowledge) throw new Error('Knowledge module not enabled');
+    // Security: Validate directory path to prevent path traversal attacks
+    if (!isPathSafe(dirPath)) {
+      this.logger.error('Invalid directory path: path traversal detected', undefined, { dirPath });
+      throw new Error('Invalid directory path: path traversal detected');
+    }
     return this.modules.knowledge.addKnowledgeFromDirectory(dirPath, metadata);
   }
 
@@ -564,12 +912,46 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     tasks: Array<{ agent: IAgent; prompt: string }>,
     coordination: 'parallel' | 'sequential' = 'sequential'
   ): Promise<Array<{ task: { agent: IAgent; prompt: string }; result: string }>> {
-    if (!this.modules.subAgent) throw new Error('SubAgent module not available');
-    // For now, delegate to existing method - would need more complex implementation for multi-task coordination
-    const results = [];
+    if (!this.modules.subAgent) {
+      throw new Error('SubAgent module not initialized');
+    }
+
+    // Capture reference to avoid repeated null checks in callbacks
+    const subAgentModule = this.modules.subAgent;
+
+    if (coordination === 'parallel') {
+      // Use Promise.allSettled to handle partial failures gracefully
+      // This ensures successful tasks are not lost when some tasks fail
+      const settledResults = await Promise.allSettled(
+        tasks.map(async (task) => {
+          if (task.agent && task.prompt) {
+            const result = await subAgentModule.executeWithSubAgents(task.prompt, [task.agent], {});
+            return { task, result };
+          }
+          return null;
+        })
+      );
+
+      const results: Array<{ task: { agent: IAgent; prompt: string }; result: string }> = [];
+      for (const settled of settledResults) {
+        if (settled.status === 'fulfilled' && settled.value !== null) {
+          results.push(settled.value);
+        } else if (settled.status === 'rejected') {
+          // Log failed tasks but don't throw - allow other tasks to complete
+          this.logger.warn('Parallel task execution failed', {
+            error:
+              settled.reason instanceof Error ? settled.reason.message : String(settled.reason),
+          });
+        }
+      }
+      return results;
+    }
+
+    // Sequential mode - use the captured reference for consistency
+    const results: Array<{ task: { agent: IAgent; prompt: string }; result: string }> = [];
     for (const task of tasks) {
       if (task.agent && task.prompt) {
-        const result = await this.modules.subAgent.executeWithSubAgents(task.prompt, [task.agent], {
+        const result = await subAgentModule.executeWithSubAgents(task.prompt, [task.agent], {
           coordination,
         });
         results.push({ task, result });
@@ -580,40 +962,62 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
   // ===== CONTEXT MODULE METHODS (always available) =====
 
+  private getContextModule(): ContextManager {
+    if (!this.modules.context) {
+      throw new Error('Context module not initialized');
+    }
+    return this.modules.context;
+  }
+
   getContextMessages(): ContextMessage[] {
-    return this.modules.context!.getMessages();
+    return this.getContextModule().getMessages();
   }
 
   getContextWindow(): ContextWindow {
-    return this.modules.context!.getContextWindow();
+    return this.getContextModule().getContextWindow();
   }
 
   analyzeContext(): ContextAnalysis {
-    return this.modules.context!.analyzeContext();
+    return this.getContextModule().analyzeContext();
   }
 
   async compressContext(): Promise<CompressionResult> {
-    return this.modules.context!.compressContext();
+    return this.getContextModule().compressContext();
   }
 
-  clearContext(): void {
-    this.modules.context!.clearContext();
+  async clearContext(options?: { syncWithMemory?: boolean }): Promise<void> {
+    await this.getContextModule().clearContext(options);
   }
 
   exportContext(): string {
-    return this.modules.context!.exportContext();
+    return this.getContextModule().exportContext();
   }
 
   importContext(data: string): void {
-    this.modules.context!.importContext(data);
+    this.getContextModule().importContext(data);
   }
 
   async generateContextSummary(): Promise<ContextSummary> {
-    return this.modules.context!.generateSummary();
+    return this.getContextModule().generateSummary();
   }
 
   updateContextModel(model: string): void {
-    this.modules.context!.updateModel(model);
+    this.getContextModule().updateModel(model);
+  }
+
+  /**
+   * Search context messages with filtering support
+   * Supports graphId, taskId, sessionId, role, and text query filters
+   */
+  searchContext(options: {
+    query?: string;
+    graphId?: string;
+    taskId?: string;
+    sessionId?: string;
+    role?: 'user' | 'assistant' | 'system';
+    limit?: number;
+  }): ContextMessage[] {
+    return this.getContextModule().searchContext(options);
   }
 
   /**
@@ -623,7 +1027,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   getContext(): ContextMessage[] {
     if (this.hasMemory() && this.modules.memory) {
       // Memory enabled: Get from context manager (fed by memory)
-      return this.modules.context!.getMessages();
+      return this.getContextModule().getMessages();
     } else {
       // Memory disabled: Return session-only messages
       return [...this.sessionMessages];
@@ -638,8 +1042,13 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       return;
     }
 
+    if (!this.modules.context) {
+      this.logger.warn('Context module not available for saving to memory');
+      return;
+    }
+
     try {
-      await this.modules.context!.saveToMemory(this.modules.memory);
+      await this.modules.context.saveToMemory(this.modules.memory);
     } catch (error) {
       this.logger.warn('Failed to save context to memory', {
         error: error instanceof Error ? error.message : String(error),
@@ -654,7 +1063,9 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     this.data.model = model;
 
     // Update context manager's model
-    this.modules.context!.updateModel(model);
+    if (this.modules.context) {
+      this.modules.context.updateModel(model);
+    }
 
     this.logger.info(`Agent model updated to: ${model}`);
   }
@@ -678,7 +1089,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
     try {
       // Clear existing context
-      this.clearContext();
+      await this.clearContext();
 
       let allMemories: MemoryType[] = [];
 
@@ -718,10 +1129,18 @@ export class Agent extends BaseAgent implements IAgentWithModules {
           limit: Math.floor(limit / 2), // Use half of limit for graph memories
         });
 
-        // Combine and sort by timestamp
-        allMemories = [...generalConversations, ...graphMemories].sort(
-          (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
-        );
+        // Combine, deduplicate by memory ID, and sort by timestamp
+        const seenIds = new Set<string>();
+        const combinedMemories = [...generalConversations, ...graphMemories];
+        allMemories = combinedMemories
+          .filter((m) => {
+            if (seenIds.has(m.id)) {
+              return false; // Skip duplicate
+            }
+            seenIds.add(m.id);
+            return true;
+          })
+          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 
         this.logger.debug(
           `Loaded ${generalConversations.length} general + ${graphMemories.length} graph-specific memories for graph ${graphId}`
@@ -730,7 +1149,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
       // Load all memories into context
       for (const memory of allMemories) {
-        const role = (memory.metadata?.role as 'user' | 'assistant' | 'system') || 'user';
+        const role = isValidRole(memory.metadata?.role) ? memory.metadata.role : 'user';
         const contextMessage: ContextMessage = {
           role,
           content: memory.content,
@@ -758,8 +1177,9 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     // User-facing info log with agent details
     this.logger.info(`Initializing agent: ${this.data.name}`);
 
-    // Get LLM provider information
-    const model = this.data.model || 'gpt-4o-mini';
+    // Get LLM provider information - handle empty string as well as undefined/null
+    const model =
+      this.data.model && this.data.model.trim() !== '' ? this.data.model : 'gpt-4o-mini';
     const provider = getProviderForModel(model);
 
     // Detailed debug log with all agent configuration
@@ -785,6 +1205,71 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
     if (this.modules.memory) {
       await this.modules.memory.initialize();
+
+      // Register callback for Memory-Context synchronization (Memory -> Context)
+      // Note: Callback is async and must await all async operations to prevent race conditions
+      this.modules.memory.onMemoryChange(async (event, data) => {
+        if (!this.modules.context) return;
+
+        try {
+          switch (event) {
+            case 'update':
+              if (data.memoryId) {
+                // updateMessageByMemoryId may be async - await it
+                await Promise.resolve(
+                  this.modules.context.updateMessageByMemoryId(data.memoryId, {
+                    content: data.content,
+                    metadata: data.metadata,
+                  })
+                );
+              }
+              break;
+            case 'delete':
+              if (data.memoryId) {
+                // removeMessageByMemoryId may be async - await it
+                await Promise.resolve(this.modules.context.removeMessageByMemoryId(data.memoryId));
+              }
+              break;
+            case 'clear':
+              // Memory cleared, also clear context (use syncWithMemory: false to prevent infinite loop)
+              await this.modules.context.clearContext({ syncWithMemory: false });
+              break;
+          }
+        } catch (error) {
+          this.logger.warn('Memory-Context synchronization failed', {
+            event,
+            memoryId: data.memoryId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+    }
+
+    // Register callback for Context-Memory synchronization (Context -> Memory)
+    if (this.modules.context) {
+      // When context is cleared, optionally clear memory too
+      this.modules.context.onContextClear(async () => {
+        if (this.modules.memory) {
+          // Use syncWithContext: false to prevent infinite loop
+          await this.modules.memory.clearMemories({ syncWithContext: false });
+          this.logger.debug('Memory cleared due to context clear sync');
+        }
+      });
+
+      // When context is compressed, notify memory for potential archiving
+      this.modules.context.onCompression(async (info) => {
+        this.logger.info('Context compression completed', {
+          originalMessages: info.originalMessageCount,
+          compressedMessages: info.compressedMessageCount,
+          messagesRemoved: info.messagesRemoved,
+          tokensReduced: info.tokensReduced,
+          strategy: info.strategy,
+        });
+
+        // Note: Memory archiving could be implemented here if needed
+        // For now, we just log the compression event
+        // Future enhancement: Mark old memories as archived or move to cold storage
+      });
     }
 
     if (this.modules.plugin) {
@@ -808,9 +1293,9 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     }
 
     // Initialize context storage for this agent
-    if (this.data.id) {
+    if (this.data.id && this.modules.context) {
       try {
-        await this.modules.context!.initializeForAgent(this.data.id);
+        await this.modules.context.initializeForAgent(this.data.id);
       } catch (error) {
         this.logger.warn('Failed to initialize context storage', {
           error: error instanceof Error ? error.message : String(error),
@@ -840,9 +1325,67 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   }
 
   /**
-   * Factory method to create a new agent or find existing one by name
+   * Factory method to create a new agent or find existing one by name.
+   * Uses a lock mechanism to prevent race conditions when creating agents
+   * with the same name concurrently.
+   *
+   * Note: If the first creation attempt fails, subsequent callers will NOT
+   * receive the rejected promise - instead they will start a fresh creation attempt.
    */
   static async create(config: AgentConfigInput): Promise<Agent> {
+    const lockKey = config.name;
+
+    // Check if there's already a creation in progress for this name
+    const existingLock = Agent.creationLock.get(lockKey);
+    if (existingLock) {
+      try {
+        // Wait for the existing creation to complete and return that agent
+        return await existingLock;
+      } catch {
+        // The existing creation failed - check if it's still the same promise
+        // If so, we can try a fresh creation (the original caller would have cleaned up)
+        const currentLock = Agent.creationLock.get(lockKey);
+        if (currentLock === existingLock) {
+          // Same failed promise is still there - this shouldn't happen normally
+          // because the original caller's finally block should have cleaned it up
+          // But handle it defensively by continuing to try fresh creation
+          Agent.creationLock.delete(lockKey);
+        } else if (currentLock) {
+          // A new creation attempt is in progress, wait for it
+          return await currentLock;
+        }
+        // Fall through to start fresh creation
+      }
+    }
+
+    // Create the agent with lock protection
+    // Wrap in a new promise to handle errors and cleanup properly
+    const createPromise = Agent._doCreate(config).catch((error) => {
+      // On error, immediately clean up the lock so other callers can retry
+      // This must happen before the error propagates to prevent others from waiting on a failed promise
+      Agent.creationLock.delete(lockKey);
+      throw error;
+    });
+
+    Agent.creationLock.set(lockKey, createPromise);
+
+    try {
+      const agent = await createPromise;
+      return agent;
+    } finally {
+      // Clean up on success as well
+      // Use a check to avoid deleting a different promise (in case of rapid recreation)
+      if (Agent.creationLock.get(lockKey) === createPromise) {
+        Agent.creationLock.delete(lockKey);
+      }
+    }
+  }
+
+  /**
+   * Internal method that performs the actual agent creation.
+   * Should not be called directly - use create() instead.
+   */
+  private static async _doCreate(config: AgentConfigInput): Promise<Agent> {
     const db = await getDatabase();
 
     // Apply defaults for required boolean fields
@@ -860,9 +1403,9 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     const existingAgent = await db.getAgentByName(fullConfig.name);
 
     let agentData: AgentConfig;
-    if (existingAgent) {
+    if (existingAgent && existingAgent.id) {
       // Agent exists, update it with new config
-      const updatedAgent = await db.updateAgent(existingAgent.id!, fullConfig);
+      const updatedAgent = await db.updateAgent(existingAgent.id, fullConfig);
       if (!updatedAgent) {
         throw new Error(`Failed to update agent with ID ${existingAgent.id}`);
       }
@@ -924,63 +1467,186 @@ export class Agent extends BaseAgent implements IAgentWithModules {
   }
 
   /**
-   * List all agents
+   * List all agents (returns only agent data without initializing modules).
+   * Use this for listing/browsing agents without full initialization.
+   * @param options - Optional settings
+   * @param options.initialize - If true, fully initialize all agents (default: false for performance)
+   * @param options.limit - Maximum number of agents to return (default: 100, max: 1000)
+   * @param options.offset - Number of agents to skip for pagination (default: 0)
    */
-  static async list(): Promise<Agent[]> {
+  static async list(options?: {
+    initialize?: boolean;
+    limit?: number;
+    offset?: number;
+  }): Promise<Agent[]> {
     const db = await getDatabase();
     const agentsData = await db.listAgents();
-    const agents = await Promise.all(
-      agentsData.map(async (data) => {
-        const agent = new Agent(data);
-        await agent.initializeModules();
-        return agent;
-      })
-    );
-    return agents;
+
+    // Apply pagination with sensible defaults to prevent memory issues
+    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 1000);
+    const offset = Math.max(options?.offset ?? 0, 0);
+    const paginatedData = agentsData.slice(offset, offset + limit);
+
+    // Lazy loading: Don't initialize modules unless explicitly requested
+    // This prevents memory issues when listing many agents
+    if (options?.initialize) {
+      // Use Promise.allSettled to handle partial failures gracefully
+      const settledResults = await Promise.allSettled(
+        paginatedData.map(async (data) => {
+          const agent = new Agent(data);
+          await agent.initializeModules();
+          return agent;
+        })
+      );
+
+      // Collect successful agents and log failures
+      const agents: Agent[] = [];
+      for (let i = 0; i < settledResults.length; i++) {
+        const result = settledResults[i];
+        if (result.status === 'fulfilled') {
+          agents.push(result.value);
+        } else {
+          // Log initialization failure but continue with other agents
+          const agentName = paginatedData[i]?.name ?? 'unknown';
+          console.warn(`Failed to initialize agent '${agentName}':`, result.reason);
+        }
+      }
+      return agents;
+    }
+
+    // Return agents without full module initialization (lazy loading)
+    return paginatedData.map((data) => new Agent(data));
   }
 
   /**
-   * Main run method
+   * Acquire operation lock to prevent concurrent chat/run operations
+   * Operations are queued and executed sequentially to prevent state corruption
+   * Uses a proper async queue instead of busy-wait loop for efficiency
+   * @param timeout - Maximum time to wait for lock acquisition (default: 60000ms)
+   * @returns A release function to be called when operation completes
    */
-  async run(prompt: string, options?: RunOptions): Promise<string> {
-    // Add context processing here if needed
+  private async acquireOperationLock(timeout = 60000): Promise<() => void> {
+    // If there's an existing operation, queue this one
+    if (this.operationLock) {
+      // Create a promise that will resolve when it's our turn
+      const waitPromise = new Promise<void>((resolve, reject) => {
+        // Set up timeout
+        const timeoutId = setTimeout(() => {
+          // Remove ourselves from queue on timeout
+          const index = this.operationQueue.findIndex((item) => item.resolve === resolve);
+          if (index !== -1) {
+            this.operationQueue.splice(index, 1);
+          }
+          reject(new Error(`Operation lock acquisition timeout after ${timeout}ms`));
+        }, timeout);
 
-    // Check if we should use tools
-    const useTools = options?.useTools !== undefined ? options.useTools : this.canUseTools();
+        // Add to queue with timeout cleanup
+        this.operationQueue.push({
+          resolve: () => {
+            clearTimeout(timeoutId);
+            resolve();
+          },
+          reject: (error: Error) => {
+            clearTimeout(timeoutId);
+            reject(error);
+          },
+        });
+      });
 
-    if (useTools) {
-      // Tool execution logic would go here
-      // For now, just use LLM
+      // Wait for our turn
+      await waitPromise;
     }
 
-    // Call LLM
-    return this.callLLM(prompt, options);
+    // Create new lock - we now own the lock
+    let releaseFunction: (() => void) | null = null;
+    this.operationLock = new Promise<void>((resolve) => {
+      releaseFunction = () => {
+        // Release our lock first
+        this.operationLock = null;
+        resolve();
+
+        // Then notify next in queue (if any) that it's their turn
+        const next = this.operationQueue.shift();
+        if (next) {
+          // Use setImmediate/nextTick pattern to avoid stack overflow on long queues
+          Promise.resolve().then(() => next.resolve());
+        }
+      };
+    });
+
+    if (!releaseFunction) {
+      throw new Error('Failed to initialize operation lock release function');
+    }
+
+    return releaseFunction;
+  }
+
+  /**
+   * Main run method - protected by operation lock to prevent concurrent state corruption
+   */
+  async run(prompt: string, options?: RunOptions): Promise<string> {
+    const release = await this.acquireOperationLock();
+
+    try {
+      // Add context processing here if needed
+
+      // Check if we should use tools
+      const useTools = options?.useTools !== undefined ? options.useTools : this.canUseTools();
+
+      if (useTools) {
+        // Tool execution logic would go here
+        // For now, just use LLM
+      }
+
+      // Call LLM
+      return await this.callLLM(prompt, options);
+    } finally {
+      release();
+    }
   }
 
   /**
    * Ask method - direct conversation with the agent (task-independent)
+   * Protected by operation lock to prevent concurrent state corruption
    */
   async ask(prompt: string, options?: AskOptions): Promise<string> {
+    const release = await this.acquireOperationLock();
+
+    try {
+      return await this._askInternal(prompt, options);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Internal ask implementation - do not call directly, use ask() instead
+   */
+  private async _askInternal(prompt: string, options?: AskOptions): Promise<string> {
     // Check if sub-agents should be used
     if (options?.useSubAgents && this.config.subAgents && this.config.subAgents.length > 0) {
-      this.logger.info(`Using sub-agents for task delegation`, {
-        subAgentCount: this.config.subAgents.length,
-        delegation: options.delegation || 'auto',
-      });
-
-      try {
-        const result = await this.modules.subAgent!.executeWithSubAgents(
-          prompt,
-          this.config.subAgents,
-          options,
-          this.getModel() // Pass main agent's model for delegation
-        );
-        return result;
-      } catch (error) {
-        this.logger.warn('Sub-agent execution failed, falling back to main agent', {
-          error: error instanceof Error ? error.message : String(error),
+      if (!this.modules.subAgent) {
+        this.logger.warn('SubAgent module not available, falling back to main agent');
+      } else {
+        this.logger.info(`Using sub-agents for task delegation`, {
+          subAgentCount: this.config.subAgents.length,
+          delegation: options.delegation || 'auto',
         });
-        // Fall through to regular agent execution
+
+        try {
+          const result = await this.modules.subAgent.executeWithSubAgents(
+            prompt,
+            this.config.subAgents,
+            options,
+            this.getModel() // Pass main agent's model for delegation
+          );
+          return result;
+        } catch (error) {
+          this.logger.warn('Sub-agent execution failed, falling back to main agent', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          // Fall through to regular agent execution
+        }
       }
     }
     let enhancedPrompt = prompt;
@@ -1016,6 +1682,14 @@ export class Agent extends BaseAgent implements IAgentWithModules {
             // For image files, use vision if available
             if (attachment.type === 'image' && this.hasVision() && this.modules?.vision) {
               try {
+                // Security: Validate image path to prevent path traversal attacks
+                if (!isPathSafe(attachment.path)) {
+                  this.logger.error('Invalid image path: path traversal detected', undefined, {
+                    imagePath: attachment.path,
+                  });
+                  throw new Error('Invalid image path: path traversal detected');
+                }
+
                 const visionModule = this.modules.vision as Vision;
                 if (visionModule && typeof visionModule.analyzeImage === 'function') {
                   const analysis = await visionModule.analyzeImage(attachment.path, {
@@ -1031,9 +1705,43 @@ export class Agent extends BaseAgent implements IAgentWithModules {
             // For text-based files, include content preview
             else if (['text', 'markdown', 'code', 'json'].includes(attachment.type)) {
               try {
-                const content = await fs.readFile(attachment.path, 'utf-8');
-                const preview = content.length > 500 ? content.slice(0, 500) + '...' : content;
-                description += `\nContent:\n${preview}`;
+                // Security: Validate path to prevent path traversal attacks
+                if (!isPathSafe(attachment.path)) {
+                  throw new Error('Invalid file path: path traversal detected');
+                }
+
+                // Fix TOCTOU vulnerability: Read file first, then check size
+                // This prevents race conditions where file changes between stat and read
+                // Use a file handle for atomic operation
+                let fileHandle: import('fs/promises').FileHandle | null = null;
+                try {
+                  fileHandle = await fs.open(attachment.path, 'r');
+                  const stats = await fileHandle.stat();
+
+                  // Security: Check file size to prevent DoS attacks
+                  if (stats.size > MAX_FILE_SIZE) {
+                    throw new Error(`File too large: ${stats.size} bytes (max: ${MAX_FILE_SIZE})`);
+                  }
+
+                  // Read content using the same file handle to prevent TOCTOU
+                  const buffer = await fileHandle.readFile({ encoding: 'utf-8' });
+                  const content = buffer.toString();
+
+                  // Double-check the actual content size (in case file grew)
+                  if (content.length > MAX_FILE_SIZE) {
+                    throw new Error(
+                      `File content too large: ${content.length} chars (max: ${MAX_FILE_SIZE})`
+                    );
+                  }
+
+                  const preview = content.length > 500 ? content.slice(0, 500) + '...' : content;
+                  description += `\nContent:\n${preview}`;
+                } finally {
+                  // Always close the file handle
+                  if (fileHandle) {
+                    await fileHandle.close();
+                  }
+                }
               } catch (error) {
                 description += ` [File read error: ${error instanceof Error ? error.message : 'Unknown error'}]`;
               }
@@ -1058,54 +1766,86 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       });
     }
 
-    // Add temporary MCP servers if provided
-    if (options?.mcpServers && Array.isArray(options.mcpServers) && this.modules?.mcp) {
-      const mcpModule = this.modules.mcp as MCP;
-      if (mcpModule && typeof mcpModule.addMCPServer === 'function') {
-        for (const server of options.mcpServers) {
-          if (server && server.name) {
-            try {
-              await mcpModule.addMCPServer(server);
-            } catch (error) {
-              this.logger.warn(
-                `Failed to add MCP server ${server.name}:`,
-                error instanceof Error ? error.message : String(error)
-              );
+    // Track added servers and plugins for cleanup on error
+    const addedMcpServers: string[] = [];
+    const addedPlugins: string[] = [];
+
+    try {
+      // Add temporary MCP servers if provided
+      if (options?.mcpServers && Array.isArray(options.mcpServers) && this.modules?.mcp) {
+        const mcpModule = this.modules.mcp as MCP;
+        if (mcpModule && typeof mcpModule.addMCPServer === 'function') {
+          for (const server of options.mcpServers) {
+            if (server && server.name) {
+              try {
+                await mcpModule.addMCPServer(server);
+                addedMcpServers.push(server.name);
+              } catch (error) {
+                this.logger.warn(
+                  `Failed to add MCP server ${server.name}:`,
+                  error instanceof Error ? error.message : String(error)
+                );
+              }
             }
           }
         }
       }
-    }
 
-    // Add temporary plugins if provided
-    if (options?.plugins && Array.isArray(options.plugins) && this.modules?.plugin) {
-      const pluginModule = this.modules.plugin as Plugin;
-      if (pluginModule && typeof pluginModule.registerPlugin === 'function') {
-        for (const pluginDef of options.plugins) {
-          if (pluginDef && pluginDef.plugin) {
-            try {
-              // Create a temporary plugin instance
-              const tempPlugin: IPlugin = {
-                name: pluginDef.plugin.name,
-                version: pluginDef.plugin.version,
-                description: pluginDef.plugin.description || '',
-                tools: (pluginDef.plugin.tools || []) as ToolDefinition[],
-              };
+      // Add temporary plugins if provided
+      if (options?.plugins && Array.isArray(options.plugins) && this.modules?.plugin) {
+        const pluginModule = this.modules.plugin as Plugin;
+        if (pluginModule && typeof pluginModule.registerPlugin === 'function') {
+          for (const pluginDef of options.plugins) {
+            if (pluginDef && pluginDef.plugin) {
+              try {
+                // Create a temporary plugin instance
+                const tempPlugin: IPlugin = {
+                  name: pluginDef.plugin.name,
+                  version: pluginDef.plugin.version,
+                  description: pluginDef.plugin.description || '',
+                  tools: (pluginDef.plugin.tools || []) as ToolDefinition[],
+                };
 
-              await pluginModule.registerPlugin(tempPlugin, {
-                name: pluginDef.plugin.name,
-                enabled: true,
-                config: pluginDef.config || {},
-              });
-            } catch (error) {
-              this.logger.warn(
-                `Failed to register temporary plugin ${pluginDef.plugin.name}:`,
-                error instanceof Error ? error.message : String(error)
-              );
+                await pluginModule.registerPlugin(tempPlugin, {
+                  name: pluginDef.plugin.name,
+                  enabled: true,
+                  config: pluginDef.config || {},
+                });
+                addedPlugins.push(pluginDef.plugin.name);
+              } catch (error) {
+                this.logger.warn(
+                  `Failed to register temporary plugin ${pluginDef.plugin.name}:`,
+                  error instanceof Error ? error.message : String(error)
+                );
+              }
             }
           }
         }
       }
+    } catch (error) {
+      // Cleanup on error: remove any successfully added servers and plugins
+      // Log cleanup errors for debugging instead of silently ignoring
+      for (const serverName of addedMcpServers) {
+        try {
+          (this.modules.mcp as MCP)?.removeMCPServer(serverName);
+        } catch (cleanupError) {
+          this.logger.debug('Failed to cleanup MCP server on error', {
+            serverName,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          });
+        }
+      }
+      for (const pluginName of addedPlugins) {
+        try {
+          await (this.modules.plugin as Plugin)?.unregisterPlugin(pluginName);
+        } catch (cleanupError) {
+          this.logger.debug('Failed to cleanup plugin on error', {
+            pluginName,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          });
+        }
+      }
+      throw error;
     }
 
     // Add current user prompt
@@ -1168,10 +1908,10 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
     // Prepare LLM options
     const llmOptions: LLMRequestOptions = {
-      model: options?.model || this.getModel(),
+      model: options?.model ?? this.getModel(),
       messages,
-      temperature: options?.temperature || this.getTemperature(),
-      maxTokens: options?.maxTokens || this.getMaxTokens(),
+      temperature: options?.temperature ?? this.getTemperature(),
+      maxTokens: options?.maxTokens ?? this.getMaxTokens(),
       stream: options?.stream,
       tools: tools.length > 0 ? tools : undefined,
     };
@@ -1220,42 +1960,90 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
         // Execute each tool call
         for (const toolCall of llmResponse.toolCalls) {
+          const toolName = toolCall.function?.name;
+          if (!toolName) {
+            this.logger.warn('Skipping tool call with missing function name', {
+              toolCallId: toolCall.id,
+            });
+            continue;
+          }
+
           try {
             let toolResult: string;
 
-            if (toolCall.function.name.startsWith('mcp_')) {
+            if (toolName.startsWith('mcp_')) {
               // Handle MCP tool call
-              const mcpToolName = toolCall.function.name.substring(4); // Remove 'mcp_' prefix
+              const mcpToolName = toolName.substring(4); // Remove 'mcp_' prefix
 
-              // Ensure arguments are properly formatted for MCP
+              // Ensure arguments are properly formatted for MCP with type-safe parsing
               let mcpArgs: Record<string, string | number | boolean | object | null>;
               if (typeof toolCall.function.arguments === 'string') {
-                mcpArgs = JSON.parse(toolCall.function.arguments);
-              } else {
+                try {
+                  const parsed: unknown = JSON.parse(toolCall.function.arguments);
+                  // Validate parsed result is an object (not null, array, or primitive)
+                  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    throw new Error('MCP tool arguments must be a JSON object');
+                  }
+                  mcpArgs = parsed as Record<string, string | number | boolean | object | null>;
+                } catch (parseError) {
+                  const parseErr =
+                    parseError instanceof Error ? parseError : new Error(String(parseError));
+                  this.logger.error('Failed to parse MCP tool arguments', parseErr);
+                  throw new Error(`Invalid JSON in MCP tool arguments: ${parseErr.message}`);
+                }
+              } else if (
+                toolCall.function.arguments &&
+                typeof toolCall.function.arguments === 'object'
+              ) {
                 mcpArgs = toolCall.function.arguments as Record<
                   string,
                   string | number | boolean | object | null
                 >;
+              } else {
+                // Default to empty object if no arguments provided
+                mcpArgs = {};
               }
 
-              const mcpResult = await this.modules.mcp!.callMCPTool(
-                mcpToolName,
-                mcpArgs as Record<string, import('../mcp/types').MCPValue>
-              );
-              toolResult = mcpResult.content.map((c) => c.text || '').join('\n');
-            } else if (toolCall.function.name.startsWith('plugin_')) {
+              if (this.modules.mcp) {
+                const mcpResult = await this.modules.mcp.callMCPTool(
+                  mcpToolName,
+                  mcpArgs as Record<string, import('../mcp/types').MCPValue>
+                );
+                toolResult = mcpResult.content.map((c) => c.text || '').join('\n');
+              } else {
+                toolResult = 'MCP module not available';
+              }
+            } else if (toolName.startsWith('plugin_')) {
               // Handle plugin tool call
-              const pluginToolName = toolCall.function.name.substring(7); // Remove 'plugin_' prefix
+              const pluginToolName = toolName.substring(7); // Remove 'plugin_' prefix
 
-              // Ensure arguments are properly formatted for plugin tools
+              // Ensure arguments are properly formatted for plugin tools with type-safe parsing
               let pluginArgs: Record<string, string | number | boolean | object | null>;
               if (typeof toolCall.function.arguments === 'string') {
-                pluginArgs = JSON.parse(toolCall.function.arguments);
-              } else {
+                try {
+                  const parsed: unknown = JSON.parse(toolCall.function.arguments);
+                  // Validate parsed result is an object (not null, array, or primitive)
+                  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    throw new Error('Plugin tool arguments must be a JSON object');
+                  }
+                  pluginArgs = parsed as Record<string, string | number | boolean | object | null>;
+                } catch (parseError) {
+                  const parseErr =
+                    parseError instanceof Error ? parseError : new Error(String(parseError));
+                  this.logger.error('Failed to parse plugin tool arguments', parseErr);
+                  throw new Error(`Invalid JSON in plugin tool arguments: ${parseErr.message}`);
+                }
+              } else if (
+                toolCall.function.arguments &&
+                typeof toolCall.function.arguments === 'object'
+              ) {
                 pluginArgs = toolCall.function.arguments as Record<
                   string,
                   string | number | boolean | object | null
                 >;
+              } else {
+                // Default to empty object if no arguments provided
+                pluginArgs = {};
               }
 
               if (this.modules.plugin) {
@@ -1267,23 +2055,50 @@ export class Agent extends BaseAgent implements IAgentWithModules {
                   },
                   { agentId: this.id, agent: this }
                 );
-                toolResult = pluginResult.result.success
-                  ? typeof pluginResult.result.data === 'string'
-                    ? pluginResult.result.data
-                    : JSON.stringify(pluginResult.result.data)
-                  : `Error: ${pluginResult.result.error || 'Unknown error'}`;
+
+                // Log metadata if present (for debugging and observability)
+                if (pluginResult.result.metadata) {
+                  this.logger.debug('Plugin tool returned metadata', {
+                    toolName: pluginToolName,
+                    toolCallId: toolCall.id,
+                    metadata: pluginResult.result.metadata,
+                  });
+                }
+
+                // Build tool result with optional metadata inclusion
+                if (pluginResult.result.success) {
+                  const resultData =
+                    typeof pluginResult.result.data === 'string'
+                      ? pluginResult.result.data
+                      : JSON.stringify(pluginResult.result.data);
+
+                  // Include metadata in response if present (allows LLM to see relevant context)
+                  if (
+                    pluginResult.result.metadata &&
+                    Object.keys(pluginResult.result.metadata).length > 0
+                  ) {
+                    toolResult = JSON.stringify({
+                      result: resultData,
+                      metadata: pluginResult.result.metadata,
+                    });
+                  } else {
+                    toolResult = resultData;
+                  }
+                } else {
+                  toolResult = `Error: ${pluginResult.result.error || 'Unknown error'}`;
+                }
               } else {
                 toolResult = `Plugin module not available`;
               }
             } else {
               // Handle other tool types (future implementations)
-              toolResult = `Tool ${toolCall.function.name} not implemented yet`;
+              toolResult = `Tool ${toolName} not implemented yet`;
             }
 
             // CRITICAL: Tool result content cannot be empty for OpenAI API
             if (!toolResult || toolResult.trim() === '') {
-              console.error('⚠️ EMPTY TOOL RESULT DETECTED:', {
-                toolName: toolCall.function.name,
+              this.logger.warn('Empty tool result detected', {
+                toolName,
                 toolCallId: toolCall.id,
                 resultType: typeof toolResult,
                 resultValue: toolResult,
@@ -1291,8 +2106,8 @@ export class Agent extends BaseAgent implements IAgentWithModules {
               toolResult = 'Tool execution completed but returned no data.';
             }
 
-            console.log('✅ TOOL RESULT:', {
-              toolName: toolCall.function.name,
+            this.logger.debug('Tool result received', {
+              toolName,
               toolCallId: toolCall.id,
               resultLength: toolResult.length,
               resultPreview: toolResult.slice(0, 200),
@@ -1306,18 +2121,69 @@ export class Agent extends BaseAgent implements IAgentWithModules {
             });
 
             this.logger.debug('Tool call executed', {
-              toolName: toolCall.function.name,
+              toolName,
               toolCallId: toolCall.id,
               resultLength: toolResult.length,
             });
           } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            this.logger.error(`Tool call failed: ${toolCall.function.name}`, error as Error);
+            // Normalize tool error using ToolError class
+            const originalError = error instanceof Error ? error : new Error(String(error));
+            const toolType = toolName.startsWith('mcp_')
+              ? 'mcp'
+              : toolName.startsWith('plugin_')
+                ? 'plugin'
+                : 'unknown';
+            const actualToolName =
+              toolType === 'mcp'
+                ? toolName.substring(4)
+                : toolType === 'plugin'
+                  ? toolName.substring(7)
+                  : toolName;
 
-            // Add error result to messages
+            // Determine error type based on error message
+            let errorType: 'not_found' | 'validation' | 'execution' | 'timeout' | 'unknown' =
+              'execution';
+            if (
+              originalError.message.includes('not found') ||
+              originalError.message.includes('not available')
+            ) {
+              errorType = 'not_found';
+            } else if (
+              originalError.message.includes('Invalid') ||
+              originalError.message.includes('validation')
+            ) {
+              errorType = 'validation';
+            } else if (
+              originalError.message.includes('timeout') ||
+              originalError.message.includes('timed out')
+            ) {
+              errorType = 'timeout';
+            }
+
+            // Determine if error is recoverable (LLM can try alternative approach)
+            const recoverable = errorType !== 'not_found';
+
+            const toolError = new ToolError(
+              `Tool '${actualToolName}' (${toolType}) failed: ${originalError.message}`,
+              actualToolName,
+              toolType,
+              errorType,
+              recoverable,
+              originalError
+            );
+
+            this.logger.error(`Tool call failed: ${toolName}`, toolError, {
+              toolType,
+              errorType,
+              recoverable,
+              toolCallId: toolCall.id,
+            });
+
+            // Add normalized error result to messages (LLM can use this to decide next action)
+            const errorResult = toolError.toToolResult();
             messages.push({
               role: 'tool',
-              content: `Error: ${errorMessage}`,
+              content: JSON.stringify(errorResult),
               tool_call_id: toolCall.id,
             });
           }
@@ -1390,7 +2256,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
             .map((m, i) => {
               try {
                 const result = JSON.parse(m.content);
-                if (result.success !== false) {
+                if (result.success === true) {
                   return `✓ Tool ${i + 1} completed successfully`;
                 }
               } catch {
@@ -1413,72 +2279,235 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     // Add response to conversation (memory/context)
     await this.addMemory(response, { role: 'assistant' });
 
-    // Save context to memory if enabled
-    await this.saveContextToMemory();
-
-    // Clean up temporary MCP servers
-    if (options?.mcpServers && this.modules.mcp) {
-      for (const server of options.mcpServers) {
-        try {
-          (this.modules.mcp as MCP).removeMCPServer(server.name);
-        } catch (error) {
-          this.logger.warn(
-            `Failed to remove MCP server ${server.name}:`,
-            error instanceof Error ? error.message : String(error)
-          );
+    // Save context to memory if enabled - propagate errors for visibility
+    try {
+      await this.saveContextToMemory();
+    } catch (saveError) {
+      // Log but don't throw - response is already generated, we don't want to lose it
+      this.logger.error(
+        'Failed to save context to memory',
+        saveError instanceof Error ? saveError : new Error(String(saveError)),
+        {
+          responseLength: response.length,
         }
-      }
+      );
     }
 
-    // Clean up temporary plugins
-    if (options?.plugins && Array.isArray(options.plugins) && this.modules?.plugin) {
-      for (const pluginDef of options.plugins) {
-        if (pluginDef && pluginDef.plugin) {
+    // Clean up temporary MCP servers and plugins in finally-like block
+    // This ensures cleanup happens even if saveContextToMemory fails
+    const cleanupMcpServers = async () => {
+      if (options?.mcpServers && this.modules.mcp) {
+        for (const server of options.mcpServers) {
           try {
-            await (this.modules.plugin as Plugin).unregisterPlugin(pluginDef.plugin.name);
+            (this.modules.mcp as MCP).removeMCPServer(server.name);
           } catch (error) {
-            this.logger.warn(
-              `Failed to unregister temporary plugin ${pluginDef.plugin.name}:`,
-              error instanceof Error ? error.message : String(error)
-            );
+            this.logger.warn('Failed to remove temporary MCP server', {
+              serverName: server.name,
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         }
       }
-    }
+    };
+
+    const cleanupPlugins = async () => {
+      if (options?.plugins && Array.isArray(options.plugins) && this.modules?.plugin) {
+        for (const pluginDef of options.plugins) {
+          if (pluginDef && pluginDef.plugin) {
+            try {
+              await (this.modules.plugin as Plugin).unregisterPlugin(pluginDef.plugin.name);
+            } catch (error) {
+              this.logger.warn('Failed to unregister temporary plugin', {
+                pluginName: pluginDef.plugin.name,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+        }
+      }
+    };
+
+    // Execute cleanup - errors are logged but don't prevent response return
+    await Promise.all([cleanupMcpServers(), cleanupPlugins()]);
 
     return response;
   }
 
   /**
    * Update agent configuration
+   * Ensures module state consistency even if initialization or cleanup fails
    */
   async update(updates: Partial<AgentConfig>): Promise<void> {
     const wasMemoryEnabled = this.hasMemory();
     const wasKnowledgeEnabled = this.hasKnowledge();
     const wasVisionEnabled = this.hasVision();
+    const wasToolsEnabled = this.canUseTools();
 
     await super.update(updates);
 
-    // Handle module changes
+    const moduleErrors: Array<{ module: string; operation: string; error: string }> = [];
+
+    // Handle module changes - properly cleanup before disabling
+    // Memory module
     if (this.hasMemory() && !wasMemoryEnabled) {
-      this.modules.memory = new Memory(this);
-      await this.modules.memory.initialize();
-    } else if (!this.hasMemory() && wasMemoryEnabled) {
+      const newMemory = new Memory(this);
+      try {
+        await newMemory.initialize();
+        this.modules.memory = newMemory;
+      } catch (error) {
+        moduleErrors.push({
+          module: 'memory',
+          operation: 'initialize',
+          error: error instanceof Error ? error.message : String(error),
+        });
+        // Don't assign the failed module
+      }
+    } else if (!this.hasMemory() && wasMemoryEnabled && this.modules.memory) {
+      // Memory module cleanup - call destroy() for proper cleanup
+      this.logger.debug('Cleaning up Memory module on disable');
+      try {
+        this.modules.memory.destroy();
+      } catch (error) {
+        moduleErrors.push({
+          module: 'memory',
+          operation: 'cleanup',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      // Always delete reference even if cleanup fails
       delete this.modules.memory;
     }
 
+    // Knowledge module
     if (this.hasKnowledge() && !wasKnowledgeEnabled) {
-      this.modules.knowledge = new Knowledge(this);
-      await this.modules.knowledge.initialize();
-    } else if (!this.hasKnowledge() && wasKnowledgeEnabled) {
+      const newKnowledge = new Knowledge(this);
+      try {
+        await newKnowledge.initialize();
+        this.modules.knowledge = newKnowledge;
+      } catch (error) {
+        moduleErrors.push({
+          module: 'knowledge',
+          operation: 'initialize',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } else if (!this.hasKnowledge() && wasKnowledgeEnabled && this.modules.knowledge) {
+      // Knowledge module cleanup - clear internal references before deleting
+      this.logger.debug('Cleaning up Knowledge module on disable');
+      try {
+        const knowledgeModule = this.modules.knowledge as Knowledge & {
+          knex?: unknown;
+          vectorStore?: unknown;
+        };
+        knowledgeModule.knex = null;
+        knowledgeModule.vectorStore = null;
+      } catch (error) {
+        moduleErrors.push({
+          module: 'knowledge',
+          operation: 'cleanup',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       delete this.modules.knowledge;
     }
 
+    // Vision module
     if (this.hasVision() && !wasVisionEnabled) {
-      this.modules.vision = new Vision(this);
-      await this.modules.vision.initialize();
-    } else if (!this.hasVision() && wasVisionEnabled) {
+      const newVision = new Vision(this);
+      try {
+        await newVision.initialize();
+        this.modules.vision = newVision;
+      } catch (error) {
+        moduleErrors.push({
+          module: 'vision',
+          operation: 'initialize',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } else if (!this.hasVision() && wasVisionEnabled && this.modules.vision) {
+      // Vision module cleanup - call cleanupVision to remove from instance cache
+      this.logger.debug('Cleaning up Vision module on disable');
+      try {
+        cleanupVision(this.data.id);
+      } catch (error) {
+        moduleErrors.push({
+          module: 'vision',
+          operation: 'cleanup',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       delete this.modules.vision;
+    }
+
+    // Handle useTools toggle - properly cleanup MCP and Plugin modules
+    const nowToolsEnabled =
+      updates.useTools !== undefined ? updates.useTools !== false : wasToolsEnabled;
+    if (!nowToolsEnabled && wasToolsEnabled) {
+      // Tools disabled - cleanup MCP and Plugin modules
+      this.logger.debug('Cleaning up tool modules on disable');
+
+      if (this.modules.mcp) {
+        try {
+          await this.modules.mcp.cleanup();
+        } catch (error) {
+          moduleErrors.push({
+            module: 'mcp',
+            operation: 'cleanup',
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        delete this.modules.mcp;
+      }
+
+      if (this.modules.plugin) {
+        try {
+          if (this.data.id) {
+            await cleanupPlugin(this.data.id);
+          }
+        } catch (error) {
+          moduleErrors.push({
+            module: 'plugin',
+            operation: 'cleanup',
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        delete this.modules.plugin;
+      }
+    } else if (nowToolsEnabled && !wasToolsEnabled) {
+      // Tools enabled - initialize MCP and Plugin modules
+      // Initialize plugin first, then MCP - maintain order for proper dependency
+      const newPlugin = new Plugin(this);
+      const newMcp = new MCP(this);
+
+      try {
+        await newPlugin.initialize();
+        this.modules.plugin = newPlugin;
+      } catch (error) {
+        moduleErrors.push({
+          module: 'plugin',
+          operation: 'initialize',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      try {
+        await newMcp.initialize();
+        this.modules.mcp = newMcp;
+      } catch (error) {
+        moduleErrors.push({
+          module: 'mcp',
+          operation: 'initialize',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // Log any module errors
+    if (moduleErrors.length > 0) {
+      this.logger.warn('Agent update completed with module errors', {
+        errorCount: moduleErrors.length,
+        moduleErrorDetails: JSON.stringify(moduleErrors),
+      });
     }
 
     // Module methods are directly implemented and don't need re-binding

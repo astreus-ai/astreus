@@ -139,7 +139,22 @@ export interface LLMConfig {
   apiKey?: string;
   baseUrl?: string | null;
   defaultModel?: string;
+  timeout?: number;
   logger?: import('../logger/types').Logger;
+}
+
+/**
+ * Rate limiter configuration options
+ */
+export interface RateLimiterOptions {
+  /** Maximum concurrent requests allowed (default: 5) */
+  maxConcurrent?: number;
+  /** Maximum requests per minute (default: 60) */
+  maxRequestsPerMinute?: number;
+  /** Timeout in ms to wait for acquiring a slot (default: 30000) */
+  acquireTimeout?: number;
+  /** Maximum time in ms a low-priority request can wait before being promoted (default: 10000) */
+  maxStarvationTimeMs?: number;
 }
 
 // Type guard functions

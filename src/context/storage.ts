@@ -8,6 +8,27 @@ import { ContextMessage } from './types';
 import { getEncryptionService } from '../database/encryption';
 import { encryptSensitiveFields, decryptSensitiveFields } from '../database/utils';
 
+/**
+ * Custom error class for context data corruption
+ * Includes agentId for better debugging and error tracking
+ */
+export class ContextDataCorruptionError extends Error {
+  public readonly agentId: string;
+  public readonly cause?: Error;
+
+  constructor(message: string, agentId: string, cause?: Error) {
+    super(message);
+    this.name = 'ContextDataCorruptionError';
+    this.agentId = agentId;
+    this.cause = cause;
+
+    // Maintains proper stack trace for where our error was thrown (only available on V8)
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, ContextDataCorruptionError);
+    }
+  }
+}
+
 export interface ContextStorageData {
   id: string;
   agentId: string;
@@ -74,6 +95,7 @@ export class ContextStorage {
     const contextDataJson = options.contextData ? JSON.stringify(options.contextData) : null;
 
     const insertData = {
+      id: crypto.randomUUID(), // Generate UUID for context
       agentId: options.agentId,
       graphId: options.graphId || null, // Graph relationship
       sessionId: options.sessionId || null, // Session ID
@@ -87,33 +109,82 @@ export class ContextStorage {
     // Encrypt sensitive fields using centralized system
     const encryptedData = await encryptSensitiveFields(insertData, 'contexts');
 
-    // Check if context already exists for this agent
-    const existingContext = await this.knex('contexts').where({ agentId: options.agentId }).first();
+    // Retry mechanism for handling concurrent modifications
+    const MAX_RETRIES = 3;
+    let lastError: Error | null = null;
 
-    let result: ContextDbRow;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        // Use transaction with optimistic locking to prevent race conditions
+        const result = await this.knex.transaction(async (trx) => {
+          // Check if context already exists for this agent (within transaction)
+          const existingContext = await trx('contexts')
+            .where({ agentId: options.agentId })
+            .forUpdate() // Lock the row to prevent concurrent updates
+            .first();
 
-    if (existingContext) {
-      // Update existing context
-      const [updated] = await this.knex('contexts')
-        .where({ agentId: options.agentId })
-        .update({
-          ...encryptedData,
-          updated_at: this.knex.fn.now(),
-        })
-        .returning('*');
-      result = updated;
-    } else {
-      // Create new context
-      const [created] = await this.knex('contexts').insert(encryptedData).returning('*');
-      result = created;
+          let dbResult: ContextDbRow;
+
+          if (existingContext) {
+            // Update existing context - preserve the existing ID, don't regenerate UUID
+            const { id: _, ...updateData } = encryptedData;
+            void _; // Intentionally unused - we discard the new ID to keep existing
+
+            // Optimistic locking: check if row was modified since we read it
+            const [updated] = await trx('contexts')
+              .where({ agentId: options.agentId })
+              .where({ updated_at: existingContext.updated_at }) // Ensure row hasn't changed
+              .update({
+                ...updateData,
+                updated_at: trx.fn.now(),
+              })
+              .returning('*');
+
+            if (!updated) {
+              // Row was modified by another process, will retry
+              throw new Error(
+                `Concurrent modification detected for context ${options.agentId}. Retrying...`
+              );
+            }
+            dbResult = updated;
+          } else {
+            // Create new context
+            const [created] = await trx('contexts').insert(encryptedData).returning('*');
+            dbResult = created;
+          }
+
+          return dbResult;
+        });
+
+        // Decrypt for return using centralized system
+        const decryptedResult = await decryptSensitiveFields(
+          result as unknown as Record<string, string | number | boolean | null | undefined | Date>,
+          'contexts'
+        );
+        return this.formatContextData(decryptedResult as unknown as ContextDbRow);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
+        // Log retry attempt
+        if (attempt < MAX_RETRIES - 1) {
+          this.logger.warn('Context save failed, retrying...', {
+            agentId: options.agentId,
+            attempt: attempt + 1,
+            maxRetries: MAX_RETRIES,
+            error: lastError.message,
+          });
+          // Exponential backoff: 100ms, 200ms, 300ms
+          await new Promise((r) => setTimeout(r, 100 * (attempt + 1)));
+        }
+      }
     }
 
-    // Decrypt for return using centralized system
-    const decryptedResult = await decryptSensitiveFields(
-      result as unknown as Record<string, string | number | boolean | null | undefined | Date>,
-      'contexts'
-    );
-    return this.formatContextData(decryptedResult as unknown as ContextDbRow);
+    // All retries exhausted
+    this.logger.error('Context save failed after all retries', lastError ?? undefined, {
+      agentId: options.agentId,
+      maxRetries: MAX_RETRIES,
+    });
+    throw lastError ?? new Error('Context save failed after all retries');
   }
 
   /**
@@ -149,7 +220,7 @@ export class ContextStorage {
   /**
    * Delete context data for an agent
    */
-  async deleteContext(agentId: number): Promise<boolean> {
+  async deleteContext(agentId: string): Promise<boolean> {
     this.logger.debug('Deleting context from storage', { agentId });
 
     const deleted = await this.knex('contexts').where({ agentId }).delete();
@@ -212,9 +283,43 @@ export class ContextStorage {
         // Handle both string and object (PostgreSQL returns JSON as object)
         contextData =
           typeof row.contextData === 'string' ? JSON.parse(row.contextData) : row.contextData;
+        // Validate parsed data is an array
+        if (!Array.isArray(contextData)) {
+          this.logger.error('Context data is not an array after parsing', undefined, {
+            agentId: row.agentId,
+            dataType: typeof contextData,
+          });
+          throw new ContextDataCorruptionError(
+            `Context data corruption: expected array but got ${typeof contextData}`,
+            row.agentId
+          );
+        }
       } catch (error) {
-        this.logger.warn('Failed to parse context data', { error: String(error) });
-        contextData = [];
+        // If it's already our custom error, just re-throw without double logging
+        if (error instanceof ContextDataCorruptionError) {
+          throw error;
+        }
+
+        // Log and re-throw to prevent silent data loss
+        // Preserve the original error stack trace using cause option
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.logger.error(
+          'Failed to parse context data - DATA CORRUPTION',
+          error instanceof Error ? error : undefined,
+          {
+            agentId: row.agentId,
+            errorMessage,
+            dataPreview:
+              typeof row.contextData === 'string'
+                ? row.contextData.substring(0, 100)
+                : 'non-string',
+          }
+        );
+        throw new ContextDataCorruptionError(
+          `Context data parsing failed: ${errorMessage}`,
+          row.agentId,
+          error instanceof Error ? error : undefined
+        );
       }
     }
 

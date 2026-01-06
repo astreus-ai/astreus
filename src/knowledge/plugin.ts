@@ -10,8 +10,15 @@ interface KnowledgeResult {
 interface AgentWithKnowledge {
   hasKnowledge(): boolean;
   searchKnowledge?(query: string, limit: number, threshold: number): Promise<KnowledgeResult[]>;
+  /**
+   * Expand knowledge context by including surrounding chunks from the same document.
+   * @param documentId - UUID string of the document (storage returns UUIDs as strings)
+   * @param chunkIndex - Index of the chunk to expand around
+   * @param expandBefore - Number of chunks to include before
+   * @param expandAfter - Number of chunks to include after
+   */
   expandKnowledgeContext?(
-    documentId: number,
+    documentId: string,
     chunkIndex: number,
     expandBefore?: number,
     expandAfter?: number
@@ -135,7 +142,7 @@ export const knowledgeSearchTool: ToolDefinition = {
               const chunkIndex = result.metadata?.chunkIndex;
 
               if (
-                typeof documentId === 'number' &&
+                typeof documentId === 'string' &&
                 typeof chunkIndex === 'number' &&
                 agent.expandKnowledgeContext
               ) {

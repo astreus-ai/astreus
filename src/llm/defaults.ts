@@ -8,6 +8,8 @@ export const DEFAULT_LLM_CONFIG = {
   visionTemperature: 0.1,
   embeddingMaxTokens: 1000,
   fallbackModel: 'gpt-4o-mini',
+  /** Default embedding model when none specified */
+  defaultEmbeddingModel: 'text-embedding-ada-002',
 } as const;
 
 /**

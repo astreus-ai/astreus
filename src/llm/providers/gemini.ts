@@ -12,8 +12,28 @@ import {
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getLogger } from '../../logger';
 import { Logger } from '../../logger/types';
+import { LLMApiError, VisionError } from '../../errors';
 import * as fs from 'fs';
 import * as path from 'path';
+
+// Retry helper with exponential backoff
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastError: Error | undefined;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      if (i < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, Math.pow(2, i) * 1000));
+      }
+    }
+  }
+  if (!lastError) {
+    throw new Error('No retry attempts made');
+  }
+  throw lastError;
+}
 
 // Gemini response type definitions
 interface GeminiUsageMetadata {
@@ -39,7 +59,7 @@ export class GeminiProvider implements LLMProvider {
   private logger: Logger;
 
   constructor(config?: LLMConfig) {
-    const apiKey = config?.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    const apiKey = config?.apiKey || process.env.GEMINI_API_KEY;
 
     // Use provided logger or fallback to global logger
     this.logger = config?.logger || getLogger();
@@ -51,7 +71,7 @@ export class GeminiProvider implements LLMProvider {
     this.logger.info('Gemini provider initialized');
     this.logger.debug('Gemini provider initialization', {
       hasConfigApiKey: !!config?.apiKey,
-      hasEnvApiKey: !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+      hasEnvApiKey: !!process.env.GEMINI_API_KEY,
       hasEmbeddingApiKey: !!process.env.GEMINI_EMBEDDING_API_KEY,
       hasVisionApiKey: !!process.env.GEMINI_VISION_API_KEY,
       hasCustomBaseUrl: !!config?.baseUrl,
@@ -101,63 +121,101 @@ export class GeminiProvider implements LLMProvider {
     return ['text-embedding-004', 'embedding-001'];
   }
 
+  // Helper to create generationConfig - prevents duplicate code
+  private createGenerationConfig(options: LLMRequestOptions): {
+    temperature: number;
+    maxOutputTokens: number;
+  } {
+    return {
+      temperature: options.temperature ?? 0.7,
+      maxOutputTokens: options.maxTokens ?? 4096,
+    };
+  }
+
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const { systemInstruction, contents } = this.prepareMessages(options);
+    const generationConfig = this.createGenerationConfig(options);
 
-    const model = this.client.getGenerativeModel({
-      model: options.model,
-      ...(systemInstruction && {
-        systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] },
-      }),
-      generationConfig: {
-        temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 4096,
-      },
-    });
+    try {
+      const model = this.client.getGenerativeModel({
+        model: options.model,
+        ...(systemInstruction && {
+          systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] },
+        }),
+        generationConfig,
+      });
 
-    const result = await model.generateContent({
-      contents,
-      generationConfig: {
-        temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 4096,
-      },
-    });
+      const result = await withRetry(() =>
+        model.generateContent({
+          contents,
+          generationConfig,
+        })
+      );
 
-    const response = result.response;
-    const text = response.text() || '';
+      const response = result.response;
+      const text = response.text() || '';
 
-    return {
-      content: text,
-      model: options.model,
-      usage: {
-        promptTokens: 0, // Gemini doesn't provide detailed usage in basic response
-        completionTokens: 0,
-        totalTokens: 0,
-      },
-    };
+      return {
+        content: text,
+        model: options.model,
+        usage: {
+          promptTokens: hasUsageMetadata(response)
+            ? response.usageMetadata?.promptTokenCount || 0
+            : 0,
+          completionTokens: hasUsageMetadata(response)
+            ? response.usageMetadata?.candidatesTokenCount || 0
+            : 0,
+          totalTokens: hasUsageMetadata(response)
+            ? response.usageMetadata?.totalTokenCount || 0
+            : 0,
+        },
+      };
+    } catch (error) {
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      this.logger.error('Gemini generateResponse failed', originalError, {
+        model: options.model,
+        errorMessage: originalError.message,
+      });
+      throw new LLMApiError(
+        `Gemini API request failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
+    }
   }
 
   async *generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const { systemInstruction, contents } = this.prepareMessages(options);
+    const generationConfig = this.createGenerationConfig(options);
 
     const model = this.client.getGenerativeModel({
       model: options.model,
       ...(systemInstruction && {
         systemInstruction: { role: 'user', parts: [{ text: systemInstruction }] },
       }),
-      generationConfig: {
-        temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 4096,
-      },
+      generationConfig,
     });
 
-    const result = await model.generateContentStream({
-      contents,
-      generationConfig: {
-        temperature: options.temperature ?? 0.7,
-        maxOutputTokens: options.maxTokens ?? 4096,
-      },
-    });
+    let result;
+    try {
+      result = await withRetry(() =>
+        model.generateContentStream({
+          contents,
+          generationConfig,
+        })
+      );
+    } catch (error) {
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      this.logger.error('Gemini stream initialization failed', originalError, {
+        model: options.model,
+        errorMessage: originalError.message,
+      });
+      throw new LLMApiError(
+        `Gemini API stream request failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
+    }
 
     try {
       for await (const chunk of result.stream) {
@@ -170,8 +228,11 @@ export class GeminiProvider implements LLMProvider {
 
       yield { content: '', done: true, model: options.model };
     } catch (error) {
-      throw new Error(
-        `Gemini streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      throw new LLMApiError(
+        `Gemini streaming error: ${originalError.message}`,
+        this.name,
+        originalError
       );
     }
   }
@@ -219,8 +280,13 @@ export class GeminiProvider implements LLMProvider {
       const genModel = this.embeddingClient.getGenerativeModel({ model: embeddingModel });
       const result = await genModel.embedContent(text);
 
+      const embeddingValues = result?.embedding?.values;
+      if (!embeddingValues || embeddingValues.length === 0) {
+        throw new Error('No embedding data returned from Gemini API');
+      }
+
       const embeddingResult: EmbeddingResult = {
-        embedding: result.embedding.values || [],
+        embedding: embeddingValues,
         model: embeddingModel,
         usage: {
           promptTokens: 0, // Gemini doesn't provide detailed usage for embeddings
@@ -236,14 +302,18 @@ export class GeminiProvider implements LLMProvider {
 
       return embeddingResult;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
       this.logger.error('Embedding generation failed');
       this.logger.debug('Gemini embedding error', {
         model: embeddingModel,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
-      throw new Error(`Gemini embedding generation failed: ${errorMessage}`);
+      throw new LLMApiError(
+        `Gemini embedding generation failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 
@@ -261,8 +331,10 @@ export class GeminiProvider implements LLMProvider {
       maxTokens: options.maxTokens || 1000,
     });
 
-    // Validate image file
-    if (!fs.existsSync(imagePath)) {
+    // Validate image file (async)
+    try {
+      await fs.promises.access(imagePath);
+    } catch {
       this.logger.error(`Image file not found: ${imagePath}`);
       throw new Error(`Image file not found: ${imagePath}`);
     }
@@ -276,8 +348,8 @@ export class GeminiProvider implements LLMProvider {
       );
     }
 
-    // Read and encode image
-    const imageBuffer = fs.readFileSync(imagePath);
+    // Read and encode image (async)
+    const imageBuffer = await fs.promises.readFile(imagePath);
     const base64Image = imageBuffer.toString('base64');
     const mimeType = this.getMimeType(ext);
 
@@ -362,16 +434,20 @@ export class GeminiProvider implements LLMProvider {
       return analysisResult;
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
 
       this.logger.error('Image analysis failed');
       this.logger.debug('Gemini image analysis error', {
         processingTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
-      throw new Error(`Gemini vision analysis failed: ${errorMessage}`);
+      throw new VisionError(
+        `Gemini vision analysis failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 
@@ -406,8 +482,13 @@ export class GeminiProvider implements LLMProvider {
         const genModel = this.embeddingClient.getGenerativeModel({ model: embeddingModel });
         const result = await genModel.embedContent(text);
 
+        const embeddingValues = result?.embedding?.values;
+        if (!embeddingValues || embeddingValues.length === 0) {
+          throw new Error('No embedding data returned from Gemini API');
+        }
+
         return {
-          embedding: result.embedding.values || [],
+          embedding: embeddingValues,
           model: embeddingModel,
           usage: {
             promptTokens: 0,
@@ -427,7 +508,7 @@ export class GeminiProvider implements LLMProvider {
       getVisionModels: this.getVisionModels.bind(this),
       getEmbeddingModels: () => [],
       analyzeImage: async (imagePath: string, options?: VisionAnalysisOptions) => {
-        const imageBuffer = fs.readFileSync(imagePath);
+        const imageBuffer = await fs.promises.readFile(imagePath);
         const base64Image = imageBuffer.toString('base64');
         const ext = path.extname(imagePath).toLowerCase();
         const mimeType = this.getMimeType(ext);
@@ -505,16 +586,20 @@ export class GeminiProvider implements LLMProvider {
       };
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
 
       this.logger.error('Gemini image analysis failed');
       this.logger.debug('Gemini image analysis error', {
         processingTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
-      throw new Error(`Gemini vision analysis failed: ${errorMessage}`);
+      throw new VisionError(
+        `Gemini vision analysis failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 }

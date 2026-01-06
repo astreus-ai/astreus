@@ -10,6 +10,13 @@ import { getEncryptionService } from './encryption';
 import { encryptSensitiveFields, decryptSensitiveFields } from './utils';
 import { validateEncryptionConsistency } from './sensitive-fields';
 
+/**
+ * Schema version for database migrations.
+ * Increment this when schema changes are made.
+ * Each module should check this version to ensure compatibility.
+ */
+export const SCHEMA_VERSION = 1;
+
 interface AgentDbRow {
   id: string; // UUID
   name: string;
@@ -35,6 +42,32 @@ interface AgentDbRow {
   updated_at: string;
 }
 
+/**
+ * Type guard to validate if an object has the required AgentDbRow properties
+ */
+function isValidAgentDbRow(obj: unknown): obj is AgentDbRow {
+  if (!obj || typeof obj !== 'object') return false;
+  const row = obj as Record<string, unknown>;
+  return (
+    typeof row.id === 'string' &&
+    typeof row.name === 'string' &&
+    typeof row.created_at === 'string' &&
+    typeof row.updated_at === 'string'
+  );
+}
+
+/**
+ * Safely convert a record to AgentDbRow with validation
+ */
+function toAgentDbRow(record: Record<string, unknown>): AgentDbRow {
+  if (!isValidAgentDbRow(record)) {
+    throw new Error(
+      'Invalid agent data: missing required fields (id, name, created_at, updated_at)'
+    );
+  }
+  return record;
+}
+
 export class Database {
   protected knex: Knex;
   protected config: DatabaseConfig;
@@ -52,7 +85,40 @@ export class Database {
    * Check if using SQLite database
    */
   isSQLite(): boolean {
-    return !this.config.connectionString || this.config.driver === 'sqlite';
+    return (
+      this.config.driver === 'sqlite' || (!this.config.connectionString && !this.config.driver)
+    );
+  }
+
+  /**
+   * Check if an index exists on a table
+   */
+  private async checkIndexExists(tableName: string, indexName: string): Promise<boolean> {
+    try {
+      if (this.isSQLite()) {
+        const result = await this.knex.raw(
+          `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? AND name=?`,
+          [tableName, indexName]
+        );
+        return result && result.length > 0;
+      } else if (this.isPostgres()) {
+        const result = await this.knex.raw(
+          `SELECT indexname FROM pg_indexes WHERE tablename = ? AND indexname = ?`,
+          [tableName, indexName]
+        );
+        return result.rows && result.rows.length > 0;
+      }
+      return false;
+    } catch (error) {
+      // Log the error and assume index doesn't exist
+      // Note: this.logger is always defined in constructor via getLogger() fallback
+      this.logger.warn('Failed to check index existence', {
+        error: error instanceof Error ? error.message : String(error),
+        tableName,
+        indexName,
+      });
+      return false;
+    }
   }
 
   /**
@@ -369,22 +435,26 @@ export class Database {
           }
         });
 
-        // Add indexes for new columns
-        if (hasGraphId) {
+        // Add indexes for new columns (only if column was just added)
+        if (!hasGraphId) {
           await this.knex.schema.alterTable('tasks', (table) => {
             table.index('graphId');
           });
         }
-        if (hasGraphNodeId) {
+        if (!hasGraphNodeId) {
           await this.knex.schema.alterTable('tasks', (table) => {
             table.index('graphNodeId');
           });
         }
 
-        // Add composite indexes
-        await this.knex.schema.alterTable('tasks', (table) => {
-          table.index(['agentId', 'status']);
-        });
+        // Add composite indexes (check if exists first)
+        const tasksIndexName = 'tasks_agentid_status_index';
+        const hasTasksCompositeIndex = await this.checkIndexExists('tasks', tasksIndexName);
+        if (!hasTasksCompositeIndex) {
+          await this.knex.schema.alterTable('tasks', (table) => {
+            table.index(['agentId', 'status'], tasksIndexName);
+          });
+        }
 
         this.logger.info('Tasks table updated with graph relationships');
         this.logger.debug('Tasks table schema updated successfully');
@@ -463,27 +533,34 @@ export class Database {
           }
         });
 
-        // Add indexes for new columns
-        if (hasGraphId) {
+        // Add indexes for new columns (only if column was just added)
+        if (!hasGraphId) {
           await this.knex.schema.alterTable('memories', (table) => {
             table.index('graphId');
           });
         }
-        if (hasTaskId) {
+        if (!hasTaskId) {
           await this.knex.schema.alterTable('memories', (table) => {
             table.index('taskId');
           });
         }
-        if (hasSessionId) {
+        if (!hasSessionId) {
           await this.knex.schema.alterTable('memories', (table) => {
             table.index('sessionId');
           });
         }
 
-        // Add composite index for agent + session queries
-        await this.knex.schema.alterTable('memories', (table) => {
-          table.index(['agentId', 'sessionId']);
-        });
+        // Add composite index for agent + session queries (check if exists first)
+        const memoriesIndexName = 'memories_agentid_sessionid_index';
+        const hasMemoriesCompositeIndex = await this.checkIndexExists(
+          'memories',
+          memoriesIndexName
+        );
+        if (!hasMemoriesCompositeIndex) {
+          await this.knex.schema.alterTable('memories', (table) => {
+            table.index(['agentId', 'sessionId'], memoriesIndexName);
+          });
+        }
 
         this.logger.info('Memories table updated with embedding and relationship columns');
         this.logger.debug('Memories table schema updated successfully');
@@ -547,22 +624,17 @@ export class Database {
           }
         });
 
-        // Add indexes for new columns
-        if (hasGraphId) {
+        // Add indexes for new columns (only if column was just added)
+        if (!hasGraphId) {
           await this.knex.schema.alterTable('contexts', (table) => {
             table.index('graphId');
           });
         }
-        if (hasSessionId) {
+        if (!hasSessionId) {
           await this.knex.schema.alterTable('contexts', (table) => {
             table.index('sessionId');
           });
         }
-
-        // Add composite index for agent + session queries
-        await this.knex.schema.alterTable('contexts', (table) => {
-          table.index(['agentId', 'sessionId']);
-        });
 
         this.logger.info('Contexts table updated with graph relationships');
         this.logger.debug('Contexts table schema updated successfully');
@@ -630,14 +702,29 @@ export class Database {
     // Encrypt sensitive fields
     const encryptedData = await encryptSensitiveFields(cleanedData, 'agents');
 
-    const [agent] = await this.knex('agents').insert(encryptedData).returning('*');
+    let agent: AgentDbRow | undefined;
+
+    if (this.isSQLite()) {
+      // SQLite doesn't support RETURNING clause reliably
+      await this.knex('agents').insert(encryptedData);
+      agent = await this.knex('agents').where({ id: insertData.id }).first();
+    } else {
+      const [insertedAgent] = await this.knex('agents').insert(encryptedData).returning('*');
+      agent = insertedAgent as AgentDbRow;
+    }
+
+    if (!agent) {
+      throw new Error(`Failed to create agent: ${data.name}`);
+    }
 
     // Decrypt for response
     const decryptedAgent = await decryptSensitiveFields(
-      agent as Record<string, string | number | boolean | null>,
+      agent as unknown as Record<string, string | number | boolean | null>,
       'agents'
     );
-    const formattedAgent = this.formatAgent(decryptedAgent as unknown as AgentDbRow);
+    const formattedAgent = this.formatAgent(
+      toAgentDbRow(decryptedAgent as Record<string, unknown>)
+    );
 
     // User-facing success message
     this.logger.info(`Agent created with ID: ${formattedAgent.id}`);
@@ -665,10 +752,10 @@ export class Database {
 
     // Decrypt sensitive fields
     const decryptedAgent = await decryptSensitiveFields(
-      agent as Record<string, string | number | boolean | null>,
+      agent as unknown as Record<string, string | number | boolean | null>,
       'agents'
     );
-    return this.formatAgent(decryptedAgent as unknown as AgentDbRow);
+    return this.formatAgent(toAgentDbRow(decryptedAgent as Record<string, unknown>));
   }
 
   async getAgentByName(name: string): Promise<AgentConfig | null> {
@@ -686,10 +773,10 @@ export class Database {
 
     // Decrypt sensitive fields
     const decryptedAgent = await decryptSensitiveFields(
-      agent as Record<string, string | number | boolean | null>,
+      agent as unknown as Record<string, string | number | boolean | null>,
       'agents'
     );
-    return this.formatAgent(decryptedAgent as unknown as AgentDbRow);
+    return this.formatAgent(toAgentDbRow(decryptedAgent as Record<string, unknown>));
   }
 
   async listAgents(): Promise<AgentConfig[]> {
@@ -706,10 +793,10 @@ export class Database {
     const decryptedAgents = await Promise.all(
       agents.map(async (agent) => {
         const decrypted = await decryptSensitiveFields(
-          agent as Record<string, string | number | boolean | null>,
+          agent as unknown as Record<string, string | number | boolean | null>,
           'agents'
         );
-        return this.formatAgent(decrypted as unknown as AgentDbRow);
+        return this.formatAgent(toAgentDbRow(decrypted as Record<string, unknown>));
       })
     );
 
@@ -793,6 +880,18 @@ export class Database {
           case 'autoContextCompression':
             updateData.autoContextCompression = data.autoContextCompression ?? false;
             break;
+          case 'maxContextLength':
+            updateData.maxContextLength = data.maxContextLength;
+            break;
+          case 'preserveLastN':
+            updateData.preserveLastN = data.preserveLastN;
+            break;
+          case 'compressionRatio':
+            updateData.compressionRatio = data.compressionRatio;
+            break;
+          case 'compressionStrategy':
+            updateData.compressionStrategy = data.compressionStrategy;
+            break;
           case 'debug':
             updateData.debug = data.debug ?? false;
             break;
@@ -806,20 +905,38 @@ export class Database {
     }
 
     // Encrypt sensitive fields in update data
-    const encryptedUpdateData = await encryptSensitiveFields(updateData, 'agents');
+    // Convert Partial<AgentDbRow> to Record<string, string | number | boolean | null | undefined | Date>
+    const updateDataForEncryption = Object.fromEntries(
+      Object.entries(updateData).filter(([, value]) => value !== undefined)
+    ) as Record<string, string | number | boolean | null | undefined | Date>;
+    const encryptedUpdateData = await encryptSensitiveFields(updateDataForEncryption, 'agents');
 
-    const [agent] = await this.knex('agents')
-      .where({ id })
-      .update(encryptedUpdateData)
-      .returning('*');
+    let agent: AgentDbRow | undefined;
+
+    if (this.isSQLite()) {
+      // SQLite doesn't support RETURNING clause reliably
+      const updatedCount = await this.knex('agents').where({ id }).update(encryptedUpdateData);
+
+      if (updatedCount > 0) {
+        agent = await this.knex('agents').where({ id }).first();
+      }
+    } else {
+      const [updatedAgent] = await this.knex('agents')
+        .where({ id })
+        .update(encryptedUpdateData)
+        .returning('*');
+      agent = updatedAgent as AgentDbRow;
+    }
 
     if (agent) {
       // Decrypt for response
       const decryptedAgent = await decryptSensitiveFields(
-        agent as Record<string, string | number | boolean | null>,
+        agent as unknown as Record<string, string | number | boolean | null>,
         'agents'
       );
-      const formattedAgent = this.formatAgent(decryptedAgent as unknown as AgentDbRow);
+      const formattedAgent = this.formatAgent(
+        toAgentDbRow(decryptedAgent as Record<string, unknown>)
+      );
 
       // User-facing success message
       this.logger.info(`Agent ${id} updated successfully`);
@@ -879,11 +996,13 @@ export class Database {
       maxContextLength: agent.maxContextLength,
       preserveLastN: agent.preserveLastN,
       compressionRatio: agent.compressionRatio,
-      compressionStrategy: agent.compressionStrategy as
-        | 'summarize'
-        | 'selective'
-        | 'hybrid'
-        | undefined,
+      compressionStrategy: (() => {
+        const validStrategies = ['summarize', 'selective', 'hybrid'] as const;
+        const strategy = agent.compressionStrategy;
+        return validStrategies.includes(strategy as (typeof validStrategies)[number])
+          ? (strategy as (typeof validStrategies)[number])
+          : undefined;
+      })(),
       debug: Boolean(agent.debug), // Convert SQLite 0/1 to boolean
       createdAt: new Date(agent.created_at),
       updatedAt: new Date(agent.updated_at),
@@ -891,26 +1010,69 @@ export class Database {
   }
 }
 
+// Simple async mutex for protecting database initialization
+class AsyncMutex {
+  private locked = false;
+  private queue: Array<() => void> = [];
+
+  async acquire(): Promise<void> {
+    if (!this.locked) {
+      this.locked = true;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(resolve);
+    });
+  }
+
+  release(): void {
+    const next = this.queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.locked = false;
+    }
+  }
+}
+
 let database: Database | null = null;
 let isInitializing: Promise<Database> | null = null;
+const initMutex = new AsyncMutex();
 
 export async function initializeDatabase(
   config: DatabaseConfig,
   logger?: Logger
 ): Promise<Database> {
-  if (database) {
-    await database.disconnect();
+  await initMutex.acquire();
+  try {
+    if (database) {
+      await database.disconnect();
+      database = null;
+    }
+
+    const newDatabase = new Database(config, logger);
+    try {
+      await newDatabase.connect();
+      await newDatabase.initialize();
+      database = newDatabase;
+      return database;
+    } catch (error) {
+      // Cleanup: disconnect if connect succeeded but initialize failed
+      await newDatabase.disconnect().catch((err) => {
+        const initLogger = logger || getLogger();
+        initLogger.warn('Failed to disconnect during cleanup', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+      throw error;
+    }
+  } finally {
+    initMutex.release();
   }
-
-  database = new Database(config, logger);
-  await database.connect();
-  await database.initialize();
-
-  return database;
 }
 
 async function ensureDatabaseInitialized(): Promise<Database> {
-  // Race condition fix: check database again after potential initialization
+  // Fast path: database already initialized
   if (database) {
     return database;
   }
@@ -920,27 +1082,62 @@ async function ensureDatabaseInitialized(): Promise<Database> {
     return isInitializing;
   }
 
-  // Double-check pattern to prevent race conditions
-  if (database) {
-    return database;
-  }
-
-  // Try to initialize from environment variable or use default SQLite
-  const dbUrl = process.env.DB_URL || 'sqlite://./astreus.db';
-
-  // Start initialization with error handling
-  isInitializing = initializeDatabase({ connectionString: dbUrl });
+  await initMutex.acquire();
+  // Track if we've already released the mutex to prevent double release
+  let mutexReleased = false;
 
   try {
-    database = await isInitializing;
-    // Clear initialization promise after successful completion
-    isInitializing = null;
-    return database;
-  } catch (error) {
-    // Reset state on failure to allow retry
-    isInitializing = null;
-    database = null;
-    throw error;
+    // Double-check after acquiring lock
+    if (database) {
+      return database;
+    }
+
+    // Check again if initialization started while waiting for lock
+    if (isInitializing) {
+      // Release mutex before returning to avoid double release in finally
+      initMutex.release();
+      mutexReleased = true;
+      return isInitializing;
+    }
+
+    // Try to initialize from environment variable or use default SQLite
+    const dbUrl = process.env.DB_URL || 'sqlite://./astreus.db';
+
+    // Start initialization with error handling
+    const initPromise = (async () => {
+      const newDatabase = new Database({ connectionString: dbUrl });
+      try {
+        await newDatabase.connect();
+        await newDatabase.initialize();
+        database = newDatabase;
+        return database;
+      } catch (error) {
+        await newDatabase.disconnect().catch((err) => {
+          const ensureLogger = getLogger();
+          ensureLogger.warn('Failed to disconnect during cleanup', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+        throw error;
+      }
+    })();
+
+    isInitializing = initPromise;
+
+    try {
+      const result = await initPromise;
+      isInitializing = null;
+      return result;
+    } catch (error) {
+      isInitializing = null;
+      database = null;
+      throw error;
+    }
+  } finally {
+    // Only release mutex if not already released
+    if (!mutexReleased) {
+      initMutex.release();
+    }
   }
 }
 
@@ -950,4 +1147,5 @@ export async function getDatabase(): Promise<Database> {
 
 export * from './types';
 export * from './sensitive-fields';
+export { ConnectionPoolManager, getPoolManager } from './knex';
 export default getDatabase;

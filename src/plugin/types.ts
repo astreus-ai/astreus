@@ -5,7 +5,7 @@ export interface ToolParameter {
   type: 'string' | 'number' | 'boolean' | 'object' | 'array';
   description: string;
   required?: boolean;
-  enum?: string[];
+  enum?: Array<string | number>; // Support both string and number enums
   properties?: Record<string, ToolParameter>;
   items?: ToolParameter;
 }
@@ -59,6 +59,10 @@ export interface ToolContext {
   };
   userId?: string;
   metadata?: MetadataObject;
+  // Isolation fields for preventing state sharing between tool executions
+  executionId?: string; // Unique ID for this specific tool call execution
+  toolName?: string; // Name of the tool being executed
+  callTimestamp?: Date; // Timestamp when tool execution started
 }
 
 export interface ToolResult {

@@ -19,8 +19,28 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/tools/messages';
 import { getLogger } from '../../logger';
 import { Logger } from '../../logger/types';
+import { LLMApiError, VisionError } from '../../errors';
 import * as fs from 'fs';
 import * as path from 'path';
+
+// Retry helper with exponential backoff
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastError: Error | undefined;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      if (i < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, Math.pow(2, i) * 1000));
+      }
+    }
+  }
+  if (!lastError) {
+    throw new Error('No retry attempts made');
+  }
+  throw lastError;
+}
 
 export class ClaudeProvider implements LLMProvider {
   name = 'claude';
@@ -40,14 +60,14 @@ export class ClaudeProvider implements LLMProvider {
 
     this.logger.info('Claude provider initialized');
     this.logger.debug('Claude provider initialization', {
-      hasConfigApiKey: !!config?.apiKey,
-      hasEnvApiKey: !!process.env.ANTHROPIC_API_KEY,
-      hasVisionApiKey: !!process.env.ANTHROPIC_VISION_API_KEY,
       hasCustomBaseUrl: !!config?.baseUrl,
       hasVisionBaseUrl: !!process.env.ANTHROPIC_VISION_BASE_URL,
       supportsEmbeddings: false,
       supportsVision: true,
     });
+
+    // Default timeout: 2 minutes (120000ms)
+    const timeout = config?.timeout ?? 120000;
 
     // Main client for chat completions (can use custom base URL)
     // If baseUrl is explicitly null, don't use ANTHROPIC_BASE_URL fallback (for embedding/vision providers)
@@ -55,6 +75,7 @@ export class ClaudeProvider implements LLMProvider {
       config?.baseUrl === null ? undefined : config?.baseUrl || process.env.ANTHROPIC_BASE_URL;
     this.client = new Anthropic({
       apiKey,
+      timeout,
       ...(chatBaseUrl && { baseURL: chatBaseUrl }),
     });
 
@@ -63,8 +84,9 @@ export class ClaudeProvider implements LLMProvider {
     const visionBaseUrl = process.env.ANTHROPIC_VISION_BASE_URL; // Only dedicated URL, no fallback
 
     // Create vision client with isolated configuration
-    const visionClientConfig: { apiKey: string; baseURL?: string } = {
+    const visionClientConfig: { apiKey: string; baseURL?: string; timeout: number } = {
       apiKey: visionApiKey,
+      timeout,
     };
 
     // Only add baseURL if we have a dedicated one, otherwise use Anthropic default
@@ -133,71 +155,102 @@ export class ClaudeProvider implements LLMProvider {
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const { system, messages } = this.prepareMessages(options);
 
-    const message = await this.client.beta.tools.messages.create({
-      model: options.model,
-      messages: messages as ToolsBetaMessageParam[],
-      system,
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 4096,
-      stream: false,
-      ...(options.tools &&
-        options.tools.length > 0 && {
-          tools: options.tools.map((tool) => ({
-            name: tool.function.name,
-            description: tool.function.description,
-            input_schema: tool.function.parameters,
-          })),
-        }),
-    });
+    try {
+      const message = await withRetry(() =>
+        this.client.beta.tools.messages.create({
+          model: options.model,
+          messages: messages as ToolsBetaMessageParam[],
+          system,
+          temperature: options.temperature ?? 0.7,
+          max_tokens: options.maxTokens ?? 4096,
+          stream: false,
+          ...(options.tools &&
+            options.tools.length > 0 && {
+              tools: options.tools.map((tool) => ({
+                name: tool.function.name,
+                description: tool.function.description,
+                input_schema: tool.function.parameters,
+              })),
+            }),
+        })
+      );
 
-    // Extract tool calls from Claude's response
-    const toolCalls = (message.content as ToolsBetaContentBlock[])
-      .filter((block): block is ToolUseBlock => block.type === 'tool_use')
-      .map((block) => ({
-        id: block.id,
-        type: 'function' as const,
-        function: {
-          name: block.name,
-          arguments: this.sanitizeArguments(block.input || {}),
+      // Extract tool calls from Claude's response
+      const toolCalls = (message.content as ToolsBetaContentBlock[])
+        .filter((block): block is ToolUseBlock => block.type === 'tool_use')
+        .map((block) => ({
+          id: block.id,
+          type: 'function' as const,
+          function: {
+            name: block.name,
+            arguments: this.sanitizeArguments(block.input || {}),
+          },
+        }));
+
+      const textContent = (message.content as ToolsBetaContentBlock[])
+        .filter((block): block is Anthropic.Messages.TextBlock => block.type === 'text')
+        .map((block) => block.text)
+        .join('');
+
+      return {
+        content: textContent,
+        model: message.model,
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        usage: {
+          promptTokens: message.usage?.input_tokens ?? 0,
+          completionTokens: message.usage?.output_tokens ?? 0,
+          totalTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.output_tokens ?? 0),
         },
-      }));
-
-    const textContent = (message.content as ToolsBetaContentBlock[])
-      .filter((block): block is Anthropic.Messages.TextBlock => block.type === 'text')
-      .map((block) => block.text)
-      .join('');
-
-    return {
-      content: textContent,
-      model: message.model,
-      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      usage: {
-        promptTokens: message.usage.input_tokens,
-        completionTokens: message.usage.output_tokens,
-        totalTokens: message.usage.input_tokens + message.usage.output_tokens,
-      },
-    };
+      };
+    } catch (error) {
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      this.logger.error('Claude generateResponse failed', originalError, {
+        model: options.model,
+        errorMessage: originalError.message,
+      });
+      throw new LLMApiError(
+        `Claude API request failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
+    }
   }
 
   async *generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const { system, messages } = this.prepareMessages(options);
 
-    const stream = await this.client.beta.tools.messages.create({
-      model: options.model,
-      messages: messages as ToolsBetaMessageParam[],
-      system,
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 4096,
-      stream: true,
-      ...(options.tools &&
-        options.tools.length > 0 && {
-          tools: options.tools.map((tool) => ({
-            name: tool.function.name,
-            description: tool.function.description,
-            input_schema: tool.function.parameters,
-          })),
-        }),
-    });
+    let stream;
+    try {
+      stream = await withRetry(() =>
+        this.client.beta.tools.messages.create({
+          model: options.model,
+          messages: messages as ToolsBetaMessageParam[],
+          system,
+          temperature: options.temperature ?? 0.7,
+          max_tokens: options.maxTokens ?? 4096,
+          stream: true,
+          ...(options.tools &&
+            options.tools.length > 0 && {
+              tools: options.tools.map((tool) => ({
+                name: tool.function.name,
+                description: tool.function.description,
+                input_schema: tool.function.parameters,
+              })),
+            }),
+        })
+      );
+    } catch (error) {
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      this.logger.error('Claude stream initialization failed', originalError, {
+        model: options.model,
+        errorMessage: originalError.message,
+      });
+      throw new LLMApiError(
+        `Claude API stream request failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
+    }
 
     const toolCalls: Array<{
       id: string;
@@ -230,8 +283,15 @@ export class ClaudeProvider implements LLMProvider {
         }
       }
     } catch (error) {
-      throw new Error(
-        `Claude streaming error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      this.logger.error('Claude streaming error', originalError, {
+        model: options.model,
+        errorMessage: originalError.message,
+      });
+      throw new LLMApiError(
+        `Claude streaming error: ${originalError.message}`,
+        this.name,
+        originalError
       );
     }
   }
@@ -256,32 +316,58 @@ export class ClaudeProvider implements LLMProvider {
       system,
       messages: messages.map((msg) => {
         if (msg.role === 'tool') {
+          const toolCallId = msg.tool_call_id;
+          // Safely extract content with null checks
+          const contentText =
+            msg.content != null && isStringContent(msg.content) ? msg.content : '';
+
+          if (!toolCallId) {
+            this.logger.warn('Tool message missing tool_call_id, converting to user message', {
+              content: contentText.substring(0, 100),
+            });
+            // Return as user message when tool_call_id is missing
+            return {
+              role: 'user' as const,
+              content: contentText || 'Tool result (missing tool_call_id)',
+            } as ToolsBetaMessageParam;
+          }
           return {
             role: 'user' as const,
             content: [
               {
                 type: 'tool_result' as const,
-                tool_use_id: msg.tool_call_id!,
-                content: [
-                  { type: 'text' as const, text: isStringContent(msg.content) ? msg.content : '' },
-                ],
+                tool_use_id: toolCallId,
+                content: [{ type: 'text' as const, text: contentText }],
               },
             ],
           } as ToolsBetaMessageParam;
         }
 
         if (msg.tool_calls && msg.tool_calls.length > 0) {
+          // Filter out tool calls with null/undefined function properties
+          const validToolCalls = msg.tool_calls.filter(
+            (tc) => tc != null && tc.function != null && tc.function.name != null
+          );
+
+          if (validToolCalls.length === 0) {
+            // No valid tool calls, return as regular assistant message
+            return {
+              role: 'assistant' as const,
+              content: msg.content != null && isStringContent(msg.content) ? msg.content : '',
+            } as ToolsBetaMessageParam;
+          }
+
           return {
             role: 'assistant' as const,
             content: [
-              ...(msg.content && isStringContent(msg.content)
+              ...(msg.content != null && isStringContent(msg.content) && msg.content.length > 0
                 ? [{ type: 'text' as const, text: msg.content }]
                 : []),
-              ...msg.tool_calls.map((tc) => ({
+              ...validToolCalls.map((tc) => ({
                 type: 'tool_use' as const,
-                id: tc.id,
+                id: tc.id || `tool_${Date.now()}`,
                 name: tc.function.name,
-                input: tc.function.arguments,
+                input: tc.function.arguments ?? {},
               })),
             ],
           } as ToolsBetaMessageParam;
@@ -347,7 +433,9 @@ export class ClaudeProvider implements LLMProvider {
     });
 
     // Validate image file
-    if (!fs.existsSync(imagePath)) {
+    try {
+      await fs.promises.access(imagePath);
+    } catch {
       this.logger.error(`Image file not found: ${imagePath}`);
       throw new Error(`Image file not found: ${imagePath}`);
     }
@@ -362,7 +450,7 @@ export class ClaudeProvider implements LLMProvider {
     }
 
     // Read and encode image
-    const imageBuffer = fs.readFileSync(imagePath);
+    const imageBuffer = await fs.promises.readFile(imagePath);
     const base64Image = imageBuffer.toString('base64');
     const mimeType = this.getMimeType(ext);
 
@@ -391,30 +479,32 @@ export class ClaudeProvider implements LLMProvider {
       // Remove data URL prefix if present
       const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
 
-      const response = await this.visionClient.messages.create({
-        model,
-        max_tokens: options.maxTokens || 1000,
-        temperature: options.temperature || 0.1,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-                  data: cleanBase64,
+      const response = await withRetry(() =>
+        this.visionClient.messages.create({
+          model,
+          max_tokens: options.maxTokens ?? 1000,
+          temperature: options.temperature ?? 0.1,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+                    data: cleanBase64,
+                  },
                 },
-              },
-              {
-                type: 'text',
-                text: prompt,
-              },
-            ],
-          },
-        ],
-      });
+                {
+                  type: 'text',
+                  text: prompt,
+                },
+              ],
+            },
+          ],
+        })
+      );
 
       const processingTime = Date.now() - startTime;
       const content =
@@ -442,23 +532,27 @@ export class ClaudeProvider implements LLMProvider {
         model,
         processingTime,
         contentLength: content.length,
-        inputTokens: response.usage?.input_tokens || 0,
-        outputTokens: response.usage?.output_tokens || 0,
+        inputTokens: response.usage?.input_tokens ?? 0,
+        outputTokens: response.usage?.output_tokens ?? 0,
       });
 
       return result;
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
 
       this.logger.error('Image analysis failed');
       this.logger.debug('Claude image analysis error', {
         processingTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
-      throw new Error(`Claude vision analysis failed: ${errorMessage}`);
+      throw new VisionError(
+        `Claude vision analysis failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 
@@ -495,7 +589,7 @@ export class ClaudeProvider implements LLMProvider {
       getVisionModels: this.getVisionModels.bind(this),
       getEmbeddingModels: () => [],
       analyzeImage: async (imagePath: string, options?: VisionAnalysisOptions) => {
-        const imageBuffer = fs.readFileSync(imagePath);
+        const imageBuffer = await fs.promises.readFile(imagePath);
         const base64Image = imageBuffer.toString('base64');
         const ext = path.extname(imagePath).toLowerCase();
         const mimeType = this.getMimeType(ext);
@@ -534,30 +628,32 @@ export class ClaudeProvider implements LLMProvider {
       // Remove data URL prefix if present
       const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
 
-      const response = await client.messages.create({
-        model,
-        max_tokens: options.maxTokens || 1000,
-        temperature: options.temperature || 0.1,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-                  data: cleanBase64,
+      const response = await withRetry(() =>
+        client.messages.create({
+          model,
+          max_tokens: options.maxTokens ?? 1000,
+          temperature: options.temperature ?? 0.1,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+                    data: cleanBase64,
+                  },
                 },
-              },
-              {
-                type: 'text',
-                text: prompt,
-              },
-            ],
-          },
-        ],
-      });
+                {
+                  type: 'text',
+                  text: prompt,
+                },
+              ],
+            },
+          ],
+        })
+      );
 
       const processingTime = Date.now() - startTime;
       const content =
@@ -581,16 +677,20 @@ export class ClaudeProvider implements LLMProvider {
       };
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
 
       this.logger.error('Claude image analysis failed');
       this.logger.debug('Claude image analysis error', {
         processingTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
-      throw new Error(`Claude vision analysis failed: ${errorMessage}`);
+      throw new VisionError(
+        `Claude vision analysis failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 }

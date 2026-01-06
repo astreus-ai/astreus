@@ -12,6 +12,7 @@ import {
 } from './types';
 import { Logger } from '../logger/types';
 import { DEFAULT_PLUGIN_CONFIG } from './defaults';
+import { ToolError } from '../errors';
 
 // Type for LLM function calling tool schema property
 interface LLMToolProperty {
@@ -41,6 +42,7 @@ export class Plugin implements IAgentModule, IPluginManager {
   private configs: Map<string, PluginConfig> = new Map();
   private tools: Map<string, ToolDefinition> = new Map();
   private logger: Logger;
+  private registrationLock: Set<string> = new Set(); // Lock for preventing race conditions
 
   constructor(private agent: IAgent) {
     this.logger = agent.logger;
@@ -121,22 +123,42 @@ export class Plugin implements IAgentModule, IPluginManager {
       });
 
       for (const tool of plugin.tools) {
-        if (this.tools.has(tool.name)) {
-          this.logger.error(`Tool name conflict: ${tool.name}`);
-          this.logger.debug('Tool registration failed - name conflict', {
+        // Wait if another registration is in progress for this tool name
+        // Add timeout to prevent infinite busy-wait
+        const maxWaitTime = 5000; // 5 seconds max wait
+        const startWait = Date.now();
+        while (this.registrationLock.has(tool.name)) {
+          if (Date.now() - startWait > maxWaitTime) {
+            this.logger.error(`Tool registration lock timeout: ${tool.name}`);
+            throw new Error(`Tool registration timeout for '${tool.name}': lock held for too long`);
+          }
+          await new Promise((r) => setTimeout(r, 10));
+        }
+
+        // Acquire lock for this tool name
+        this.registrationLock.add(tool.name);
+
+        try {
+          if (this.tools.has(tool.name)) {
+            this.logger.error(`Tool name conflict: ${tool.name}`);
+            this.logger.debug('Tool registration failed - name conflict', {
+              toolName: tool.name,
+              pluginName: plugin.name,
+              existingTools: Array.from(this.tools.keys()),
+            });
+            throw new Error(`Tool '${tool.name}' is already registered by another plugin`);
+          }
+          this.tools.set(tool.name, tool);
+
+          this.logger.debug('Tool registered', {
             toolName: tool.name,
             pluginName: plugin.name,
-            existingTools: Array.from(this.tools.keys()),
+            description: tool.description,
           });
-          throw new Error(`Tool '${tool.name}' is already registered by another plugin`);
+        } finally {
+          // Release lock
+          this.registrationLock.delete(tool.name);
         }
-        this.tools.set(tool.name, tool);
-
-        this.logger.debug('Tool registered', {
-          toolName: tool.name,
-          pluginName: plugin.name,
-          description: tool.description,
-        });
       }
     } else {
       this.logger.debug('Plugin disabled, tools not registered', {
@@ -224,7 +246,7 @@ export class Plugin implements IAgentModule, IPluginManager {
     this.logger.debug('Plugin lookup', {
       pluginName: name,
       found: !!plugin,
-      version: plugin?.version || DEFAULT_PLUGIN_CONFIG.defaultVersion,
+      version: plugin?.version ?? DEFAULT_PLUGIN_CONFIG.defaultVersion,
     });
 
     return plugin;
@@ -247,7 +269,7 @@ export class Plugin implements IAgentModule, IPluginManager {
     this.logger.debug('Tool lookup', {
       toolName: name,
       found: !!tool,
-      description: tool?.description || DEFAULT_PLUGIN_CONFIG.defaultDescription,
+      description: tool?.description ?? DEFAULT_PLUGIN_CONFIG.defaultDescription,
     });
 
     return tool;
@@ -315,13 +337,65 @@ export class Plugin implements IAgentModule, IPluginManager {
         };
       }
 
-      // Execute tool
-      this.logger.debug('Calling tool handler', {
+      // Validate agent is available
+      if (!this.agent || typeof this.agent.id !== 'string') {
+        this.logger.error('Agent not available for tool execution');
+        return {
+          id: toolCall.id,
+          name: toolCall.name,
+          result: {
+            success: false,
+            error: 'Agent not available for tool execution',
+          },
+          executionTime: Date.now() - startTime,
+        };
+      }
+
+      // Create isolated execution context for this tool call
+      // This prevents state sharing between plugins and tool calls
+      const isolatedContext: ToolContext = {
+        // Copy existing context properties if provided
+        ...(context || {}),
+        // Add execution isolation metadata
+        agentId: context?.agentId || this.agent.id,
+        agent: context?.agent || this.agent,
+        // Add unique execution ID for this specific call
+        executionId: `${toolCall.id}-${Date.now()}`,
+        // Isolate any shared state by creating fresh copies
+        toolName: toolCall.name,
+        callTimestamp: new Date(),
+      };
+
+      // Execute tool with timeout
+      this.logger.debug('Calling tool handler with isolated context', {
         toolName: toolCall.name,
         callId: toolCall.id,
+        timeout: DEFAULT_PLUGIN_CONFIG.defaultTimeout,
+        executionId: isolatedContext.executionId ?? null,
       });
 
-      const result = await tool.handler(toolCall.parameters, context);
+      let timeoutId: NodeJS.Timeout;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(
+            new Error(
+              `Tool '${toolCall.name}' execution timed out after ${DEFAULT_PLUGIN_CONFIG.defaultTimeout}ms`
+            )
+          );
+        }, DEFAULT_PLUGIN_CONFIG.defaultTimeout);
+      });
+
+      let result;
+      try {
+        result = await Promise.race([
+          tool.handler(toolCall.parameters, isolatedContext),
+          timeoutPromise,
+        ]);
+        clearTimeout(timeoutId!);
+      } catch (raceError) {
+        clearTimeout(timeoutId!);
+        throw raceError;
+      }
       const executionTime = Date.now() - startTime;
 
       // User-facing success message
@@ -334,6 +408,7 @@ export class Plugin implements IAgentModule, IPluginManager {
         success: result.success,
         hasData: !!result.data,
         hasError: !!result.error,
+        executionId: isolatedContext.executionId ?? null,
       });
 
       return {
@@ -344,23 +419,59 @@ export class Plugin implements IAgentModule, IPluginManager {
       };
     } catch (error) {
       const executionTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error('Unknown error occurred');
 
-      this.logger.error(`Tool execution failed: ${toolCall.name}`);
+      // Determine error type based on error characteristics
+      let errorType: 'not_found' | 'validation' | 'execution' | 'timeout' | 'unknown' = 'execution';
+      if (
+        originalError.message.includes('timed out') ||
+        originalError.message.includes('timeout')
+      ) {
+        errorType = 'timeout';
+      } else if (
+        originalError.message.includes('not found') ||
+        originalError.message.includes('not available')
+      ) {
+        errorType = 'not_found';
+      } else if (
+        originalError.message.includes('Invalid') ||
+        originalError.message.includes('validation')
+      ) {
+        errorType = 'validation';
+      }
+
+      // Determine if error is recoverable
+      const recoverable = errorType !== 'not_found';
+
+      // Create normalized ToolError for consistent error handling
+      const toolError = new ToolError(
+        `Plugin tool '${toolCall.name}' failed: ${originalError.message}`,
+        toolCall.name,
+        'plugin',
+        errorType,
+        recoverable,
+        originalError
+      );
+
+      this.logger.error(`Tool execution failed: ${toolCall.name}`, toolError);
       this.logger.debug('Tool execution error', {
         toolName: toolCall.name,
         callId: toolCall.id,
         executionTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        errorType,
+        recoverable,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
+      // Return normalized error result
+      const errorResult = toolError.toToolResult();
       return {
         id: toolCall.id,
         name: toolCall.name,
         result: {
           success: false,
-          error: errorMessage,
+          error: errorResult.error,
         },
         executionTime,
       };
@@ -410,13 +521,38 @@ export class Plugin implements IAgentModule, IPluginManager {
       toolCount: Array.isArray(plugin.tools) ? plugin.tools.length : 0,
     });
 
-    if (!plugin.name || !plugin.version) {
-      this.logger.debug('Plugin validation failed - missing name or version', {
-        pluginName: plugin.name || DEFAULT_PLUGIN_CONFIG.missingName,
-        hasName: !!plugin.name,
-        hasVersion: !!plugin.version,
+    // Validate plugin name
+    if (!plugin.name || typeof plugin.name !== 'string' || plugin.name.trim().length === 0) {
+      this.logger.debug('Plugin validation failed - invalid name', {
+        pluginName: plugin.name ?? DEFAULT_PLUGIN_CONFIG.missingName,
+        nameType: typeof plugin.name,
       });
-      throw new Error('Plugin must have name and version');
+      throw new Error('Plugin must have a valid non-empty name');
+    }
+
+    // Validate plugin version
+    if (
+      !plugin.version ||
+      typeof plugin.version !== 'string' ||
+      plugin.version.trim().length === 0
+    ) {
+      this.logger.debug('Plugin validation failed - invalid version', {
+        pluginName: plugin.name,
+        version: plugin.version ?? DEFAULT_PLUGIN_CONFIG.defaultVersion,
+        versionType: typeof plugin.version,
+      });
+      throw new Error(`Plugin '${plugin.name}' must have a valid non-empty version`);
+    }
+
+    // Validate plugin name format (alphanumeric with hyphens/underscores)
+    const namePattern = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+    if (!namePattern.test(plugin.name)) {
+      this.logger.debug('Plugin validation failed - invalid name format', {
+        pluginName: plugin.name,
+      });
+      throw new Error(
+        `Plugin name '${plugin.name}' must start with a letter and contain only alphanumeric characters, hyphens, or underscores`
+      );
     }
 
     if (!Array.isArray(plugin.tools)) {
@@ -425,7 +561,20 @@ export class Plugin implements IAgentModule, IPluginManager {
         toolsType: typeof plugin.tools,
         isArray: Array.isArray(plugin.tools),
       });
-      throw new Error('Plugin must have tools array');
+      throw new Error(`Plugin '${plugin.name}' must have tools array`);
+    }
+
+    // Check for duplicate tool names within the plugin
+    const toolNames = new Set<string>();
+    for (const tool of plugin.tools) {
+      if (toolNames.has(tool.name)) {
+        this.logger.debug('Plugin validation failed - duplicate tool name', {
+          pluginName: plugin.name,
+          duplicateToolName: tool.name,
+        });
+        throw new Error(`Plugin '${plugin.name}' has duplicate tool name '${tool.name}'`);
+      }
+      toolNames.add(tool.name);
     }
 
     // Validate each tool
@@ -438,15 +587,38 @@ export class Plugin implements IAgentModule, IPluginManager {
         hasHandler: !!tool.handler,
       });
 
-      if (!tool.name || !tool.description || !tool.handler) {
-        this.logger.debug('Tool validation failed', {
+      if (!tool.name || typeof tool.name !== 'string' || tool.name.trim().length === 0) {
+        this.logger.debug('Tool validation failed - invalid name', {
           pluginName: plugin.name,
-          toolName: tool.name || DEFAULT_PLUGIN_CONFIG.missingName,
-          hasName: !!tool.name,
-          hasDescription: !!tool.description,
-          hasHandler: !!tool.handler,
+          toolName: tool.name ?? DEFAULT_PLUGIN_CONFIG.missingName,
         });
-        throw new Error(`Invalid tool definition in plugin '${plugin.name}'`);
+        throw new Error(`Invalid tool name in plugin '${plugin.name}'`);
+      }
+
+      if (!tool.description || typeof tool.description !== 'string') {
+        this.logger.debug('Tool validation failed - invalid description', {
+          pluginName: plugin.name,
+          toolName: tool.name,
+        });
+        throw new Error(
+          `Tool '${tool.name}' in plugin '${plugin.name}' must have a valid description`
+        );
+      }
+
+      if (!tool.handler || typeof tool.handler !== 'function') {
+        this.logger.debug('Tool validation failed - invalid handler', {
+          pluginName: plugin.name,
+          toolName: tool.name,
+          handlerType: typeof tool.handler,
+        });
+        throw new Error(
+          `Tool '${tool.name}' in plugin '${plugin.name}' must have a valid handler function`
+        );
+      }
+
+      // Validate tool parameters
+      if (tool.parameters && typeof tool.parameters === 'object') {
+        this.validateToolParameterDefinitions(plugin.name, tool.name, tool.parameters);
       }
     }
 
@@ -455,6 +627,65 @@ export class Plugin implements IAgentModule, IPluginManager {
       version: plugin.version,
       toolCount: plugin.tools.length,
     });
+  }
+
+  private validateToolParameterDefinitions(
+    pluginName: string,
+    toolName: string,
+    parameters: Record<string, ToolParameter>,
+    depth: number = 0
+  ): void {
+    // Prevent stack overflow with depth limit
+    const MAX_DEPTH = 50;
+    if (depth > MAX_DEPTH) {
+      throw new Error(`Parameter nesting too deep in tool '${toolName}' (max depth: ${MAX_DEPTH})`);
+    }
+
+    const validTypes = ['string', 'number', 'boolean', 'object', 'array'];
+
+    for (const [paramName, paramDef] of Object.entries(parameters)) {
+      if (!paramDef.type || !validTypes.includes(paramDef.type)) {
+        this.logger.debug('Parameter validation failed - invalid type', {
+          pluginName,
+          toolName,
+          paramName,
+          paramType: paramDef.type,
+          validTypes,
+        });
+        throw new Error(
+          `Parameter '${paramName}' in tool '${toolName}' has invalid type '${paramDef.type}'`
+        );
+      }
+
+      if (!paramDef.description || typeof paramDef.description !== 'string') {
+        this.logger.debug('Parameter validation failed - missing description', {
+          pluginName,
+          toolName,
+          paramName,
+        });
+        throw new Error(`Parameter '${paramName}' in tool '${toolName}' must have a description`);
+      }
+
+      // Validate nested object properties
+      if (paramDef.type === 'object' && paramDef.properties) {
+        this.validateToolParameterDefinitions(pluginName, toolName, paramDef.properties, depth + 1);
+      }
+
+      // Validate array items
+      if (paramDef.type === 'array' && paramDef.items) {
+        if (!validTypes.includes(paramDef.items.type)) {
+          this.logger.debug('Parameter validation failed - invalid array items type', {
+            pluginName,
+            toolName,
+            paramName,
+            itemsType: paramDef.items.type,
+          });
+          throw new Error(
+            `Array parameter '${paramName}' in tool '${toolName}' has invalid items type`
+          );
+        }
+      }
+    }
   }
 
   private validateToolParameters(
@@ -492,7 +723,7 @@ export class Plugin implements IAgentModule, IPluginManager {
 
       // Type validation
       if (value !== undefined && value !== null) {
-        if (!this.validateParameterType(value as ToolParameterValue, paramDef)) {
+        if (!this.isToolParameterValue(value) || !this.validateParameterType(value, paramDef)) {
           this.logger.debug('Parameter type validation failed', {
             toolName: tool.name,
             paramName,
@@ -513,6 +744,29 @@ export class Plugin implements IAgentModule, IPluginManager {
     return null;
   }
 
+  private isToolParameterValue(value: unknown, depth: number = 0): value is ToolParameterValue {
+    // Prevent stack overflow with depth limit
+    const MAX_DEPTH = 50;
+    if (depth > MAX_DEPTH) {
+      this.logger.warn('Maximum nesting depth exceeded for parameter validation', { depth });
+      return false;
+    }
+
+    if (value === null) return true;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return true;
+    }
+    if (Array.isArray(value)) {
+      return value.every((item) => this.isToolParameterValue(item, depth + 1));
+    }
+    if (typeof value === 'object') {
+      return Object.values(value as Record<string, unknown>).every((v) =>
+        this.isToolParameterValue(v, depth + 1)
+      );
+    }
+    return false;
+  }
+
   private validateParameterType(value: ToolParameterValue, paramDef: ToolParameter): boolean {
     switch (paramDef.type) {
       case 'string':
@@ -530,7 +784,17 @@ export class Plugin implements IAgentModule, IPluginManager {
     }
   }
 
-  public convertParametersToJsonSchema(parameters: Record<string, ToolParameter>): LLMToolSchema {
+  public convertParametersToJsonSchema(
+    parameters: Record<string, ToolParameter>,
+    depth: number = 0
+  ): LLMToolSchema {
+    // Prevent stack overflow with depth limit
+    const MAX_DEPTH = 50;
+    if (depth > MAX_DEPTH) {
+      this.logger.warn('Maximum nesting depth exceeded for JSON schema conversion', { depth });
+      return { type: 'object', properties: {}, required: [] };
+    }
+
     const properties: Record<string, LLMToolProperty> = {};
 
     for (const [name, param] of Object.entries(parameters)) {
@@ -545,7 +809,8 @@ export class Plugin implements IAgentModule, IPluginManager {
 
       if (param.properties) {
         properties[name].properties = this.convertParametersToJsonSchema(
-          param.properties
+          param.properties,
+          depth + 1
         ).properties;
       }
 
@@ -566,25 +831,103 @@ export class Plugin implements IAgentModule, IPluginManager {
   }
 }
 
-// Global plugin instance
-let plugin: Plugin | null = null;
+// Agent-based plugin instances
+const pluginInstances = new Map<string, Plugin>();
 
 export function getPlugin(agent?: IAgent): Plugin {
-  if (!plugin && agent) {
-    plugin = new Plugin(agent);
+  if (!agent) {
+    throw new Error('Agent required for plugin initialization');
   }
-  if (!plugin) {
-    throw new Error('Plugin not initialized. Call with agent first.');
+  const agentId = agent.id;
+  if (!pluginInstances.has(agentId)) {
+    pluginInstances.set(agentId, new Plugin(agent));
   }
-  return plugin;
+  return pluginInstances.get(agentId)!;
+}
+
+/**
+ * Cleanup plugin instance for a specific agent to prevent memory leaks.
+ * Should be called when an agent is destroyed or no longer needed.
+ * @param agentId - The agent ID to cleanup plugin for.
+ */
+export async function cleanupPluginForAgent(agentId: string): Promise<void> {
+  const plugin = pluginInstances.get(agentId);
+  if (plugin) {
+    // Unregister all plugins to trigger their cleanup methods
+    const plugins = plugin.listPlugins();
+    for (const p of plugins) {
+      await plugin.unregisterPlugin(p.name);
+    }
+    pluginInstances.delete(agentId);
+  }
+}
+
+/**
+ * Cleanup plugin instance for a specific agent to prevent memory leaks.
+ * Should be called when the plugin manager is no longer needed.
+ * @param agentId - The agent ID to cleanup plugin for. If not provided, cleans up all instances.
+ */
+export async function cleanupPlugin(agentId?: string): Promise<void> {
+  if (agentId) {
+    await cleanupPluginForAgent(agentId);
+  } else {
+    // Cleanup all instances
+    const agentIds = Array.from(pluginInstances.keys());
+    for (const id of agentIds) {
+      await cleanupPluginForAgent(id);
+    }
+  }
+}
+
+/**
+ * Reset plugin instances (mainly for testing purposes).
+ * Performs cleanup before clearing instances to prevent memory leaks.
+ * @param agentId - The agent ID to reset plugin for. If not provided, resets all instances.
+ */
+export async function resetPlugin(agentId?: string): Promise<void> {
+  if (agentId) {
+    // Cleanup before deleting
+    const plugin = pluginInstances.get(agentId);
+    if (plugin) {
+      const plugins = plugin.listPlugins();
+      for (const p of plugins) {
+        try {
+          await plugin.unregisterPlugin(p.name);
+        } catch {
+          // Ignore cleanup errors during reset
+        }
+      }
+    }
+    pluginInstances.delete(agentId);
+  } else {
+    // Cleanup all instances before clearing
+    for (const [, plugin] of pluginInstances) {
+      const plugins = plugin.listPlugins();
+      for (const p of plugins) {
+        try {
+          await plugin.unregisterPlugin(p.name);
+        } catch {
+          // Ignore cleanup errors during reset
+        }
+      }
+    }
+    pluginInstances.clear();
+  }
 }
 
 export * from './types';
 
 // Export utility function for converting tool parameters to JSON schema
 export function convertToolParametersToJsonSchema(
-  parameters: Record<string, ToolParameter>
+  parameters: Record<string, ToolParameter>,
+  depth: number = 0
 ): LLMToolSchema {
+  // Prevent stack overflow with depth limit
+  const MAX_DEPTH = 50;
+  if (depth > MAX_DEPTH) {
+    return { type: 'object', properties: {}, required: [] };
+  }
+
   const properties: Record<string, LLMToolProperty> = {};
 
   for (const [name, param] of Object.entries(parameters)) {
@@ -598,7 +941,10 @@ export function convertToolParametersToJsonSchema(
     }
 
     if (param.properties) {
-      properties[name].properties = convertToolParametersToJsonSchema(param.properties).properties;
+      properties[name].properties = convertToolParametersToJsonSchema(
+        param.properties,
+        depth + 1
+      ).properties;
     }
 
     if (param.items) {

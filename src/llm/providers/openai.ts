@@ -12,8 +12,28 @@ import {
 import OpenAI from 'openai';
 import { getLogger } from '../../logger';
 import { Logger } from '../../logger/types';
+import { LLMApiError, VisionError } from '../../errors';
 import * as fs from 'fs';
 import * as path from 'path';
+
+// Retry helper with exponential backoff
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastError: Error | undefined;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      if (i < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, Math.pow(2, i) * 1000));
+      }
+    }
+  }
+  if (!lastError) {
+    throw new Error('No retry attempts made');
+  }
+  throw lastError;
+}
 
 // OpenAI-specific message type that accepts string arguments for tool calls
 interface OpenAIMessage extends Omit<LLMMessage, 'tool_calls'> {
@@ -46,10 +66,6 @@ export class OpenAIProvider implements LLMProvider {
 
     this.logger.info('OpenAI provider initialized');
     this.logger.debug('OpenAI provider initialization', {
-      hasConfigApiKey: !!config?.apiKey,
-      hasEnvApiKey: !!process.env.OPENAI_API_KEY,
-      hasEmbeddingApiKey: !!process.env.OPENAI_EMBEDDING_API_KEY,
-      hasVisionApiKey: !!process.env.OPENAI_VISION_API_KEY,
       hasCustomBaseUrl: !!config?.baseUrl,
       hasEmbeddingBaseUrl: !!process.env.OPENAI_EMBEDDING_BASE_URL,
       hasVisionBaseUrl: !!process.env.OPENAI_VISION_BASE_URL,
@@ -57,12 +73,16 @@ export class OpenAIProvider implements LLMProvider {
       supportsVision: true,
     });
 
+    // Default timeout: 2 minutes (120000ms)
+    const timeout = config?.timeout ?? 120000;
+
     // Main client for chat completions (can use custom base URL like OpenRouter)
     // If baseUrl is explicitly null, don't use OPENAI_BASE_URL fallback (for embedding/vision providers)
     const chatBaseUrl =
       config?.baseUrl === null ? undefined : config?.baseUrl || process.env.OPENAI_BASE_URL;
     this.client = new OpenAI({
       apiKey,
+      timeout,
       ...(chatBaseUrl && { baseURL: chatBaseUrl }),
     });
 
@@ -78,8 +98,9 @@ export class OpenAIProvider implements LLMProvider {
     });
 
     // Create embedding client with COMPLETELY isolated configuration
-    const embeddingClientConfig: { apiKey: string; baseURL?: string } = {
+    const embeddingClientConfig: { apiKey: string; baseURL?: string; timeout: number } = {
       apiKey: embeddingApiKey,
+      timeout,
     };
 
     // Only add baseURL if we have a dedicated one, otherwise OpenAI client will use default
@@ -97,8 +118,9 @@ export class OpenAIProvider implements LLMProvider {
     const visionBaseUrl = process.env.OPENAI_VISION_BASE_URL; // Only dedicated URL, no fallback
 
     // Create vision client with COMPLETELY isolated configuration
-    const visionClientConfig: { apiKey: string; baseURL?: string } = {
+    const visionClientConfig: { apiKey: string; baseURL?: string; timeout: number } = {
       apiKey: visionApiKey,
+      timeout,
     };
 
     // Only add baseURL if we have a dedicated one, otherwise OpenAI client will use default
@@ -173,88 +195,99 @@ export class OpenAIProvider implements LLMProvider {
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
     const messages = this.prepareMessages(options);
 
-    const completion = await this.client.chat.completions.create({
-      model: options.model,
-      messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 4096,
-      stream: false,
-      ...(options.tools &&
-        options.tools.length > 0 && {
-          tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
-          tool_choice: 'auto',
-        }),
-    });
+    try {
+      const completion = await withRetry(() =>
+        this.client.chat.completions.create({
+          model: options.model,
+          messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+          temperature: options.temperature ?? 0.7,
+          max_tokens: options.maxTokens ?? 4096,
+          stream: false,
+          ...(options.tools &&
+            options.tools.length > 0 && {
+              tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
+              tool_choice: 'auto',
+            }),
+        })
+      );
 
-    const message = completion.choices[0]?.message;
+      const message = completion.choices[0]?.message;
 
-    return {
-      content: message?.content || '',
-      model: completion.model,
-      toolCalls: message?.tool_calls?.map((tc) => ({
-        id: tc.id,
-        type: tc.type,
-        function: {
-          name: tc.function.name,
-          arguments:
-            typeof tc.function.arguments === 'string'
-              ? this.safeJsonParse(tc.function.arguments)
-              : tc.function.arguments,
+      return {
+        content: message?.content || '',
+        model: completion.model,
+        toolCalls: message?.tool_calls?.map((tc) => ({
+          id: tc.id,
+          type: tc.type,
+          function: {
+            name: tc.function.name,
+            arguments:
+              typeof tc.function.arguments === 'string'
+                ? this.safeJsonParse(tc.function.arguments)
+                : tc.function.arguments,
+          },
+        })),
+        usage: {
+          promptTokens: completion.usage?.prompt_tokens ?? 0,
+          completionTokens: completion.usage?.completion_tokens ?? 0,
+          totalTokens: completion.usage?.total_tokens ?? 0,
         },
-      })),
-      usage: {
-        promptTokens: completion.usage?.prompt_tokens || 0,
-        completionTokens: completion.usage?.completion_tokens || 0,
-        totalTokens: completion.usage?.total_tokens || 0,
-      },
-    };
+      };
+    } catch (error) {
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      this.logger.error('OpenAI generateResponse failed', originalError, {
+        model: options.model,
+        errorMessage: originalError.message,
+      });
+      throw new LLMApiError(
+        `OpenAI API request failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
+    }
   }
 
   async *generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
     const messages = this.prepareMessages(options);
 
-    let stream;
+    let stream:
+      | (Awaited<ReturnType<typeof this.client.chat.completions.create>> & {
+          controller?: AbortController;
+        })
+      | undefined;
     try {
-      stream = await this.client.chat.completions.create({
-        model: options.model,
-        messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 4096,
-        stream: true,
-        stream_options: { include_usage: true }, // Enable usage tracking in streaming
-        ...(options.tools &&
-          options.tools.length > 0 && {
-            tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
-            tool_choice: 'auto',
-          }),
-      });
+      stream = await withRetry(() =>
+        this.client.chat.completions.create({
+          model: options.model,
+          messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+          temperature: options.temperature ?? 0.7,
+          max_tokens: options.maxTokens ?? 4096,
+          stream: true,
+          stream_options: { include_usage: true }, // Enable usage tracking in streaming
+          ...(options.tools &&
+            options.tools.length > 0 && {
+              tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
+              tool_choice: 'auto',
+            }),
+        })
+      );
     } catch (error: unknown) {
       // Log full error details including OpenAI API response
       const errorObj = error as Record<string, unknown>;
-      console.error('❌ OPENAI API ERROR:', {
+      this.logger.error('OpenAI API request failed', error instanceof Error ? error : undefined, {
         model: options.model,
         messageCount: messages.length,
-        errorMessage: errorObj?.message || 'Unknown error',
-        errorType: errorObj?.constructor?.name || 'Unknown',
-        status: errorObj?.status || errorObj?.statusCode,
-        code: errorObj?.code,
-        type: errorObj?.type,
+        errorMessage: String(errorObj?.message || 'Unknown error'),
+        errorType: String(errorObj?.constructor?.name || 'Unknown'),
+        status: String(errorObj?.status || errorObj?.statusCode || ''),
+        code: String(errorObj?.code || ''),
+        type: String(errorObj?.type || ''),
         errorString: String(error),
-        // Log ALL messages for debugging
-        allMessages: messages.map((m) => {
-          const content = m.content || '';
-          const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
-          return {
-            role: m.role,
-            content: contentStr,
-            hasToolCalls: 'tool_calls' in m,
-            toolCalls: 'tool_calls' in m && m.tool_calls ? m.tool_calls : undefined,
-            tool_call_id: 'tool_call_id' in m ? m.tool_call_id : undefined,
-          };
-        }),
       });
-
-      this.logger.error('OpenAI API request failed: ' + (errorObj?.message || error));
+      this.logger.debug('OpenAI API error details', {
+        messageCount: messages.length,
+        roles: messages.map((m) => m.role).join(', '),
+      });
       throw error;
     }
 
@@ -266,8 +299,20 @@ export class OpenAIProvider implements LLMProvider {
 
     let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined;
 
+    // Helper function to abort stream safely
+    const abortStream = (): void => {
+      try {
+        // OpenAI SDK streams have a controller property for aborting
+        if (stream && 'controller' in stream && stream.controller instanceof AbortController) {
+          stream.controller.abort();
+        }
+      } catch {
+        // Ignore abort errors - stream may already be closed
+      }
+    };
+
     try {
-      for await (const chunk of stream) {
+      for await (const chunk of stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>) {
         const delta = chunk.choices?.[0]?.delta;
         const content = delta?.content || '';
 
@@ -321,7 +366,7 @@ export class OpenAIProvider implements LLMProvider {
                   name: tc.function.name,
                   arguments:
                     typeof tc.function.arguments === 'string'
-                      ? JSON.parse(tc.function.arguments)
+                      ? this.safeJsonParse(tc.function.arguments)
                       : tc.function.arguments,
                 },
               }))
@@ -329,14 +374,24 @@ export class OpenAIProvider implements LLMProvider {
         usage,
       };
     } catch (error) {
+      // Abort the stream on error to prevent resource leak
+      abortStream();
+
       // Log full error details for debugging
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      const originalError = error instanceof Error ? error : new Error(String(error));
       this.logger.error(
         'OpenAI streaming error details',
-        new Error(`${errorMsg} - ${JSON.stringify(error, null, 2)}`)
+        new Error(`${originalError.message} - ${JSON.stringify(error, null, 2)}`)
       );
 
-      throw new Error(`OpenAI streaming error: ${errorMsg}`);
+      throw new LLMApiError(
+        `OpenAI streaming error: ${originalError.message}`,
+        this.name,
+        originalError
+      );
+    } finally {
+      // Ensure stream is aborted when generator is closed early (consumer breaks out of loop)
+      abortStream();
     }
   }
 
@@ -350,18 +405,25 @@ export class OpenAIProvider implements LLMProvider {
     });
 
     try {
-      const response = await this.embeddingClient.embeddings.create({
-        model: embeddingModel,
-        input: text,
-        encoding_format: 'float',
-      });
+      const response = await withRetry(() =>
+        this.embeddingClient.embeddings.create({
+          model: embeddingModel,
+          input: text,
+          encoding_format: 'float',
+        })
+      );
+
+      const embeddingData = response.data[0]?.embedding;
+      if (!embeddingData) {
+        throw new Error('No embedding data returned from OpenAI API');
+      }
 
       const result: EmbeddingResult = {
-        embedding: response.data[0].embedding,
+        embedding: embeddingData,
         model: embeddingModel,
         usage: {
-          promptTokens: response.usage.prompt_tokens,
-          totalTokens: response.usage.total_tokens,
+          promptTokens: response.usage?.prompt_tokens ?? 0,
+          totalTokens: response.usage?.total_tokens ?? 0,
         },
       };
 
@@ -369,19 +431,23 @@ export class OpenAIProvider implements LLMProvider {
       this.logger.debug('OpenAI embedding result', {
         model: embeddingModel,
         dimensions: result.embedding.length,
-        promptTokens: result.usage?.promptTokens || 0,
+        promptTokens: result.usage?.promptTokens ?? 0,
       });
 
       return result;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
       this.logger.error('Embedding generation failed');
       this.logger.debug('OpenAI embedding error', {
         model: embeddingModel,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
-      throw new Error(`OpenAI embedding generation failed: ${errorMessage}`);
+      throw new LLMApiError(
+        `OpenAI embedding generation failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 
@@ -444,26 +510,28 @@ export class OpenAIProvider implements LLMProvider {
       const model = options.model || this.getVisionModels()[0]; // Use agent's model or fallback to first available
       const prompt = options.prompt || 'Analyze this image and describe what you see in detail.';
 
-      const response = await this.visionClient.chat.completions.create({
-        model,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: base64Data,
-                  detail: options.detail || 'auto',
+      const response = await withRetry(() =>
+        this.visionClient.chat.completions.create({
+          model,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: base64Data,
+                    detail: options.detail || 'auto',
+                  },
                 },
-              },
-            ],
-          },
-        ],
-        max_tokens: options.maxTokens || 1000,
-        temperature: options.temperature || 0.1,
-      });
+              ],
+            },
+          ],
+          max_tokens: options.maxTokens ?? 1000,
+          temperature: options.temperature ?? 0.1,
+        })
+      );
 
       const processingTime = Date.now() - startTime;
       const content = response.choices[0]?.message?.content || 'No analysis available';
@@ -490,24 +558,28 @@ export class OpenAIProvider implements LLMProvider {
         model,
         processingTime,
         contentLength: content.length,
-        promptTokens: response.usage?.prompt_tokens || 0,
-        completionTokens: response.usage?.completion_tokens || 0,
-        totalTokens: response.usage?.total_tokens || 0,
+        promptTokens: response.usage?.prompt_tokens ?? 0,
+        completionTokens: response.usage?.completion_tokens ?? 0,
+        totalTokens: response.usage?.total_tokens ?? 0,
       });
 
       return result;
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
 
       this.logger.error('Image analysis failed');
       this.logger.debug('OpenAI image analysis error', {
         processingTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
-      throw new Error(`OpenAI vision analysis failed: ${errorMessage}`);
+      throw new VisionError(
+        `OpenAI vision analysis failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 
@@ -571,7 +643,7 @@ export class OpenAIProvider implements LLMProvider {
           model: embeddingModel,
           clientHasBaseURL: 'baseURL' in this.embeddingClient,
           clientBaseURL: (this.embeddingClient as { baseURL?: string }).baseURL || 'none',
-          clientApiKey: (this.embeddingClient as { apiKey?: string }).apiKey?.slice(0, 12) + '...',
+          clientApiKey: '[REDACTED]',
         });
 
         const response = await this.embeddingClient.embeddings.create({
@@ -580,12 +652,17 @@ export class OpenAIProvider implements LLMProvider {
           encoding_format: 'float',
         });
 
+        const embeddingData = response.data[0]?.embedding;
+        if (!embeddingData) {
+          throw new Error('No embedding data returned from OpenAI API');
+        }
+
         return {
-          embedding: response.data[0].embedding,
+          embedding: embeddingData,
           model: embeddingModel,
           usage: {
-            promptTokens: response.usage.prompt_tokens,
-            totalTokens: response.usage.total_tokens,
+            promptTokens: response.usage?.prompt_tokens ?? 0,
+            totalTokens: response.usage?.total_tokens ?? 0,
           },
         };
       },
@@ -601,7 +678,7 @@ export class OpenAIProvider implements LLMProvider {
       getVisionModels: this.getVisionModels.bind(this),
       getEmbeddingModels: () => [],
       analyzeImage: async (imagePath: string, options?: VisionAnalysisOptions) => {
-        const imageBuffer = fs.readFileSync(imagePath);
+        const imageBuffer = await fs.promises.readFile(imagePath);
         const base64Image = imageBuffer.toString('base64');
         const ext = path.extname(imagePath).toLowerCase();
         const mimeType = this.getMimeType(ext);
@@ -632,26 +709,28 @@ export class OpenAIProvider implements LLMProvider {
       const model = options.model || this.getVisionModels()[0]; // Use agent's model or fallback to first available
       const prompt = options.prompt || 'Analyze this image and describe what you see in detail.';
 
-      const response = await client.chat.completions.create({
-        model,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: base64Data,
-                  detail: options.detail || 'auto',
+      const response = await withRetry(() =>
+        client.chat.completions.create({
+          model,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: base64Data,
+                    detail: options.detail || 'auto',
+                  },
                 },
-              },
-            ],
-          },
-        ],
-        max_tokens: options.maxTokens || 1000,
-        temperature: options.temperature || 0.1,
-      });
+              ],
+            },
+          ],
+          max_tokens: options.maxTokens ?? 1000,
+          temperature: options.temperature ?? 0.1,
+        })
+      );
 
       const processingTime = Date.now() - startTime;
       const content = response.choices[0]?.message?.content || 'No analysis available';
@@ -674,16 +753,20 @@ export class OpenAIProvider implements LLMProvider {
       };
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const originalError = error instanceof Error ? error : new Error(String(error));
 
       this.logger.error('OpenAI image analysis failed');
       this.logger.debug('OpenAI image analysis error', {
         processingTime,
-        error: errorMessage,
-        hasStack: error instanceof Error && !!error.stack,
+        error: originalError.message,
+        hasStack: !!originalError.stack,
       });
 
-      throw new Error(`OpenAI vision analysis failed: ${errorMessage}`);
+      throw new VisionError(
+        `OpenAI vision analysis failed: ${originalError.message}`,
+        this.name,
+        originalError
+      );
     }
   }
 }

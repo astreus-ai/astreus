@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { IAgentModule, IAgent } from '../agent/types';
 import { SubAgentRunOptions } from '../sub-agent/types';
 import {
@@ -15,6 +16,7 @@ import {
   LLMMessageContent,
   LLMMessageContentPart,
   Tool,
+  ToolCall,
 } from '../llm';
 import { Memory } from '../memory';
 import { Memory as MemoryType } from '../memory/types';
@@ -26,6 +28,35 @@ import * as path from 'path';
 import { DEFAULT_AGENT_CONFIG } from '../agent/defaults';
 import { DEFAULT_TASK_CONFIG } from './defaults';
 import { convertToolParametersToJsonSchema } from '../plugin';
+import { MetadataObject } from '../types';
+
+/**
+ * Simple async mutex for protecting initialization.
+ * Replaces spin-wait anti-pattern with proper promise-based waiting.
+ */
+class AsyncMutex {
+  private locked = false;
+  private queue: Array<() => void> = [];
+
+  async acquire(): Promise<void> {
+    if (!this.locked) {
+      this.locked = true;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(resolve);
+    });
+  }
+
+  release(): void {
+    const next = this.queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.locked = false;
+    }
+  }
+}
 
 // Database row interfaces
 interface TaskDbRow {
@@ -44,6 +75,10 @@ export class Task implements IAgentModule {
   readonly name = 'task';
   private knex: Knex | null = null;
   private logger: Logger;
+  private static initializingDatabase: Promise<void> | null = null;
+  private static readonly MAX_TOOL_CALLS = 100;
+  // AsyncMutex pattern for race condition prevention (replaces spin-wait)
+  private static initMutex = new AsyncMutex();
 
   constructor(private agent: IAgent) {
     this.logger = agent.logger;
@@ -51,19 +86,64 @@ export class Task implements IAgentModule {
 
   async initialize(): Promise<void> {
     await this.ensureDatabase();
-    await this.initializeTaskTable();
   }
 
   private async ensureDatabase(): Promise<void> {
-    if (!this.knex) {
+    if (this.knex) {
+      return;
+    }
+
+    // Check if another instance is already initializing
+    if (Task.initializingDatabase) {
+      await Task.initializingDatabase;
+      // After waiting, get the knex instance from the initialized database
       const db = await getDatabase();
       this.knex = db.getKnex();
+      return;
+    }
+
+    // Use AsyncMutex instead of spin-wait for proper synchronization
+    await Task.initMutex.acquire();
+    let mutexReleased = false;
+    try {
+      // Double-check after acquiring lock
+      if (this.knex) return;
+
+      // Check again if initialization started while waiting for lock
+      if (Task.initializingDatabase) {
+        // Release mutex early since we'll wait on the promise
+        Task.initMutex.release();
+        mutexReleased = true;
+        await Task.initializingDatabase;
+        const db = await getDatabase();
+        this.knex = db.getKnex();
+        return;
+      }
+
+      // Start initialization
+      Task.initializingDatabase = (async () => {
+        const db = await getDatabase();
+        this.knex = db.getKnex();
+      })();
+
+      try {
+        await Task.initializingDatabase;
+      } finally {
+        Task.initializingDatabase = null;
+      }
+    } finally {
+      // Only release if not already released
+      if (!mutexReleased) {
+        Task.initMutex.release();
+      }
     }
   }
 
-  private async initializeTaskTable(): Promise<void> {
-    // Tasks table is now shared and initialized in the main database module
-    // This method is kept for compatibility but does nothing
+  private getKnex(): Knex {
+    if (!this.knex) {
+      throw new Error('Database not initialized. Call ensureDatabase() first.');
+    }
+    return this.knex;
   }
 
   async createTask(request: TaskRequest): Promise<TaskType> {
@@ -72,7 +152,7 @@ export class Task implements IAgentModule {
 
     this.logger.debug('Creating task', {
       promptLength: request.prompt.length,
-      promptPreview: request.prompt.slice(0, 100) + '...,',
+      promptPreview: request.prompt.slice(0, 100) + '...',
       agentId: this.agent.id,
       hasAttachments: !!request.attachments?.length,
       hasMcpServers: !!request.mcpServers?.length,
@@ -119,7 +199,7 @@ export class Task implements IAgentModule {
     if (request.attachments && request.attachments.length > 0) {
       const attachmentDescriptions = await Promise.all(
         request.attachments.map(async (attachment) => {
-          const displayName = attachment.name || attachment.path.split('/').pop();
+          const displayName = attachment.name || attachment.path?.split('/').pop() || 'unknown';
           let description = `${attachment.type}: ${displayName} (${attachment.path})`;
 
           if (attachment.language) {
@@ -151,6 +231,7 @@ export class Task implements IAgentModule {
 
     // Prepare data for encryption
     const insertData = {
+      id: crypto.randomUUID(), // Generate UUID for task
       agentId: this.agent.id,
       graphId: request.graphId || null, // Graph relationship
       graphNodeId: request.graphNodeId || null, // Graph node relationship
@@ -164,7 +245,11 @@ export class Task implements IAgentModule {
     // Encrypt sensitive fields using centralized encryption
     const encryptedData = await encryptSensitiveFields(insertData, 'tasks');
 
-    const [task] = await this.knex!(tableName).insert(encryptedData).returning('*');
+    // Use transaction for atomicity - ensures data consistency
+    const task = await this.getKnex().transaction(async (trx) => {
+      const [inserted] = await trx(tableName).insert(encryptedData).returning('*');
+      return inserted;
+    });
 
     // Decrypt for response
     const decryptedTask = await decryptSensitiveFields(
@@ -324,7 +409,8 @@ export class Task implements IAgentModule {
         // Direct LLM execution with optional tool support
         const llm = getLLM(this.logger);
 
-        // Prepare messages for LLM
+        // Prepare messages for LLM (with max context limit)
+        const MAX_CONTEXT_MESSAGES = 100;
         const llmMessages: LLMMessage[] = [];
 
         // Add system prompt
@@ -333,9 +419,19 @@ export class Task implements IAgentModule {
           llmMessages.push({ role: 'system', content: systemPrompt });
         }
 
-        // Add conversation context from agent
+        // Add conversation context from agent (with bounds checking)
         const contextMessages = this.agent.getContext();
-        for (const contextMsg of contextMessages) {
+        const maxContextToAdd = Math.max(0, MAX_CONTEXT_MESSAGES - llmMessages.length - 1); // Reserve space for user message
+        const contextToAdd = contextMessages.slice(-maxContextToAdd); // Keep most recent context
+
+        if (contextMessages.length > maxContextToAdd) {
+          this.logger.debug('Context messages truncated due to limit', {
+            original: contextMessages.length,
+            kept: maxContextToAdd,
+          });
+        }
+
+        for (const contextMsg of contextToAdd) {
           llmMessages.push({
             role: contextMsg.role,
             content: contextMsg.content,
@@ -343,9 +439,10 @@ export class Task implements IAgentModule {
         }
 
         // Build the prompt with context and memory if needed
+        // Skip manual memory loading if task is part of a graph - graph handles context via loadGraphContext
         let contextualPrompt = task.prompt;
 
-        if (agentHasMemory) {
+        if (agentHasMemory && !task.graphId) {
           const memory = new Memory(this.agent);
           const recentMemories = await memory.listMemories({
             limit: 20,
@@ -443,10 +540,25 @@ export class Task implements IAgentModule {
                 // Create multi-modal content
                 const contentParts: LLMMessageContentPart[] = [{ type: 'text', text: task.prompt }];
 
+                // Maximum image size limit (10MB) to prevent memory issues
+                const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+
                 // Add image parts
                 for (const imageAtt of imageAttachments) {
                   try {
                     const imagePath = path.resolve(imageAtt.path);
+
+                    // Check file size before loading to prevent memory issues
+                    const stats = await fs.stat(imagePath);
+                    if (stats.size > MAX_IMAGE_SIZE) {
+                      this.logger.warn('Image too large, skipping', {
+                        size: stats.size,
+                        maxSize: MAX_IMAGE_SIZE,
+                        path: imageAtt.path,
+                      });
+                      continue;
+                    }
+
                     const imageData = await fs.readFile(imagePath);
                     const base64Image = imageData.toString('base64');
                     const mimeType = getMimeType(path.extname(imagePath));
@@ -481,11 +593,16 @@ export class Task implements IAgentModule {
         llmMessages.push({ role: 'user', content: userMessageContent });
 
         // Use visionModel if images are present, otherwise use regular model
-        const hasImages =
-          task.metadata?.attachments &&
-          JSON.parse(task.metadata.attachments as string).some(
-            (att: { type: string }) => att.type === 'image'
-          );
+        let hasImages = false;
+        try {
+          hasImages =
+            task.metadata?.attachments &&
+            JSON.parse(task.metadata.attachments as string).some(
+              (att: { type: string }) => att.type === 'image'
+            );
+        } catch {
+          this.logger.debug('Failed to parse attachments for image detection');
+        }
         const modelToUse =
           hasImages && this.agent.config.visionModel
             ? this.agent.config.visionModel
@@ -511,14 +628,7 @@ export class Task implements IAgentModule {
         if (options?.stream) {
           // Handle streaming with tool support
           let fullContent = '';
-          let streamToolCalls: Array<{
-            id: string;
-            type: 'function';
-            function: {
-              name: string;
-              arguments: Record<string, string | number | boolean | null>;
-            };
-          }> = [];
+          const streamToolCalls: ToolCall[] = [];
           let streamUsage:
             | { promptTokens: number; completionTokens: number; totalTokens: number }
             | undefined;
@@ -534,7 +644,27 @@ export class Task implements IAgentModule {
               }
             }
             if (chunk.toolCalls) {
-              streamToolCalls = chunk.toolCalls;
+              // Merge tool calls instead of replacing to avoid losing calls across chunks
+              for (const tc of chunk.toolCalls) {
+                const existingIndex = streamToolCalls.findIndex((t) => t.id === tc.id);
+                if (existingIndex >= 0) {
+                  // Update existing tool call (may have more complete arguments)
+                  streamToolCalls[existingIndex] = tc;
+                } else {
+                  // Add bounds checking to prevent unbounded array growth
+                  if (streamToolCalls.length >= Task.MAX_TOOL_CALLS) {
+                    this.logger.warn(
+                      'Maximum tool calls limit reached, ignoring additional tool calls',
+                      {
+                        maxToolCalls: Task.MAX_TOOL_CALLS,
+                        taskId,
+                      }
+                    );
+                    break;
+                  }
+                  streamToolCalls.push(tc);
+                }
+              }
             }
             if (chunk.usage) {
               streamUsage = chunk.usage;
@@ -555,13 +685,29 @@ export class Task implements IAgentModule {
               try {
                 let toolResult: string;
 
-                if (toolCall.function.name.startsWith('mcp_')) {
-                  // Handle MCP tool
-                  const mcpToolName = toolCall.function.name.substring(4);
-                  const mcpArgs =
-                    typeof toolCall.function.arguments === 'string'
-                      ? JSON.parse(toolCall.function.arguments)
-                      : toolCall.function.arguments;
+                // Validate tool call has required fields
+                if (!toolCall.function?.name) {
+                  toolResult = 'Error: Invalid tool call - missing function name';
+                } else if (toolCall.function.name.startsWith('mcp_')) {
+                  // Handle MCP tool - validate prefix before substring
+                  const mcpToolName =
+                    toolCall.function.name.length > 4 ? toolCall.function.name.substring(4) : '';
+                  // Safe JSON parse for MCP args
+                  let mcpArgs: Record<string, unknown> = {};
+                  try {
+                    const argsStr = toolCall.function.arguments;
+                    if (argsStr && typeof argsStr === 'string') {
+                      mcpArgs = JSON.parse(argsStr);
+                    } else if (typeof argsStr === 'object' && argsStr !== null) {
+                      mcpArgs = argsStr as Record<string, unknown>;
+                    }
+                  } catch (parseError) {
+                    this.logger?.warn('Failed to parse MCP tool arguments', {
+                      error: parseError instanceof Error ? parseError.message : String(parseError),
+                      toolName: toolCall.function.name,
+                    });
+                    mcpArgs = {};
+                  }
 
                   if (
                     this.agent &&
@@ -569,19 +715,32 @@ export class Task implements IAgentModule {
                     typeof this.agent.callMCPTool === 'function'
                   ) {
                     const mcpResult = await this.agent.callMCPTool(mcpToolName, mcpArgs);
-                    toolResult = mcpResult.content
-                      .map((c: { text?: string }) => c.text || '')
-                      .join('\\n');
+                    toolResult = mcpResult?.content
+                      ? mcpResult.content.map((c: { text?: string }) => c.text || '').join('\n')
+                      : 'No content returned from MCP tool';
                   } else {
                     toolResult = 'Error: MCP tools not available';
                   }
                 } else if (toolCall.function.name.startsWith('plugin_')) {
-                  // Handle plugin tool
-                  const pluginToolName = toolCall.function.name.substring(7);
-                  const pluginArgs =
-                    typeof toolCall.function.arguments === 'string'
-                      ? JSON.parse(toolCall.function.arguments)
-                      : toolCall.function.arguments;
+                  // Handle plugin tool - validate prefix before substring
+                  const pluginToolName =
+                    toolCall.function.name.length > 7 ? toolCall.function.name.substring(7) : '';
+                  // Safe JSON parse for plugin args
+                  let pluginArgs: Record<string, unknown> = {};
+                  try {
+                    const argsStr = toolCall.function.arguments;
+                    if (argsStr && typeof argsStr === 'string') {
+                      pluginArgs = JSON.parse(argsStr);
+                    } else if (typeof argsStr === 'object' && argsStr !== null) {
+                      pluginArgs = argsStr as Record<string, unknown>;
+                    }
+                  } catch (parseError) {
+                    this.logger?.warn('Failed to parse plugin tool arguments', {
+                      error: parseError instanceof Error ? parseError.message : String(parseError),
+                      toolName: toolCall.function.name,
+                    });
+                    pluginArgs = {};
+                  }
 
                   if (
                     this.agent &&
@@ -589,16 +748,21 @@ export class Task implements IAgentModule {
                     typeof this.agent.executeTool === 'function'
                   ) {
                     const pluginCallResult = await this.agent.executeTool({
-                      id: toolCall.id || `${Date.now()}-${Math.random()}`,
+                      id:
+                        toolCall.id && toolCall.id.trim() !== ''
+                          ? toolCall.id
+                          : `tool-${crypto.randomUUID()}`,
                       name: pluginToolName,
                       parameters: pluginArgs,
                     });
 
-                    toolResult = pluginCallResult.result.success
-                      ? typeof pluginCallResult.result.data === 'string'
-                        ? pluginCallResult.result.data
-                        : JSON.stringify(pluginCallResult.result.data)
-                      : `Error: ${pluginCallResult.result.error || 'Unknown error'}`;
+                    toolResult = pluginCallResult?.result
+                      ? pluginCallResult.result.success
+                        ? typeof pluginCallResult.result.data === 'string'
+                          ? pluginCallResult.result.data
+                          : JSON.stringify(pluginCallResult.result.data ?? null)
+                        : `Error: ${pluginCallResult.result.error || 'Unknown error'}`
+                      : 'Error: No result returned from plugin';
                   } else {
                     toolResult = 'Error: Plugin tools not available';
                   }
@@ -679,38 +843,55 @@ export class Task implements IAgentModule {
           // Non-streaming with tool handling
           const initialResponse = await llm.generateResponse(llmOptions);
           let finalResponse = initialResponse.content;
-          let toolCallsExecuted: Array<{
-            id: string;
-            type: 'function';
-            function: {
-              name: string;
-              arguments: Record<string, string | number | boolean | null>;
-            };
-          }> = [];
+          let toolCallsExecuted: ToolCall[] = [];
 
-          // Handle tool calls if present
+          // Handle tool calls if present (with bounds checking)
           if (initialResponse.toolCalls && initialResponse.toolCalls.length > 0) {
-            toolCallsExecuted = initialResponse.toolCalls;
+            // Limit tool calls to prevent unbounded execution
+            if (initialResponse.toolCalls.length > Task.MAX_TOOL_CALLS) {
+              this.logger.warn('Tool calls exceeds maximum limit, truncating', {
+                received: initialResponse.toolCalls.length,
+                maxToolCalls: Task.MAX_TOOL_CALLS,
+                taskId,
+              });
+            }
+            toolCallsExecuted = initialResponse.toolCalls.slice(0, Task.MAX_TOOL_CALLS);
 
             // Add assistant message with tool calls
             llmMessages.push({
               role: 'assistant',
               content: initialResponse.content || '',
-              tool_calls: initialResponse.toolCalls,
+              tool_calls: toolCallsExecuted,
             });
 
             // Execute each tool call
-            for (const toolCall of initialResponse.toolCalls) {
+            for (const toolCall of toolCallsExecuted) {
               try {
                 let toolResult: string;
 
-                if (toolCall.function.name.startsWith('mcp_')) {
-                  // Handle MCP tool
-                  const mcpToolName = toolCall.function.name.substring(4);
-                  const mcpArgs =
-                    typeof toolCall.function.arguments === 'string'
-                      ? JSON.parse(toolCall.function.arguments)
-                      : toolCall.function.arguments;
+                // Validate tool call has required fields
+                if (!toolCall.function?.name) {
+                  toolResult = 'Error: Invalid tool call - missing function name';
+                } else if (toolCall.function.name.startsWith('mcp_')) {
+                  // Handle MCP tool - validate prefix before substring
+                  const mcpToolName =
+                    toolCall.function.name.length > 4 ? toolCall.function.name.substring(4) : '';
+                  // Safe JSON parse for MCP args
+                  let mcpArgs: Record<string, unknown> = {};
+                  try {
+                    const argsStr = toolCall.function.arguments;
+                    if (argsStr && typeof argsStr === 'string') {
+                      mcpArgs = JSON.parse(argsStr);
+                    } else if (typeof argsStr === 'object' && argsStr !== null) {
+                      mcpArgs = argsStr as Record<string, unknown>;
+                    }
+                  } catch (parseError) {
+                    this.logger?.warn('Failed to parse MCP tool arguments', {
+                      error: parseError instanceof Error ? parseError.message : String(parseError),
+                      toolName: toolCall.function.name,
+                    });
+                    mcpArgs = {};
+                  }
 
                   if (
                     this.agent &&
@@ -718,19 +899,32 @@ export class Task implements IAgentModule {
                     typeof this.agent.callMCPTool === 'function'
                   ) {
                     const mcpResult = await this.agent.callMCPTool(mcpToolName, mcpArgs);
-                    toolResult = mcpResult.content
-                      .map((c: { text?: string }) => c.text || '')
-                      .join('\\n');
+                    toolResult = mcpResult?.content
+                      ? mcpResult.content.map((c: { text?: string }) => c.text || '').join('\n')
+                      : 'No content returned from MCP tool';
                   } else {
                     toolResult = 'Error: MCP tools not available';
                   }
                 } else if (toolCall.function.name.startsWith('plugin_')) {
-                  // Handle plugin tool
-                  const pluginToolName = toolCall.function.name.substring(7);
-                  const pluginArgs =
-                    typeof toolCall.function.arguments === 'string'
-                      ? JSON.parse(toolCall.function.arguments)
-                      : toolCall.function.arguments;
+                  // Handle plugin tool - validate prefix before substring
+                  const pluginToolName =
+                    toolCall.function.name.length > 7 ? toolCall.function.name.substring(7) : '';
+                  // Safe JSON parse for plugin args
+                  let pluginArgs: Record<string, unknown> = {};
+                  try {
+                    const argsStr = toolCall.function.arguments;
+                    if (argsStr && typeof argsStr === 'string') {
+                      pluginArgs = JSON.parse(argsStr);
+                    } else if (typeof argsStr === 'object' && argsStr !== null) {
+                      pluginArgs = argsStr as Record<string, unknown>;
+                    }
+                  } catch (parseError) {
+                    this.logger?.warn('Failed to parse plugin tool arguments', {
+                      error: parseError instanceof Error ? parseError.message : String(parseError),
+                      toolName: toolCall.function.name,
+                    });
+                    pluginArgs = {};
+                  }
 
                   if (
                     this.agent &&
@@ -738,16 +932,21 @@ export class Task implements IAgentModule {
                     typeof this.agent.executeTool === 'function'
                   ) {
                     const pluginCallResult = await this.agent.executeTool({
-                      id: toolCall.id || `${Date.now()}-${Math.random()}`,
+                      id:
+                        toolCall.id && toolCall.id.trim() !== ''
+                          ? toolCall.id
+                          : `tool-${crypto.randomUUID()}`,
                       name: pluginToolName,
                       parameters: pluginArgs,
                     });
 
-                    toolResult = pluginCallResult.result.success
-                      ? typeof pluginCallResult.result.data === 'string'
-                        ? pluginCallResult.result.data
-                        : JSON.stringify(pluginCallResult.result.data)
-                      : `Error: ${pluginCallResult.result.error || 'Unknown error'}`;
+                    toolResult = pluginCallResult?.result
+                      ? pluginCallResult.result.success
+                        ? typeof pluginCallResult.result.data === 'string'
+                          ? pluginCallResult.result.data
+                          : JSON.stringify(pluginCallResult.result.data ?? null)
+                        : `Error: ${pluginCallResult.result.error || 'Unknown error'}`
+                      : 'Error: No result returned from plugin';
                   } else {
                     toolResult = 'Error: Plugin tools not available';
                   }
@@ -815,7 +1014,13 @@ export class Task implements IAgentModule {
       });
 
       // Add task conversation to memory/context
-      if (this.agent && 'addMemory' in this.agent && typeof this.agent.addMemory === 'function') {
+      // Skip if task is part of a graph - graph module handles memory saving with proper context
+      if (
+        !task.graphId &&
+        this.agent &&
+        'addMemory' in this.agent &&
+        typeof this.agent.addMemory === 'function'
+      ) {
         await this.agent.addMemory(task.prompt, {
           role: 'user',
           type: 'task_execution',
@@ -832,8 +1037,12 @@ export class Task implements IAgentModule {
         });
       }
 
+      if (!updatedTask) {
+        throw new Error(`Failed to update task ${taskId} after execution`);
+      }
+
       return {
-        task: updatedTask!,
+        task: updatedTask,
         response: llmResponse.content,
         model: llmResponse.model,
         usage: llmResponse.usage,
@@ -857,7 +1066,7 @@ export class Task implements IAgentModule {
     await this.ensureDatabase();
     const tableName = 'tasks';
 
-    const task = await this.knex!(tableName).where({ id, agentId: this.agent.id }).first();
+    const task = await this.getKnex()(tableName).where({ id, agentId: this.agent.id }).first();
 
     if (!task) return null;
 
@@ -886,13 +1095,17 @@ export class Task implements IAgentModule {
     const tableName = 'tasks';
 
     const {
-      limit = 100,
-      offset = 0,
+      limit: rawLimit,
+      offset: rawOffset,
       status,
       graphId,
       orderBy = 'createdAt',
       order = 'desc',
     } = options;
+
+    // Use ?? for numeric values that could be 0
+    const limit = rawLimit ?? 100;
+    const offset = rawOffset ?? 0;
 
     const orderColumn =
       orderBy === 'createdAt'
@@ -900,10 +1113,10 @@ export class Task implements IAgentModule {
         : orderBy === 'updatedAt'
           ? 'updated_at'
           : orderBy === 'completedAt'
-            ? 'completedAt'
+            ? 'completed_at'
             : 'created_at';
 
-    let query = this.knex!(tableName)
+    let query = this.getKnex()(tableName)
       .where({ agentId: this.agent.id })
       .orderBy(orderColumn, order)
       .limit(limit)
@@ -929,7 +1142,7 @@ export class Task implements IAgentModule {
           );
           return this.formatTask(decrypted as unknown as TaskDbRow);
         } catch {
-          // If decryption fails, return original task (might be unencrypted legacy data)
+          // Handle unencrypted data gracefully
           this.logger.debug('Failed to decrypt task during list', { taskId: task.id });
           return this.formatTask(task);
         }
@@ -961,7 +1174,7 @@ export class Task implements IAgentModule {
     // Encrypt sensitive fields in update data
     const encryptedUpdateData = await encryptSensitiveFields(updateData, 'tasks');
 
-    const [task] = await this.knex!(tableName)
+    const [task] = await this.getKnex()(tableName)
       .where({ id, agentId: this.agent.id })
       .update(encryptedUpdateData)
       .returning('*');
@@ -996,7 +1209,7 @@ export class Task implements IAgentModule {
     await this.ensureDatabase();
     const tableName = 'tasks';
 
-    const deleted = await this.knex!(tableName).where({ id, agentId: this.agent.id }).delete();
+    const deleted = await this.getKnex()(tableName).where({ id, agentId: this.agent.id }).delete();
 
     return deleted > 0;
   }
@@ -1005,10 +1218,33 @@ export class Task implements IAgentModule {
     await this.ensureDatabase();
     const tableName = 'tasks';
 
-    return await this.knex!(tableName).where({ agentId: this.agent.id }).delete();
+    return await this.getKnex()(tableName).where({ agentId: this.agent.id }).delete();
   }
 
   private formatTask(task: TaskDbRow): TaskType {
+    // Safe JSON parse for metadata
+    let metadata: MetadataObject | undefined;
+    try {
+      if (task.metadata) {
+        metadata = typeof task.metadata === 'string' ? JSON.parse(task.metadata) : task.metadata;
+      }
+    } catch {
+      this.logger?.warn('Failed to parse task metadata', { taskId: task.id });
+      metadata = undefined;
+    }
+
+    // Safe JSON parse for executionContext
+    let executionContext: Record<string, unknown> | undefined;
+    try {
+      const execCtx = (task as unknown as Record<string, unknown>).executionContext;
+      if (execCtx) {
+        executionContext = typeof execCtx === 'string' ? JSON.parse(execCtx) : execCtx;
+      }
+    } catch {
+      this.logger?.warn('Failed to parse execution context', { taskId: task.id });
+      executionContext = undefined;
+    }
+
     return {
       id: task.id,
       agentId: task.agentId,
@@ -1017,16 +1253,8 @@ export class Task implements IAgentModule {
       prompt: task.prompt,
       response: task.response ?? undefined,
       status: task.status,
-      metadata: task.metadata
-        ? typeof task.metadata === 'string'
-          ? JSON.parse(task.metadata)
-          : task.metadata
-        : undefined,
-      executionContext: (task as unknown as Record<string, unknown>).executionContext
-        ? typeof (task as unknown as Record<string, unknown>).executionContext === 'string'
-          ? JSON.parse((task as unknown as Record<string, unknown>).executionContext as string)
-          : (task as unknown as Record<string, unknown>).executionContext
-        : undefined,
+      metadata,
+      executionContext,
       createdAt: new Date(task.created_at),
       updatedAt: new Date(task.updated_at),
       completedAt: task.completedAt ? new Date(task.completedAt) : undefined,
