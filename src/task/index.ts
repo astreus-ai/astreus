@@ -276,7 +276,12 @@ export class Task implements IAgentModule {
       model?: string;
       stream?: boolean;
       onChunk?: (chunk: string) => void;
-      onToolCall?: (toolName: string, args: Record<string, unknown>, status: 'start' | 'end', result?: string) => void;
+      onToolCall?: (
+        toolName: string,
+        args: Record<string, unknown>,
+        status: 'start' | 'end',
+        result?: string
+      ) => void;
     }
   ): Promise<TaskResponse> {
     const startTime = Date.now();
@@ -679,13 +684,13 @@ export class Task implements IAgentModule {
           // Handle tool calls with multi-turn agentic loop
           const MAX_TOOL_ITERATIONS = DEFAULT_TASK_CONFIG.maxToolIterations; // Prevent infinite loops
           let toolIteration = 0;
-          let allToolCalls: ToolCall[] = [...streamToolCalls];
+          const allToolCalls: ToolCall[] = [...streamToolCalls];
 
           while (streamToolCalls.length > 0 && toolIteration < MAX_TOOL_ITERATIONS) {
             toolIteration++;
             this.logger.debug(`Tool iteration ${toolIteration}`, {
               toolCallCount: streamToolCalls.length,
-              toolNames: streamToolCalls.map(tc => tc.function?.name),
+              toolNames: streamToolCalls.map((tc) => tc.function?.name),
             });
 
             // Add assistant message with tool calls (copy array to avoid mutation issues)
@@ -875,8 +880,8 @@ export class Task implements IAgentModule {
           // Non-streaming with multi-turn tool handling
           let currentResponse = await llm.generateResponse(llmOptions);
           let finalResponse = currentResponse.content;
-          let allToolCallsExecuted: ToolCall[] = [];
-          let totalUsage = currentResponse.usage;
+          const allToolCallsExecuted: ToolCall[] = [];
+          const totalUsage = currentResponse.usage;
 
           const MAX_TOOL_ITERATIONS = DEFAULT_TASK_CONFIG.maxToolIterations;
           let toolIteration = 0;
@@ -889,7 +894,7 @@ export class Task implements IAgentModule {
             toolIteration++;
             this.logger.debug(`Non-streaming tool iteration ${toolIteration}`, {
               toolCallCount: currentResponse.toolCalls.length,
-              toolNames: currentResponse.toolCalls.map(tc => tc.function?.name),
+              toolNames: currentResponse.toolCalls.map((tc) => tc.function?.name),
             });
 
             const currentToolCalls = currentResponse.toolCalls.slice(0, Task.MAX_TOOL_CALLS);

@@ -461,7 +461,12 @@ export class Graph implements IAgentModule {
     options?: {
       stream?: boolean;
       onChunk?: (chunk: string) => void;
-      onToolCall?: (toolName: string, args: Record<string, unknown>, status: 'start' | 'end', result?: string) => void;
+      onToolCall?: (
+        toolName: string,
+        args: Record<string, unknown>,
+        status: 'start' | 'end',
+        result?: string
+      ) => void;
       timeout?: number;
       nodeTimeout?: number;
     } & GraphSchedulingOptions
@@ -480,7 +485,12 @@ export class Graph implements IAgentModule {
     options?: {
       stream?: boolean;
       onChunk?: (chunk: string) => void;
-      onToolCall?: (toolName: string, args: Record<string, unknown>, status: 'start' | 'end', result?: string) => void;
+      onToolCall?: (
+        toolName: string,
+        args: Record<string, unknown>,
+        status: 'start' | 'end',
+        result?: string
+      ) => void;
       timeout?: number;
       nodeTimeout?: number;
     } & GraphSchedulingOptions
@@ -1028,7 +1038,12 @@ export class Graph implements IAgentModule {
     node: GraphNode,
     forceStream?: boolean,
     onChunk?: (chunk: string) => void,
-    onToolCall?: (toolName: string, args: Record<string, unknown>, status: 'start' | 'end', result?: string) => void
+    onToolCall?: (
+      toolName: string,
+      args: Record<string, unknown>,
+      status: 'start' | 'end',
+      result?: string
+    ) => void
   ): Promise<NodeExecutionResult> {
     this.log('info', `Executing node ${node.name}`, node.id);
     node.status = 'running';
