@@ -33,7 +33,7 @@ export type {
 } from './task/types';
 
 // LLM exports
-export { getLLM } from './llm';
+export { getLLM, clearLLMInstances } from './llm';
 export type { LLMProvider, LLMRequestOptions, LLMResponse } from './llm/types';
 
 // Logger exports
