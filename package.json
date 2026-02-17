@@ -1,6 +1,6 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.5.37",
+  "version": "0.5.38",
   "description": "Open-source AI agent framework for building autonomous systems that solve real-world tasks effectively.",
   "author": "Berke (pzzaworks)",
   "license": "MIT",
@@ -62,5 +62,11 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "overrides": {
+    "tar": "^7.5.7",
+    "diff": "^8.0.0",
+    "lodash": "^4.17.22",
+    "ajv": "^8.18.0"
   }
 }
