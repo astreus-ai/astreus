@@ -9,6 +9,8 @@ export const DEFAULT_TASK_CONFIG = {
   defaultMimeType: 'image/jpeg',
   logMode: 'default',
   logStatus: 'all',
+  maxToolIterations: 9999,
+  maxToolCalls: 9999,
 } as const;
 
 /**

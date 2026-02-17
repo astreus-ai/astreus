@@ -461,6 +461,7 @@ export class Graph implements IAgentModule {
     options?: {
       stream?: boolean;
       onChunk?: (chunk: string) => void;
+      onToolCall?: (toolName: string, args: Record<string, unknown>, status: 'start' | 'end', result?: string) => void;
       timeout?: number;
       nodeTimeout?: number;
     } & GraphSchedulingOptions
@@ -479,6 +480,7 @@ export class Graph implements IAgentModule {
     options?: {
       stream?: boolean;
       onChunk?: (chunk: string) => void;
+      onToolCall?: (toolName: string, args: Record<string, unknown>, status: 'start' | 'end', result?: string) => void;
       timeout?: number;
       nodeTimeout?: number;
     } & GraphSchedulingOptions
@@ -656,7 +658,7 @@ export class Graph implements IAgentModule {
 
               // Special handling for last node with streaming
               if (shouldStreamLastNode && node.id === lastNode.id) {
-                this.executeNode(node, true, options?.onChunk) // Pass stream=true and onChunk for last node
+                this.executeNode(node, true, options?.onChunk, options?.onToolCall) // Pass stream=true and onChunk for last node
                   .then(async (result) => {
                     const timeoutId = this.activeNodeTimeouts.get(node.id);
                     if (timeoutId) {
@@ -738,7 +740,7 @@ export class Graph implements IAgentModule {
                     }
                   });
               } else {
-                this.executeNode(node, false, options?.onChunk)
+                this.executeNode(node, false, options?.onChunk, options?.onToolCall)
                   .then(async (result) => {
                     const timeoutId = this.activeNodeTimeouts.get(node.id);
                     if (timeoutId) {
@@ -1025,7 +1027,8 @@ export class Graph implements IAgentModule {
   private async executeNode(
     node: GraphNode,
     forceStream?: boolean,
-    onChunk?: (chunk: string) => void
+    onChunk?: (chunk: string) => void,
+    onToolCall?: (toolName: string, args: Record<string, unknown>, status: 'start' | 'end', result?: string) => void
   ): Promise<NodeExecutionResult> {
     this.log('info', `Executing node ${node.name}`, node.id);
     node.status = 'running';
@@ -1190,6 +1193,7 @@ export class Graph implements IAgentModule {
             model: node.model,
             stream: forceStream || node.stream,
             onChunk,
+            onToolCall,
           });
 
           return {
@@ -1244,6 +1248,7 @@ export class Graph implements IAgentModule {
             model: node.model,
             stream: forceStream || node.stream,
             onChunk,
+            onToolCall,
           });
 
           return {

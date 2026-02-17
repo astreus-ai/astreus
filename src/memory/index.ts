@@ -716,9 +716,19 @@ export class Memory implements IAgentModule {
     const limit = options?.limit ?? 100;
     const offset = options?.offset ?? 0;
 
+    // Respect orderBy and order options, default to created_at desc
+    // Map TypeScript property names to database column names
+    let orderColumn = 'created_at';
+    if (options?.orderBy === 'createdAt') {
+      orderColumn = 'created_at';
+    } else if (options?.orderBy === 'updatedAt') {
+      orderColumn = 'updated_at';
+    }
+    const orderDirection = options?.order === 'asc' ? 'asc' : 'desc';
+
     let query = this.knex(tableName)
       .where({ agentId: this.agent.id })
-      .orderBy('created_at', 'desc')
+      .orderBy(orderColumn, orderDirection)
       .limit(limit)
       .offset(offset);
 
