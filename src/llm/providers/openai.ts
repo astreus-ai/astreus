@@ -4,6 +4,7 @@ import {
   LLMResponse,
   LLMStreamChunk,
   LLMConfig,
+  LLMUsage,
   LLMMessage,
   VisionAnalysisOptions,
   VisionAnalysisResult,
@@ -45,6 +46,22 @@ interface OpenAIMessage extends Omit<LLMMessage, 'tool_calls'> {
       arguments: string; // OpenAI requires string, not our Record type
     };
   }>;
+}
+
+interface UsageWithOptionalCost {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  cost?: number | string;
+  total_cost?: number | string;
+  totalCost?: number | string;
+}
+
+interface CompletionWithOptionalCost {
+  usage?: UsageWithOptionalCost;
+  cost?: number | string;
+  total_cost?: number | string;
+  totalCost?: number | string;
 }
 
 export class OpenAIProvider implements LLMProvider {
@@ -158,6 +175,39 @@ export class OpenAIProvider implements LLMProvider {
     }
   }
 
+  private readOptionalCost(source: unknown): number | undefined {
+    if (!source || typeof source !== 'object') {
+      return undefined;
+    }
+
+    const value = source as Record<string, unknown>;
+    const candidates = [value.cost, value.total_cost, value.totalCost];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+        return candidate;
+      }
+
+      if (typeof candidate === 'string') {
+        const parsed = Number(candidate);
+        if (Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private resolveUsageCost(source: unknown): number | undefined {
+    if (!source || typeof source !== 'object') {
+      return undefined;
+    }
+
+    const completion = source as CompletionWithOptionalCost;
+    return this.readOptionalCost(completion.usage) ?? this.readOptionalCost(completion);
+  }
+
   getSupportedModels(): string[] {
     return [
       'gpt-4.5',
@@ -231,6 +281,7 @@ export class OpenAIProvider implements LLMProvider {
           promptTokens: completion.usage?.prompt_tokens ?? 0,
           completionTokens: completion.usage?.completion_tokens ?? 0,
           totalTokens: completion.usage?.total_tokens ?? 0,
+          cost: this.resolveUsageCost(completion),
         },
       };
     } catch (error) {
@@ -297,7 +348,7 @@ export class OpenAIProvider implements LLMProvider {
       function: { name: string; arguments: string };
     }> = [];
 
-    let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined;
+    let usage: LLMUsage | undefined;
 
     // Helper function to abort stream safely
     const abortStream = (): void => {
@@ -322,6 +373,7 @@ export class OpenAIProvider implements LLMProvider {
             promptTokens: chunk.usage.prompt_tokens,
             completionTokens: chunk.usage.completion_tokens,
             totalTokens: chunk.usage.total_tokens,
+            cost: this.resolveUsageCost(chunk),
           };
         }
 

@@ -63,15 +63,18 @@ export interface LLMRequestOptions {
   tools?: Tool[];
 }
 
+export interface LLMUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cost?: number;
+}
+
 export interface LLMResponse {
   content: string;
   model: string;
   toolCalls?: ToolCall[];
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
+  usage?: LLMUsage;
 }
 
 export interface LLMStreamChunk {
@@ -79,11 +82,7 @@ export interface LLMStreamChunk {
   done: boolean;
   model: string;
   toolCalls?: ToolCall[];
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
+  usage?: LLMUsage;
 }
 
 export interface VisionAnalysisOptions {

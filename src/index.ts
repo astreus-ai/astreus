@@ -34,7 +34,7 @@ export type {
 
 // LLM exports
 export { getLLM, clearLLMInstances } from './llm';
-export type { LLMProvider, LLMRequestOptions, LLMResponse } from './llm/types';
+export type { LLMProvider, LLMRequestOptions, LLMResponse, LLMUsage } from './llm/types';
 
 // Logger exports
 export { getLogger, initializeLogger, shutdownLogger, resetLogger } from './logger';

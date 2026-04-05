@@ -34,6 +34,7 @@ interface TaskExecutionResult {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
+    cost?: number;
   };
   // Sub-agent execution metadata
   subAgentUsed?: boolean;
@@ -685,6 +686,7 @@ export class Graph implements IAgentModule {
                         promptTokens: result.usage.promptTokens,
                         completionTokens: result.usage.completionTokens,
                         totalTokens: result.usage.totalTokens,
+                        cost: result.usage.cost,
                         model: result.model,
                       };
                     }
@@ -767,6 +769,7 @@ export class Graph implements IAgentModule {
                         promptTokens: result.usage.promptTokens,
                         completionTokens: result.usage.completionTokens,
                         totalTokens: result.usage.totalTokens,
+                        cost: result.usage.cost,
                         model: result.model,
                       };
                     }

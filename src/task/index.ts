@@ -18,6 +18,7 @@ import {
   Tool,
   ToolCall,
 } from '../llm';
+import { LLMUsage } from '../llm/types';
 import { Memory } from '../memory';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
@@ -639,9 +640,7 @@ export class Task implements IAgentModule {
           // Handle streaming with tool support
           let fullContent = '';
           const streamToolCalls: ToolCall[] = [];
-          let streamUsage:
-            | { promptTokens: number; completionTokens: number; totalTokens: number }
-            | undefined;
+          let streamUsage: LLMUsage | undefined;
 
           for await (const chunk of llm.generateStreamResponse(llmOptions)) {
             fullContent += chunk.content;
@@ -845,6 +844,7 @@ export class Task implements IAgentModule {
                     streamUsage.promptTokens += chunk.usage.promptTokens;
                     streamUsage.completionTokens += chunk.usage.completionTokens;
                     streamUsage.totalTokens += chunk.usage.totalTokens;
+                    streamUsage.cost = (streamUsage.cost ?? 0) + (chunk.usage.cost ?? 0);
                   } else {
                     streamUsage = chunk.usage;
                   }
@@ -1012,6 +1012,7 @@ export class Task implements IAgentModule {
                 totalUsage.promptTokens += currentResponse.usage.promptTokens;
                 totalUsage.completionTokens += currentResponse.usage.completionTokens;
                 totalUsage.totalTokens += currentResponse.usage.totalTokens;
+                totalUsage.cost = (totalUsage.cost ?? 0) + (currentResponse.usage.cost ?? 0);
               }
             } catch (llmError) {
               const errorMessage = llmError instanceof Error ? llmError.message : String(llmError);

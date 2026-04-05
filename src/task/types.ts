@@ -1,3 +1,4 @@
+import { LLMUsage } from '../llm/types';
 import { MCPServerDefinition } from '../mcp/types';
 import { Plugin, PluginConfig } from '../plugin/types';
 import { MetadataObject } from '../types';
@@ -56,9 +57,5 @@ export interface TaskResponse {
   task: Task;
   response: string;
   model?: string;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
+  usage?: LLMUsage;
 }
