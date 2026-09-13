@@ -1,217 +1,241 @@
-import { OpenAIProvider } from './providers/openai';
-import { ClaudeProvider } from './providers/claude';
-import { GeminiProvider } from './providers/gemini';
-import { OllamaProvider } from './providers/ollama';
-
 export type ProviderType = 'openai' | 'claude' | 'gemini' | 'ollama';
 
-// Cache for provider models to avoid creating new instances on every call
-let cachedProviderModels: Record<ProviderType, string[]> | null = null;
+type ModelTransport = 'responses' | 'chat-completions' | 'messages' | 'gemini' | 'ollama';
 
-// Mutex for thread-safe initialization
-let initializationPromise: Promise<Record<ProviderType, string[]>> | null = null;
-
-// Create provider instances to get their supported models (cached with proper mutex)
-function getProviderModels(): Record<ProviderType, string[]> {
-  // Return cached result if available (fast path)
-  if (cachedProviderModels !== null) {
-    return cachedProviderModels;
-  }
-
-  // Synchronous fallback - create providers on demand
-  // This is safe because getSupportedModels() is synchronous
-  const providers: Record<ProviderType, string[]> = {
-    openai: [],
-    claude: [],
-    gemini: [],
-    ollama: [],
-  };
-
-  // Silently try to load providers - missing API keys are expected behavior
-  // Users only need API keys for providers they actually use
-  try {
-    providers.openai = new OpenAIProvider().getSupportedModels();
-  } catch {
-    // OpenAI provider not available - API key may not be configured
-  }
-
-  try {
-    providers.claude = new ClaudeProvider().getSupportedModels();
-  } catch {
-    // Claude provider not available - API key may not be configured
-  }
-
-  try {
-    providers.gemini = new GeminiProvider().getSupportedModels();
-  } catch {
-    // Gemini provider not available - API key may not be configured
-  }
-
-  try {
-    providers.ollama = new OllamaProvider().getSupportedModels();
-  } catch {
-    // Ollama provider not available - Ollama may not be running
-  }
-
-  // Cache the result
-  cachedProviderModels = providers;
-  return providers;
+export interface ModelDefinition {
+  readonly id: string;
+  readonly provider: ProviderType;
+  readonly transport: ModelTransport;
+  readonly gateway?: 'compatible' | 'openrouter';
+  readonly supportsTemperature?: boolean;
+  readonly maxOutputTokens?: number;
 }
 
-// Async initialization with proper mutex to prevent race conditions
-async function getProviderModelsAsync(): Promise<Record<ProviderType, string[]>> {
-  // Return cached result if available (fast path)
-  if (cachedProviderModels !== null) {
-    return cachedProviderModels;
-  }
+// Discovery is deliberately static and credential-independent. Gateway entries use
+// the existing OpenAI-compatible adapter, not a fifth provider or a paid fallback.
+const OPENAI_MODELS: readonly ModelDefinition[] = [
+  ...[
+    'gpt-6-astra',
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'gpt-5.4-mini',
+    'gpt-5.4-nano',
+  ].map(
+    (id): ModelDefinition => ({
+      id,
+      provider: 'openai',
+      transport: 'responses',
+      supportsTemperature: false,
+      maxOutputTokens: 128000,
+    })
+  ),
+  ...['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini'].map(
+    (id): ModelDefinition => ({
+      id,
+      provider: 'openai',
+      transport: 'responses',
+      supportsTemperature: true,
+    })
+  ),
+  ...['o4-mini', 'o3'].map(
+    (id): ModelDefinition => ({
+      id,
+      provider: 'openai',
+      transport: 'responses',
+      supportsTemperature: false,
+    })
+  ),
+  ...['gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo', 'gpt-3.5-turbo-16k'].map(
+    (id): ModelDefinition => ({
+      id,
+      provider: 'openai',
+      transport: 'chat-completions',
+      supportsTemperature: true,
+    })
+  ),
+  {
+    id: 'openai/gpt-5.4-mini',
+    provider: 'openai',
+    transport: 'chat-completions',
+    gateway: 'compatible',
+    supportsTemperature: false,
+  },
+  ...[
+    'openrouter/free',
+    'nvidia/nemotron-3.5-lightning:free',
+    'google/gemma-4-31b-it:free',
+    'google/gemma-4-26b-a4b-it:free',
+  ].map(
+    (id): ModelDefinition => ({
+      id,
+      provider: 'openai',
+      transport: 'chat-completions',
+      gateway: 'openrouter',
+      supportsTemperature: true,
+    })
+  ),
+];
 
-  // If initialization is in progress, wait for it
-  if (initializationPromise !== null) {
-    return initializationPromise;
-  }
+const CLAUDE_MODELS: readonly ModelDefinition[] = [
+  ...['claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5'].map(
+    (id): ModelDefinition => ({
+      id,
+      provider: 'claude',
+      transport: 'messages',
+      supportsTemperature: false,
+      maxOutputTokens: 128000,
+    })
+  ),
+  {
+    id: 'claude-haiku-4-5-20251001',
+    provider: 'claude',
+    transport: 'messages',
+    supportsTemperature: true,
+    maxOutputTokens: 64000,
+  },
+];
 
-  // Start initialization with mutex
-  initializationPromise = (async () => {
-    try {
-      // Double-check after acquiring "lock"
-      if (cachedProviderModels !== null) {
-        return cachedProviderModels;
-      }
+// Other adapters retain their existing catalogue and defaults in this refresh.
+const GEMINI_MODELS = [
+  'gemini-2.5-pro',
+  'gemini-2.5-pro-deep-think',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-thinking',
+  'gemini-2.0-flash-lite',
+  'gemini-2.0-pro-experimental',
+  'gemini-1.5-pro',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-8b',
+  'gemini-pro',
+];
 
-      const result = getProviderModels();
-      return result;
-    } finally {
-      // Clear the promise after initialization completes
-      initializationPromise = null;
-    }
-  })();
+const OLLAMA_MODELS = [
+  'deepseek-r1',
+  'deepseek-v3',
+  'deepseek-v2.5',
+  'deepseek-coder',
+  'deepseek-coder-v2',
+  'qwen3',
+  'qwen2.5-coder',
+  'llama3.3',
+  'gemma3',
+  'phi4',
+  'mistral-small',
+  'codellama',
+  'llama3.2',
+  'llama3.1',
+  'llama3',
+  'qwen2.5',
+  'gemma2',
+  'phi3',
+  'mistral',
+  'codegemma',
+  'wizardlm2',
+  'dolphin-mistral',
+  'openhermes',
+  'deepcoder',
+  'stable-code',
+  'wizardcoder',
+  'magicoder',
+  'solar',
+  'yi',
+  'zephyr',
+  'orca-mini',
+  'vicuna',
+];
 
-  return initializationPromise;
-}
+const PROVIDER_MODELS: Record<ProviderType, readonly ModelDefinition[]> = {
+  openai: OPENAI_MODELS,
+  claude: CLAUDE_MODELS,
+  gemini: GEMINI_MODELS.map((id) => ({ id, provider: 'gemini', transport: 'gemini' })),
+  ollama: OLLAMA_MODELS.map((id) => ({ id, provider: 'ollama', transport: 'ollama' })),
+};
 
-// Create reverse lookup map
-const MODEL_TO_PROVIDER: Record<string, ProviderType> = {};
-let PROVIDER_MODELS: Record<ProviderType, string[]> = {
-  openai: [],
+const VISION_MODELS: Record<ProviderType, readonly string[]> = {
+  openai: [
+    'gpt-4o',
+    'gpt-4o-mini',
+    'gpt-4-turbo',
+    'gpt-6-astra',
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'gpt-5.4-mini',
+    'gpt-5.4-nano',
+    'gpt-4.1',
+    'gpt-4.1-mini',
+    'gpt-4.1-nano',
+  ],
+  claude: CLAUDE_MODELS.map(({ id }) => id),
+  gemini: [
+    'gemini-1.5-pro',
+    'gemini-1.5-flash',
+    'gemini-1.0-pro-vision-latest',
+    'gemini-pro-vision',
+  ],
+  ollama: [
+    'llava',
+    'llava:7b',
+    'llava:13b',
+    'llava:34b',
+    'llava-llama3',
+    'llava-phi3',
+    'moondream',
+  ],
+};
+
+const EMBEDDING_MODELS: Record<ProviderType, readonly string[]> = {
+  openai: ['text-embedding-3-large', 'text-embedding-3-small', 'text-embedding-ada-002'],
   claude: [],
-  gemini: [],
-  ollama: [],
+  gemini: ['text-embedding-004', 'embedding-001'],
+  ollama: ['nomic-embed-text', 'mxbai-embed-large', 'all-minilm', 'snowflake-arctic-embed'],
 };
 
-// Mutex promise for atomic initialization
-let initializationMutex: Promise<void> | null = null;
-let isInitialized = false;
+const MODELS = new Map(
+  Object.values(PROVIDER_MODELS)
+    .flat()
+    .map((model) => [model.id, Object.freeze(model)])
+);
 
-function initializeModelMappings() {
-  // Fast path: already initialized
-  if (isInitialized) {
-    return;
-  }
-
-  // Use synchronous initialization with proper guard
-  // The Promise-based mutex is for async scenarios
-  if (initializationMutex !== null) {
-    // Another initialization is in progress, wait would be async
-    // For sync call, just return - the data will be populated by the other caller
-    return;
-  }
-
-  // Set flag immediately to prevent concurrent entries
-  isInitialized = true;
-
-  try {
-    PROVIDER_MODELS = getProviderModels();
-
-    Object.entries(PROVIDER_MODELS).forEach(([provider, models]) => {
-      models.forEach((model) => {
-        MODEL_TO_PROVIDER[model] = provider as ProviderType;
-      });
-    });
-  } catch (error) {
-    // Reset flag on error so retry is possible
-    isInitialized = false;
-    throw error;
-  }
+export function getModelDefinition(model: string): ModelDefinition | undefined {
+  return MODELS.get(model);
 }
-
-// Async version with proper mutex for concurrent scenarios
-// Exported for use in async initialization contexts (e.g., server startup)
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-async function initializeModelMappingsAsync(): Promise<void> {
-  // Fast path: already initialized
-  if (isInitialized) {
-    return;
-  }
-
-  // If initialization is in progress, wait for it
-  if (initializationMutex !== null) {
-    return initializationMutex;
-  }
-
-  // Start initialization with mutex
-  initializationMutex = (async () => {
-    try {
-      // Double-check after acquiring mutex
-      if (isInitialized) {
-        return;
-      }
-
-      PROVIDER_MODELS = await getProviderModelsAsync();
-
-      Object.entries(PROVIDER_MODELS).forEach(([provider, models]) => {
-        models.forEach((model) => {
-          MODEL_TO_PROVIDER[model] = provider as ProviderType;
-        });
-      });
-
-      isInitialized = true;
-    } finally {
-      initializationMutex = null;
-    }
-  })();
-
-  return initializationMutex;
-}
-
-// Model name patterns for fallback provider detection
-const MODEL_MAPPINGS: Record<ProviderType, string[]> = {
-  openai: ['gpt', 'o1', 'davinci', 'curie', 'babbage', 'ada', 'text-embedding'],
-  claude: ['claude'],
-  gemini: ['gemini'],
-  ollama: ['llama', 'mistral', 'codellama', 'vicuna', 'orca', 'phi'],
-};
 
 export function getProviderForModel(model: string): ProviderType | null {
-  initializeModelMappings();
+  const registered = getModelDefinition(model);
+  if (registered) return registered.provider;
 
-  // First check exact model mappings from providers
-  if (MODEL_TO_PROVIDER[model]) {
-    return MODEL_TO_PROVIDER[model];
-  }
-
-  // Then check model name patterns
-  const modelLower = model.toLowerCase();
-  for (const [provider, patterns] of Object.entries(MODEL_MAPPINGS)) {
-    if (patterns.some((p) => modelLower.includes(p.toLowerCase()))) {
-      return provider as ProviderType;
+  for (const provider of Object.keys(PROVIDER_MODELS) as ProviderType[]) {
+    if (VISION_MODELS[provider].includes(model) || EMBEDDING_MODELS[provider].includes(model)) {
+      return provider;
     }
   }
 
-  // Fallback to additional pattern matching
-  if (modelLower.includes('gpt') || modelLower.includes('o1')) return 'openai';
-  if (modelLower.includes('claude')) return 'claude';
-  if (modelLower.includes('gemini')) return 'gemini';
-  if (modelLower.includes('llama') || modelLower.includes('mistral')) return 'ollama';
-
+  // Ollama tags are local versions, never namespaced hosted gateway routes.
+  if (!model.includes('/') && model.includes(':')) {
+    const base = model.split(':')[0];
+    if (getProviderForModel(base) === 'ollama') return 'ollama';
+  }
   return null;
 }
 
 export function getSupportedModelsList(): string[] {
-  initializeModelMappings();
-  return Object.values(PROVIDER_MODELS).flat();
+  return Object.values(PROVIDER_MODELS)
+    .flat()
+    .map(({ id }) => id);
 }
 
 export function getModelsByProvider(provider: ProviderType): string[] {
-  initializeModelMappings();
-  return [...PROVIDER_MODELS[provider]];
+  return PROVIDER_MODELS[provider].map(({ id }) => id);
+}
+
+export function getVisionModelsByProvider(provider: ProviderType): string[] {
+  return [...VISION_MODELS[provider]];
+}
+
+export function getEmbeddingModelsByProvider(provider: ProviderType): string[] {
+  return [...EMBEDDING_MODELS[provider]];
 }

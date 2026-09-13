@@ -111,10 +111,7 @@ export class EncryptionService {
       return value; // Don't encrypt empty values
     }
 
-    // Check if value is already encrypted
-    if (this.isEncrypted(value)) {
-      return value; // Already encrypted, return as is
-    }
+    // This is a plaintext write boundary. Even an enc:-prefixed literal must be encrypted.
 
     try {
       const key = await this.deriveKey(fieldName);
@@ -148,7 +145,7 @@ export class EncryptionService {
    */
   async decrypt(value: string, fieldName: string): Promise<string> {
     if (!this.config.enabled) {
-      return value; // Return original value if encryption is disabled
+      return value;
     }
 
     if (value === null || value === undefined || value === '') {
@@ -187,7 +184,7 @@ export class EncryptionService {
    */
   isEncrypted(value: string): boolean {
     if (typeof value !== 'string') return false;
-    return value.startsWith('enc:') && value.split(':').length === 5;
+    return value.startsWith('enc:');
   }
 
   /**
@@ -199,12 +196,26 @@ export class EncryptionService {
       throw new Error('Invalid encrypted data format');
     }
 
-    return {
-      version: parseInt(parts[1], 10),
-      iv: parts[2],
-      encrypted: parts[3],
-      tag: parts[4],
-    };
+    if (parts[1] !== String(this.CURRENT_VERSION)) {
+      throw new Error('Unsupported encrypted data version');
+    }
+    const [, , iv, encrypted, tag] = parts;
+    for (const component of [iv, encrypted, tag]) {
+      if (
+        !component ||
+        !/^[A-Za-z0-9+/]+={0,2}$/.test(component) ||
+        Buffer.from(component, 'base64').toString('base64') !== component
+      ) {
+        throw new Error('Invalid encrypted data encoding');
+      }
+    }
+    if (
+      Buffer.from(iv, 'base64').length !== this.IV_LENGTH ||
+      Buffer.from(tag, 'base64').length !== this.TAG_LENGTH
+    ) {
+      throw new Error('Invalid encrypted data authentication parameters');
+    }
+    return { version: this.CURRENT_VERSION, iv, encrypted, tag };
   }
 
   /**

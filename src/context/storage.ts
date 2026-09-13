@@ -5,8 +5,12 @@
 import { Knex } from 'knex';
 import { Logger } from '../logger/types';
 import { ContextMessage } from './types';
-import { getEncryptionService } from '../database/encryption';
-import { encryptSensitiveFields, decryptSensitiveFields } from '../database/utils';
+import {
+  encryptSensitiveFields,
+  decryptSensitiveFields,
+  parseStoredJson,
+  validateContextJson,
+} from '../database/utils';
 
 /**
  * Custom error class for context data corruption
@@ -55,7 +59,7 @@ export interface ContextStorageOptions {
 interface ContextDbRow {
   id: string; // UUID
   agentId: string; // UUID
-  contextData: string | null;
+  contextData: unknown;
   summary: string | null;
   tokensUsed: number;
   compressionVersion: string | null;
@@ -67,15 +71,6 @@ interface ContextDbRow {
 export class ContextStorage {
   private knex: Knex;
   private logger: Logger;
-  private _encryption?: ReturnType<typeof getEncryptionService>;
-
-  private get encryption() {
-    if (!this._encryption) {
-      this._encryption = getEncryptionService();
-    }
-    return this._encryption;
-  }
-
   constructor(knex: Knex, logger: Logger) {
     this.knex = knex;
     this.logger = logger;
@@ -100,7 +95,7 @@ export class ContextStorage {
       graphId: options.graphId || null, // Graph relationship
       sessionId: options.sessionId || null, // Session ID
       contextData: contextDataJson,
-      summary: options.summary || null,
+      summary: options.summary ?? null,
       tokensUsed: options.tokensUsed || 0,
       compressionVersion: options.compressionVersion || null,
       lastCompressed: options.compressionVersion ? new Date().toISOString() : null,
@@ -115,7 +110,7 @@ export class ContextStorage {
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        // Use transaction with optimistic locking to prevent race conditions
+        // Serialize updates to an existing context with a transaction and row lock.
         const result = await this.knex.transaction(async (trx) => {
           // Check if context already exists for this agent (within transaction)
           const existingContext = await trx('contexts')
@@ -130,10 +125,10 @@ export class ContextStorage {
             const { id: _, ...updateData } = encryptedData;
             void _; // Intentionally unused - we discard the new ID to keep existing
 
-            // Optimistic locking: check if row was modified since we read it
+            // FOR UPDATE already holds the row lock. Comparing a JS Date here loses
+            // PostgreSQL timestamp microseconds and can incorrectly reject every update.
             const [updated] = await trx('contexts')
-              .where({ agentId: options.agentId })
-              .where({ updated_at: existingContext.updated_at }) // Ensure row hasn't changed
+              .where({ id: existingContext.id })
               .update({
                 ...updateData,
                 updated_at: trx.fn.now(),
@@ -242,7 +237,7 @@ export class ContextStorage {
       summary?: string;
     }
   ): Promise<void> {
-    this.logger.debug('Updating context metadata', { agentId, metadata });
+    this.logger.debug('Updating context metadata', { agentId, fields: Object.keys(metadata) });
 
     const updateData: Record<string, string | number | null> = {};
 
@@ -278,45 +273,15 @@ export class ContextStorage {
   private formatContextData(row: ContextDbRow): ContextStorageData {
     let contextData: ContextMessage[] = [];
 
-    if (row.contextData) {
+    if (row.contextData !== null && row.contextData !== undefined) {
       try {
-        // Handle both string and object (PostgreSQL returns JSON as object)
-        contextData =
-          typeof row.contextData === 'string' ? JSON.parse(row.contextData) : row.contextData;
-        // Validate parsed data is an array
-        if (!Array.isArray(contextData)) {
-          this.logger.error('Context data is not an array after parsing', undefined, {
-            agentId: row.agentId,
-            dataType: typeof contextData,
-          });
-          throw new ContextDataCorruptionError(
-            `Context data corruption: expected array but got ${typeof contextData}`,
-            row.agentId
-          );
-        }
+        const parsed = parseStoredJson(row.contextData, 'contexts.contextData');
+        validateContextJson(parsed);
+        // Preserve provider protocol state and all opaque message fields verbatim.
+        contextData = (parsed ?? []) as ContextMessage[];
       } catch (error) {
-        // If it's already our custom error, just re-throw without double logging
-        if (error instanceof ContextDataCorruptionError) {
-          throw error;
-        }
-
-        // Log and re-throw to prevent silent data loss
-        // Preserve the original error stack trace using cause option
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        this.logger.error(
-          'Failed to parse context data - DATA CORRUPTION',
-          error instanceof Error ? error : undefined,
-          {
-            agentId: row.agentId,
-            errorMessage,
-            dataPreview:
-              typeof row.contextData === 'string'
-                ? row.contextData.substring(0, 100)
-                : 'non-string',
-          }
-        );
         throw new ContextDataCorruptionError(
-          `Context data parsing failed: ${errorMessage}`,
+          'Context data parsing failed',
           row.agentId,
           error instanceof Error ? error : undefined
         );
@@ -327,7 +292,7 @@ export class ContextStorage {
       id: row.id,
       agentId: row.agentId,
       contextData,
-      summary: row.summary || undefined,
+      summary: row.summary ?? undefined,
       tokensUsed: row.tokensUsed,
       compressionVersion: row.compressionVersion || undefined,
       lastCompressed: row.lastCompressed ? new Date(row.lastCompressed) : undefined,

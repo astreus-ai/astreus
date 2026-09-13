@@ -10,6 +10,11 @@ import {
   isStringContent,
 } from '../types';
 import { getLogger } from '../../logger';
+import {
+  getModelsByProvider,
+  getVisionModelsByProvider,
+  getEmbeddingModelsByProvider,
+} from '../models';
 import { Logger } from '../../logger/types';
 import { LLMApiError, VisionError } from '../../errors';
 import * as fs from 'fs';
@@ -74,55 +79,15 @@ export class OllamaProvider implements LLMProvider {
   }
 
   getSupportedModels(): string[] {
-    return [
-      'deepseek-r1',
-      'deepseek-v3',
-      'deepseek-v2.5',
-      'deepseek-coder',
-      'deepseek-coder-v2',
-      'qwen3',
-      'qwen2.5-coder',
-      'llama3.3',
-      'gemma3',
-      'phi4',
-      'mistral-small',
-      'codellama',
-      'llama3.2',
-      'llama3.1',
-      'qwen2.5',
-      'gemma2',
-      'phi3',
-      'mistral',
-      'codegemma',
-      'wizardlm2',
-      'dolphin-mistral',
-      'openhermes',
-      'deepcoder',
-      'stable-code',
-      'wizardcoder',
-      'magicoder',
-      'solar',
-      'yi',
-      'zephyr',
-      'orca-mini',
-      'vicuna',
-    ];
+    return getModelsByProvider('ollama');
   }
 
   getVisionModels(): string[] {
-    return [
-      'llava',
-      'llava:7b',
-      'llava:13b',
-      'llava:34b',
-      'llava-llama3',
-      'llava-phi3',
-      'moondream',
-    ];
+    return getVisionModelsByProvider('ollama');
   }
 
   getEmbeddingModels(): string[] {
-    return ['nomic-embed-text', 'mxbai-embed-large', 'all-minilm', 'snowflake-arctic-embed'];
+    return getEmbeddingModelsByProvider('ollama');
   }
 
   /**

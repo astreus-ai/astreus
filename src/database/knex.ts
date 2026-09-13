@@ -1,78 +1,78 @@
 import { Knex } from 'knex';
+import type { Pool } from 'tarn';
 import { DatabaseConfig } from './types';
 import { getLogger } from '../logger';
+import type { Logger } from '../logger/types';
 
 function detectDatabaseType(config: DatabaseConfig): string {
-  if (config.type) {
-    return config.type;
+  if (config.type) return config.type;
+  if (config.driver) return config.driver === 'pg' ? 'postgres' : config.driver;
+  if (config.connectionString?.startsWith('sqlite://')) return 'sqlite';
+  if (
+    config.connectionString?.startsWith('postgresql://') ||
+    config.connectionString?.startsWith('postgres://')
+  ) {
+    return 'postgres';
   }
-
-  if (config.connectionString) {
-    if (config.connectionString.startsWith('sqlite://')) {
-      return 'sqlite';
-    }
-    if (
-      config.connectionString.startsWith('postgresql://') ||
-      config.connectionString.startsWith('postgres://')
-    ) {
-      return 'postgres';
-    }
-  }
-
-  // Default to sqlite if no clear indication
   return 'sqlite';
 }
 
-/**
- * Connection Pool Manager for tracking and managing database connections.
- * Provides connection pooling metrics, leak detection, and max limit control.
- *
- * Features:
- * - Connection usage tracking with acquire/release timestamps
- * - Leak detection for connections held longer than threshold
- * - Pool utilization metrics
- * - Max connection limit enforcement
- */
+interface ConnectionCheckout {
+  id: number;
+  acquiredAt: number;
+  stack?: string;
+}
+
+/** Tracks successful checkouts, not the lifetime of physical pooled connections. */
 export class ConnectionPoolManager {
-  private static instance: ConnectionPoolManager | null = null;
-  private activeConnections: Map<string, { acquiredAt: number; stack?: string }> = new Map();
+  private static managers = new WeakMap<Pool<unknown>, ConnectionPoolManager>();
+  private static destroyedPools = new WeakSet<Pool<unknown>>();
+  private activeConnections = new Map<unknown, ConnectionCheckout>();
   private totalAcquired = 0;
   private totalReleased = 0;
-  private maxPoolSize: number;
-  private leakThresholdMs: number;
-  private leakCheckInterval: NodeJS.Timeout | null = null;
-  private logger = getLogger();
+  private totalDestroyed = 0;
+  private leakCheckInterval: NodeJS.Timeout;
+  private disposed = false;
 
-  private constructor(maxPoolSize: number, leakThresholdMs: number = 30000) {
-    this.maxPoolSize = maxPoolSize;
-    this.leakThresholdMs = leakThresholdMs;
-    this.startLeakDetection();
+  private constructor(
+    private pool: Pool<unknown>,
+    private maxPoolSize: number,
+    private leakThresholdMs: number,
+    private logger: Logger
+  ) {
+    pool.on('acquireSuccess', this.onAcquire);
+    pool.on('release', this.onRelease);
+    pool.on('destroySuccess', this.onDestroy);
+    pool.on('poolDestroySuccess', this.onPoolDestroy);
+    this.leakCheckInterval = setInterval(() => this.detectLeaks(), 10000);
+    this.leakCheckInterval.unref();
   }
 
   static getInstance(
-    maxPoolSize: number = 10,
-    leakThresholdMs: number = 30000
+    pool: Pool<unknown>,
+    maxPoolSize: number,
+    leakThresholdMs: number = 30000,
+    logger: Logger = getLogger()
   ): ConnectionPoolManager {
-    if (!ConnectionPoolManager.instance) {
-      ConnectionPoolManager.instance = new ConnectionPoolManager(maxPoolSize, leakThresholdMs);
+    if (this.destroyedPools.has(pool)) {
+      throw new Error('Cannot monitor a disconnected database pool');
     }
-    return ConnectionPoolManager.instance;
+    let manager = this.managers.get(pool);
+    if (!manager) {
+      manager = new ConnectionPoolManager(pool, maxPoolSize, leakThresholdMs, logger);
+      this.managers.set(pool, manager);
+    }
+    return manager;
   }
 
-  /**
-   * Track when a connection is acquired from the pool
-   */
-  onAcquire(connectionId?: string): void {
-    const id = connectionId || `conn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const stack = new Error().stack; // Capture stack trace for debugging leaks
-
-    this.activeConnections.set(id, {
+  private onAcquire = (eventId: number, resource: unknown): void => {
+    this.activeConnections.set(resource, {
+      id: eventId,
       acquiredAt: Date.now(),
-      stack,
+      stack: new Error().stack,
     });
     this.totalAcquired++;
 
-    // Check if we're approaching max pool size
     if (this.activeConnections.size >= this.maxPoolSize * 0.8) {
       this.logger.warn('Connection pool utilization high', {
         active: this.activeConnections.size,
@@ -80,95 +80,49 @@ export class ConnectionPoolManager {
         utilization: `${((this.activeConnections.size / this.maxPoolSize) * 100).toFixed(1)}%`,
       });
     }
+  };
 
-    this.logger.debug('Database connection acquired', {
-      connectionId: id,
-      activeConnections: this.activeConnections.size,
-      totalAcquired: this.totalAcquired,
-    });
-  }
+  private onRelease = (resource: unknown): void => {
+    // Tarn emits release even for an unknown resource. Never guess which checkout ended.
+    if (this.activeConnections.delete(resource)) this.totalReleased++;
+  };
 
-  /**
-   * Track when a connection is released back to the pool
-   */
-  onRelease(connectionId?: string): void {
-    // If no specific ID, release the oldest connection
-    if (!connectionId && this.activeConnections.size > 0) {
-      const keysIterator = this.activeConnections.keys().next();
-      // Properly check for undefined - iterator may return {done: true, value: undefined}
-      if (!keysIterator.done && keysIterator.value !== undefined) {
-        connectionId = keysIterator.value;
-      }
-    }
+  private onDestroy = (_eventId: number, resource: unknown): void => {
+    this.activeConnections.delete(resource);
+    this.totalDestroyed++;
+  };
 
-    if (connectionId && this.activeConnections.has(connectionId)) {
-      this.activeConnections.delete(connectionId);
-      this.totalReleased++;
-
-      this.logger.debug('Database connection released', {
-        connectionId,
-        activeConnections: this.activeConnections.size,
-        totalReleased: this.totalReleased,
-      });
-    }
-  }
-
-  /**
-   * Start periodic leak detection
-   */
-  private startLeakDetection(): void {
-    // Check for leaks every 10 seconds
-    this.leakCheckInterval = setInterval(() => {
-      this.detectLeaks();
-    }, 10000);
-
-    // Allow process to exit even if interval is running
-    this.leakCheckInterval.unref();
-  }
-
-  /**
-   * Detect and log potential connection leaks
-   */
-  private detectLeaks(): void {
+  detectLeaks(): Array<{ id: number; heldForMs: number; stack?: string }> {
     const now = Date.now();
-    const leaks: Array<{ id: string; heldForMs: number; stack?: string }> = [];
-
-    for (const [id, info] of this.activeConnections.entries()) {
-      const heldForMs = now - info.acquiredAt;
-      if (heldForMs > this.leakThresholdMs) {
-        leaks.push({ id, heldForMs, stack: info.stack });
-      }
-    }
+    const leaks = [...this.activeConnections.values()]
+      .map(({ id, acquiredAt, stack }) => ({ id, heldForMs: now - acquiredAt, stack }))
+      .filter(({ heldForMs }) => heldForMs > this.leakThresholdMs);
 
     if (leaks.length > 0) {
-      // Convert leaks to LogData compatible format (serialize to JSON string)
-      const leakDetails = leaks.map((l) => ({
-        connectionId: l.id,
-        heldForSeconds: (l.heldForMs / 1000).toFixed(1),
-        stackPreview: l.stack?.split('\n').slice(2, 5).join(' -> ') ?? null,
-      }));
       this.logger.warn('Potential database connection leaks detected', {
         leakCount: leaks.length,
-        leakSummary: JSON.stringify(leakDetails),
+        leakSummary: JSON.stringify(
+          leaks.map(({ id, heldForMs, stack }) => ({
+            connectionId: id,
+            heldForSeconds: (heldForMs / 1000).toFixed(1),
+            stackPreview: stack?.split('\n').slice(2, 5).join(' -> ') ?? null,
+          }))
+        ),
       });
     }
+    return leaks;
   }
 
-  /**
-   * Check if pool can accept new connections
-   */
   canAcquire(): boolean {
-    return this.activeConnections.size < this.maxPoolSize;
+    return !this.disposed && this.activeConnections.size < this.maxPoolSize;
   }
 
-  /**
-   * Get current pool statistics
-   */
   getStats(): {
     activeConnections: number;
     maxPoolSize: number;
     totalAcquired: number;
     totalReleased: number;
+    totalDestroyed: number;
     utilization: number;
   } {
     return {
@@ -176,34 +130,41 @@ export class ConnectionPoolManager {
       maxPoolSize: this.maxPoolSize,
       totalAcquired: this.totalAcquired,
       totalReleased: this.totalReleased,
+      totalDestroyed: this.totalDestroyed,
       utilization: this.activeConnections.size / this.maxPoolSize,
     };
   }
 
-  /**
-   * Cleanup resources
-   */
-  destroy(): void {
-    if (this.leakCheckInterval) {
-      clearInterval(this.leakCheckInterval);
-      this.leakCheckInterval = null;
-    }
+  private onPoolDestroy = (): void => {
+    ConnectionPoolManager.destroyedPools.add(this.pool);
+    this.destroy();
+  };
+
+  destroy = (): void => {
+    if (this.disposed) return;
+    this.disposed = true;
+    clearInterval(this.leakCheckInterval);
+    this.pool.removeListener('acquireSuccess', this.onAcquire);
+    this.pool.removeListener('release', this.onRelease);
+    this.pool.removeListener('destroySuccess', this.onDestroy);
+    this.pool.removeListener('poolDestroySuccess', this.onPoolDestroy);
     this.activeConnections.clear();
-    ConnectionPoolManager.instance = null;
-  }
+    ConnectionPoolManager.managers.delete(this.pool);
+  };
 }
 
-// Global pool manager instance
-let poolManager: ConnectionPoolManager | null = null;
-
-/**
- * Get the global connection pool manager
- */
-export function getPoolManager(maxPoolSize: number = 10): ConnectionPoolManager {
-  if (!poolManager) {
-    poolManager = ConnectionPoolManager.getInstance(maxPoolSize);
-  }
-  return poolManager;
+/** A manager belongs to exactly one live Knex/Tarn pool; no process-global fallback. */
+export function getPoolManager(
+  database: Knex,
+  leakThresholdMs: number = 30000,
+  logger: Logger = getLogger()
+): ConnectionPoolManager {
+  const pool = database.client.pool;
+  if (!pool) throw new Error('Cannot monitor a disconnected database pool');
+  const max: unknown = database.client.config.pool?.max;
+  const maxPoolSize =
+    typeof max === 'number' ? max : database.client.dialect === 'sqlite3' ? 1 : 10;
+  return ConnectionPoolManager.getInstance(pool, maxPoolSize, leakThresholdMs, logger);
 }
 
 export function createKnexConfig(config: DatabaseConfig): Knex.Config {
@@ -211,61 +172,33 @@ export function createKnexConfig(config: DatabaseConfig): Knex.Config {
 
   switch (dbType) {
     case 'sqlite': {
-      let filename = config.filename || ':memory:';
-
-      // Extract filename from sqlite:// URL
-      if (config.connectionString && config.connectionString.startsWith('sqlite://')) {
-        filename = config.connectionString.replace('sqlite://', '');
-      }
-
+      const filename = config.connectionString?.startsWith('sqlite://')
+        ? config.connectionString.slice('sqlite://'.length)
+        : config.filename || ':memory:';
       return {
         client: 'sqlite3',
-        connection: {
-          filename: filename,
-        },
+        connection: { filename },
         useNullAsDefault: true,
-        migrations: {
-          directory: './migrations',
-        },
+        pool: { min: 1, max: 1 },
+        migrations: { directory: './migrations' },
       };
     }
-
     case 'postgres': {
-      // Pool size from config with sensible defaults
-      const maxPoolSize = config.maxPoolSize ?? 10;
-      const minPoolSize = config.minPoolSize ?? 2;
-
-      // Initialize pool manager with configured max size
-      const manager = getPoolManager(maxPoolSize);
-
-      // PostgreSQL requires connection string (DB_URL) for configuration
       if (!config.connectionString) {
         throw new Error('PostgreSQL requires DB_URL connection string to be set');
       }
-
       return {
         client: 'pg',
         connection: config.connectionString,
         pool: {
-          min: minPoolSize,
-          max: maxPoolSize,
+          min: config.minPoolSize ?? 2,
+          max: config.maxPoolSize ?? 10,
           acquireTimeoutMillis: 30000,
           idleTimeoutMillis: 30000,
-          // Track connection creation for pool monitoring
-          // Note: Knex/tarn pool only supports afterCreate hook natively
-          // Release tracking is handled via periodic leak detection in ConnectionPoolManager
-          // The leak detection timer (every 10 seconds) will identify connections held too long
-          afterCreate: (conn: unknown, done: (err: Error | null, conn: unknown) => void) => {
-            manager.onAcquire();
-            done(null, conn);
-          },
         },
-        migrations: {
-          directory: './migrations',
-        },
+        migrations: { directory: './migrations' },
       };
     }
-
     default:
       throw new Error(`Unsupported database type: ${dbType}`);
   }

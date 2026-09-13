@@ -34,7 +34,17 @@ export type {
 
 // LLM exports
 export { getLLM, clearLLMInstances } from './llm';
-export type { LLMProvider, LLMRequestOptions, LLMResponse, LLMUsage } from './llm/types';
+export type {
+  LLMProvider,
+  LLMRequestOptions,
+  LLMResponse,
+  LLMUsage,
+  LLMMessage,
+  LLMStreamChunk,
+  LLMProviderData,
+} from './llm/types';
+export { getModelsByProvider, getProviderForModel, getSupportedModelsList } from './llm/models';
+export { toAssistantMessage } from './llm/utils';
 
 // Logger exports
 export { getLogger, initializeLogger, shutdownLogger, resetLogger } from './logger';

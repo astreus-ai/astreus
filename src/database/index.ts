@@ -3,19 +3,15 @@ import crypto from 'crypto';
 import { DatabaseConfig } from './types';
 import { AgentConfig, AgentConfigInput } from '../agent/types';
 import { DEFAULT_DATABASE_CONFIG } from './defaults';
-import { createKnexConfig } from './knex';
+import { createKnexConfig, getPoolManager, ConnectionPoolManager } from './knex';
+import { migrateContextJsonEnvelope } from './migrations';
 import { Logger } from '../logger/types';
 import { getLogger } from '../logger';
 import { getEncryptionService } from './encryption';
 import { encryptSensitiveFields, decryptSensitiveFields } from './utils';
 import { validateEncryptionConsistency } from './sensitive-fields';
 
-/**
- * Schema version for database migrations.
- * Increment this when schema changes are made.
- * Each module should check this version to ensure compatibility.
- */
-export const SCHEMA_VERSION = 1;
+export { SCHEMA_VERSION } from './migrations';
 
 interface AgentDbRow {
   id: string; // UUID
@@ -72,6 +68,7 @@ export class Database {
   protected knex: Knex;
   protected config: DatabaseConfig;
   private logger: Logger;
+  private poolManager: ConnectionPoolManager;
   private _encryption?: ReturnType<typeof getEncryptionService>;
 
   private get encryption() {
@@ -85,9 +82,7 @@ export class Database {
    * Check if using SQLite database
    */
   isSQLite(): boolean {
-    return (
-      this.config.driver === 'sqlite' || (!this.config.connectionString && !this.config.driver)
-    );
+    return this.knex.client.dialect === 'sqlite3';
   }
 
   /**
@@ -125,13 +120,7 @@ export class Database {
    * Check if using PostgreSQL database
    */
   isPostgres(): boolean {
-    return (
-      this.config.driver === 'pg' ||
-      this.config.driver === 'postgres' ||
-      (!!this.config.connectionString &&
-        (this.config.connectionString.includes('postgres') ||
-          this.config.connectionString.includes('postgresql')))
-    );
+    return this.knex.client.dialect === 'postgresql';
   }
 
   /**
@@ -163,9 +152,18 @@ export class Database {
 
     const knexConfig = createKnexConfig(config);
     this.knex = knex(knexConfig);
+    this.poolManager = getPoolManager(this.knex, 30000, this.logger);
+  }
+
+  private ensurePool(): void {
+    if (!this.knex.client.pool) {
+      this.knex.client.initializePool();
+      this.poolManager = getPoolManager(this.knex, 30000, this.logger);
+    }
   }
 
   async connect(): Promise<void> {
+    this.ensurePool();
     // User-facing info log
     this.logger.info('Connecting to database');
 
@@ -193,6 +191,7 @@ export class Database {
   }
 
   async disconnect(): Promise<void> {
+    if (database === this) database = null;
     // User-facing info log
     this.logger.info('Disconnecting from database');
 
@@ -214,10 +213,13 @@ export class Database {
       });
 
       throw error;
+    } finally {
+      this.poolManager.destroy();
     }
   }
 
   async initialize(): Promise<void> {
+    this.ensurePool();
     // User-facing info log
     this.logger.info('Initializing database schema');
 
@@ -641,6 +643,8 @@ export class Database {
       }
     }
 
+    await migrateContextJsonEnvelope(this.knex);
+
     // User-facing completion message
     this.logger.info('Database schema initialized');
 
@@ -1046,8 +1050,9 @@ export async function initializeDatabase(
   await initMutex.acquire();
   try {
     if (database) {
-      await database.disconnect();
+      const previous = database;
       database = null;
+      await previous.disconnect();
     }
 
     const newDatabase = new Database(config, logger);

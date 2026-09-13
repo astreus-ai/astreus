@@ -4,6 +4,7 @@ import { createVisionTools } from './tools';
 import { Logger } from '../logger/types';
 import { getLogger } from '../logger';
 import { getLLMProvider } from '../llm';
+import { getProviderForModel, getVisionModelsByProvider } from '../llm/models';
 import { VisionAnalysisOptions } from '../llm/types';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -107,6 +108,11 @@ export class Vision implements IAgentModule {
       // Use agent's visionModel if specified
       if (agent.config.visionModel) {
         config = { model: agent.config.visionModel };
+      } else if (
+        agent.config.model &&
+        getVisionModelsByProvider('claude').includes(agent.config.model)
+      ) {
+        config = { provider: 'claude', model: agent.config.model };
       } else {
         // Auto-detect based on available providers
         config = this.autoDetectVisionConfig();
@@ -185,7 +191,7 @@ export class Vision implements IAgentModule {
     if (process.env.ANTHROPIC_VISION_API_KEY || process.env.ANTHROPIC_API_KEY) {
       return {
         provider: 'claude',
-        model: 'claude-3-5-sonnet-20241022',
+        // The previous implicit model is retired. Require an explicit current model.
         apiKey: process.env.ANTHROPIC_VISION_API_KEY || process.env.ANTHROPIC_API_KEY,
       };
     }
@@ -241,72 +247,36 @@ export class Vision implements IAgentModule {
     model: string;
   }> {
     const model = this.config.model;
-    const providerType = this.config.provider;
-
-    this.logger.debug('Getting provider for vision', {
-      configModel: model || 'undefined',
-      configProvider: providerType || 'undefined',
-      hasApiKey: !!this.config.apiKey,
-      hasBaseURL: !!this.config.baseURL,
-    });
-
-    if (providerType && model) {
-      // Use specified provider and model - NEVER use main base URL for vision
-      const mainProvider = await getLLMProvider(providerType, {
-        apiKey: this.config.apiKey,
-        baseUrl: this.config.baseURL || null, // Explicitly set to null to prevent fallback to main base URL
-        logger: this.logger,
-      });
-
-      // Use dedicated vision provider if available
-      const provider = mainProvider.getVisionProvider?.() || mainProvider;
-
-      // Check if provider supports vision
-      if (!provider.analyzeImage) {
-        throw new Error(`Provider ${providerType} does not support vision analysis`);
-      }
-
-      // Check if model is supported
-      const visionModels = mainProvider.getVisionModels();
-      if (!visionModels.includes(model)) {
-        this.logger.warn(
-          `Model ${model} is not in provider's vision models list. Proceeding anyway.`
-        );
-      }
-
-      return { provider, model };
-    }
-
-    // Auto-detect provider based on available API keys - NEVER use main base URL for vision
-    const config = this.autoDetectVisionConfig();
-
-    this.logger.debug('Auto-detected vision config', {
-      provider: config.provider || 'undefined',
-      model: config.model || 'undefined',
-      hasApiKey: !!config.apiKey,
-      hasBaseURL: !!config.baseURL,
-    });
-
-    if (!config.provider) {
+    const modelProvider = model ? getProviderForModel(model) : null;
+    const providerType = this.config.provider || modelProvider;
+    if (providerType === 'claude' && !model) {
       throw new Error(
-        'Vision provider could not be auto-detected. Please configure a vision provider.'
+        'The previous Claude vision default is retired. Set a supported visionModel explicitly.'
       );
     }
-
-    const mainProvider = await getLLMProvider(config.provider, {
-      apiKey: config.apiKey,
-      baseUrl: config.baseURL || null, // Explicitly set to null to prevent fallback to main base URL
+    if (!model || !providerType) {
+      throw new Error(
+        'Vision model could not be determined. Please configure a supported vision model.'
+      );
+    }
+    if (
+      !getVisionModelsByProvider(providerType).includes(model) ||
+      modelProvider !== providerType
+    ) {
+      throw new Error(
+        'Unsupported vision model or provider mismatch. Set a supported visionModel explicitly.'
+      );
+    }
+    const mainProvider = await getLLMProvider(providerType, {
+      apiKey: this.config.apiKey || this.getApiKeyForProvider(providerType),
+      baseUrl: this.config.baseURL || null,
       logger: this.logger,
     });
-
-    // Use dedicated vision provider if available
     const provider = mainProvider.getVisionProvider?.() || mainProvider;
-
-    if (!config.model) {
-      throw new Error('Vision model could not be determined. Please configure a vision model.');
+    if (!provider.analyzeImage || !provider.analyzeImageFromBase64) {
+      throw new Error(`Provider ${providerType} does not support vision analysis`);
     }
-
-    return { provider, model: config.model };
+    return { provider, model };
   }
 
   async analyzeImage(imagePath: string, options: AnalysisOptions = {}): Promise<string> {

@@ -1,4 +1,21 @@
-import {
+import OpenAI from 'openai';
+import type { Stream } from 'openai/core/streaming';
+import { toResponseInputItem } from 'openai/lib/responses/ResponseInputItems';
+import type {
+  ChatCompletion,
+  ChatCompletionChunk,
+  ChatCompletionAssistantMessageParam,
+  ChatCompletionCreateParamsBase,
+  ChatCompletionMessage,
+  ChatCompletionMessageParam,
+} from 'openai/resources/chat/completions';
+import type {
+  Response,
+  ResponseCreateParamsBase,
+  ResponseInput,
+  ResponseInputContent,
+} from 'openai/resources/responses/responses';
+import type {
   LLMProvider,
   LLMRequestOptions,
   LLMResponse,
@@ -6,63 +23,28 @@ import {
   LLMConfig,
   LLMUsage,
   LLMMessage,
+  ToolCall,
   VisionAnalysisOptions,
   VisionAnalysisResult,
   EmbeddingResult,
 } from '../types';
-import OpenAI from 'openai';
+import {
+  getModelDefinition,
+  getModelsByProvider,
+  getVisionModelsByProvider,
+  getEmbeddingModelsByProvider,
+  ModelDefinition,
+} from '../models';
+import { parseToolArguments, resolveUsageCost } from '../utils';
 import { getLogger } from '../../logger';
 import { Logger } from '../../logger/types';
 import { LLMApiError, VisionError } from '../../errors';
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Retry helper with exponential backoff
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
-  let lastError: Error | undefined;
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await fn();
-    } catch (error) {
-      lastError = error as Error;
-      if (i < maxRetries - 1) {
-        await new Promise((r) => setTimeout(r, Math.pow(2, i) * 1000));
-      }
-    }
-  }
-  if (!lastError) {
-    throw new Error('No retry attempts made');
-  }
-  throw lastError;
-}
+const DIRECT_BASE_URL = 'https://api.openai.com/v1';
 
-// OpenAI-specific message type that accepts string arguments for tool calls
-interface OpenAIMessage extends Omit<LLMMessage, 'tool_calls'> {
-  tool_calls?: Array<{
-    id: string;
-    type: 'function';
-    function: {
-      name: string;
-      arguments: string; // OpenAI requires string, not our Record type
-    };
-  }>;
-}
-
-interface UsageWithOptionalCost {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-  cost?: number | string;
-  total_cost?: number | string;
-  totalCost?: number | string;
-}
-
-interface CompletionWithOptionalCost {
-  usage?: UsageWithOptionalCost;
-  cost?: number | string;
-  total_cost?: number | string;
-  totalCost?: number | string;
-}
+type ChatMessage = ChatCompletionMessage & { reasoning_details?: Record<string, unknown>[] };
 
 export class OpenAIProvider implements LLMProvider {
   name = 'openai';
@@ -73,433 +55,506 @@ export class OpenAIProvider implements LLMProvider {
 
   constructor(config?: LLMConfig) {
     const apiKey = config?.apiKey || process.env.OPENAI_API_KEY;
-
-    // Use provided logger or fallback to global logger
-    this.logger = config?.logger || getLogger();
-
     if (!apiKey) {
       throw new Error('OpenAI API key is required. Set OPENAI_API_KEY environment variable.');
     }
-
-    this.logger.info('OpenAI provider initialized');
-    this.logger.debug('OpenAI provider initialization', {
-      hasCustomBaseUrl: !!config?.baseUrl,
-      hasEmbeddingBaseUrl: !!process.env.OPENAI_EMBEDDING_BASE_URL,
-      hasVisionBaseUrl: !!process.env.OPENAI_VISION_BASE_URL,
-      supportsEmbeddings: true,
-      supportsVision: true,
-    });
-
-    // Default timeout: 2 minutes (120000ms)
+    this.logger = config?.logger || getLogger();
     const timeout = config?.timeout ?? 120000;
-
-    // Main client for chat completions (can use custom base URL like OpenRouter)
-    // If baseUrl is explicitly null, don't use OPENAI_BASE_URL fallback (for embedding/vision providers)
-    const chatBaseUrl =
-      config?.baseUrl === null ? undefined : config?.baseUrl || process.env.OPENAI_BASE_URL;
-    this.client = new OpenAI({
-      apiKey,
+    const baseURL =
+      config?.baseUrl === null
+        ? DIRECT_BASE_URL
+        : config?.baseUrl || process.env.OPENAI_BASE_URL || DIRECT_BASE_URL;
+    this.client = new OpenAI({ apiKey, baseURL, timeout });
+    // Keep embedding/vision credentials and endpoints independent of the chat gateway.
+    this.embeddingClient = new OpenAI({
+      apiKey: process.env.OPENAI_EMBEDDING_API_KEY || apiKey,
+      baseURL: process.env.OPENAI_EMBEDDING_BASE_URL || DIRECT_BASE_URL,
       timeout,
-      ...(chatBaseUrl && { baseURL: chatBaseUrl }),
     });
-
-    // Dedicated embedding client - NO fallback to OPENAI_BASE_URL
-    const embeddingApiKey = process.env.OPENAI_EMBEDDING_API_KEY || apiKey;
-    const embeddingBaseUrl = process.env.OPENAI_EMBEDDING_BASE_URL; // Only dedicated URL, no fallback
-
-    this.logger.debug('Creating embedding client', {
-      hasEmbeddingApiKey: !!embeddingApiKey,
-      usingDedicatedKey: !!process.env.OPENAI_EMBEDDING_API_KEY,
-      hasDedicatedBaseUrl: !!embeddingBaseUrl,
-      willUseDefaultEndpoint: !embeddingBaseUrl,
+    this.visionClient = new OpenAI({
+      apiKey: process.env.OPENAI_VISION_API_KEY || apiKey,
+      baseURL: process.env.OPENAI_VISION_BASE_URL || DIRECT_BASE_URL,
+      timeout,
     });
-
-    // Create embedding client with COMPLETELY isolated configuration
-    const embeddingClientConfig: { apiKey: string; baseURL?: string; timeout: number } = {
-      apiKey: embeddingApiKey,
-      timeout,
-    };
-
-    // Only add baseURL if we have a dedicated one, otherwise OpenAI client will use default
-    if (embeddingBaseUrl) {
-      embeddingClientConfig.baseURL = embeddingBaseUrl;
-    } else {
-      // Explicitly prevent OpenAI SDK from reading OPENAI_BASE_URL environment variable
-      embeddingClientConfig.baseURL = 'https://api.openai.com/v1';
-    }
-
-    this.embeddingClient = new OpenAI(embeddingClientConfig);
-
-    // Dedicated vision client - NO fallback to OPENAI_BASE_URL
-    const visionApiKey = process.env.OPENAI_VISION_API_KEY || apiKey;
-    const visionBaseUrl = process.env.OPENAI_VISION_BASE_URL; // Only dedicated URL, no fallback
-
-    // Create vision client with COMPLETELY isolated configuration
-    const visionClientConfig: { apiKey: string; baseURL?: string; timeout: number } = {
-      apiKey: visionApiKey,
-      timeout,
-    };
-
-    // Only add baseURL if we have a dedicated one, otherwise OpenAI client will use default
-    if (visionBaseUrl) {
-      visionClientConfig.baseURL = visionBaseUrl;
-    } else {
-      // Explicitly prevent OpenAI SDK from reading OPENAI_BASE_URL environment variable
-      visionClientConfig.baseURL = 'https://api.openai.com/v1';
-    }
-
-    this.visionClient = new OpenAI(visionClientConfig);
-  }
-
-  private safeJsonParse(jsonString: string): Record<string, string | number | boolean | null> {
-    try {
-      const parsed = JSON.parse(jsonString);
-      // Ensure all values are of allowed types
-      const sanitized: Record<string, string | number | boolean | null> = {};
-      for (const [key, value] of Object.entries(parsed)) {
-        if (
-          typeof value === 'string' ||
-          typeof value === 'number' ||
-          typeof value === 'boolean' ||
-          value === null
-        ) {
-          sanitized[key] = value;
-        } else {
-          sanitized[key] = String(value); // Convert complex types to string
-        }
-      }
-      return sanitized;
-    } catch {
-      this.logger.warn('Failed to parse tool call arguments', { jsonString });
-      return {}; // Return empty object as fallback
-    }
-  }
-
-  private readOptionalCost(source: unknown): number | undefined {
-    if (!source || typeof source !== 'object') {
-      return undefined;
-    }
-
-    const value = source as Record<string, unknown>;
-    const candidates = [value.cost, value.total_cost, value.totalCost];
-
-    for (const candidate of candidates) {
-      if (typeof candidate === 'number' && Number.isFinite(candidate)) {
-        return candidate;
-      }
-
-      if (typeof candidate === 'string') {
-        const parsed = Number(candidate);
-        if (Number.isFinite(parsed)) {
-          return parsed;
-        }
-      }
-    }
-
-    return undefined;
-  }
-
-  private resolveUsageCost(source: unknown): number | undefined {
-    if (!source || typeof source !== 'object') {
-      return undefined;
-    }
-
-    const completion = source as CompletionWithOptionalCost;
-    return this.readOptionalCost(completion.usage) ?? this.readOptionalCost(completion);
+    this.logger.info('OpenAI provider initialized');
   }
 
   getSupportedModels(): string[] {
-    return [
-      'gpt-4.5',
-      'gpt-4.1',
-      'gpt-4.1-mini',
-      'gpt-4.1-nano',
-      'o4-mini',
-      'o4-mini-high',
-      'o3',
-      'gpt-4o',
-      'gpt-4o-mini',
-      'gpt-4-turbo',
-      'gpt-4',
-      'gpt-3.5-turbo',
-      'gpt-3.5-turbo-16k',
-      'gpt-3.5-turbo-instruct',
-    ];
+    return getModelsByProvider('openai');
   }
 
   getVisionModels(): string[] {
-    return [
-      'gpt-4o',
-      'gpt-4o-mini',
-      'gpt-4-turbo',
-      'gpt-4-vision-preview',
-      'gpt-4o-2024-08-06',
-      'gpt-4o-2024-05-13',
-    ];
+    return getVisionModelsByProvider('openai');
   }
 
   getEmbeddingModels(): string[] {
-    return ['text-embedding-3-large', 'text-embedding-3-small', 'text-embedding-ada-002'];
+    return getEmbeddingModelsByProvider('openai');
+  }
+
+  private requestModel(options: LLMRequestOptions, client: OpenAI): ModelDefinition {
+    const model = getModelDefinition(options.model);
+    if (!model || model.provider !== 'openai') {
+      throw new Error(`Unsupported OpenAI model: ${options.model}`);
+    }
+    const endpoint = new URL(client.baseURL);
+    const direct =
+      endpoint.origin === 'https://api.openai.com' &&
+      endpoint.pathname.replace(/\/$/, '') === '/v1';
+    if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+      throw new Error('The model endpoint must not contain credentials, a query, or a fragment');
+    }
+    if (model.gateway && direct) {
+      throw new Error(
+        `Model ${model.id} requires a configured OpenAI-compatible gateway via OPENAI_BASE_URL`
+      );
+    }
+    if (
+      model.gateway === 'openrouter' &&
+      (endpoint.origin !== 'https://openrouter.ai' ||
+        endpoint.pathname.replace(/\/$/, '') !== '/api/v1')
+    ) {
+      throw new Error(
+        `Model ${model.id} requires OPENAI_BASE_URL=https://openrouter.ai/api/v1; no paid fallback is allowed`
+      );
+    }
+    if (!direct && model.id === 'gpt-6-astra' && options.tools?.length) {
+      throw new Error(
+        'GPT-6 Astra tool calling requires the direct Responses endpoint, not a Chat Completions gateway'
+      );
+    }
+    if (
+      options.maxTokens !== undefined &&
+      (!Number.isInteger(options.maxTokens) ||
+        options.maxTokens < 1 ||
+        (model.maxOutputTokens !== undefined && options.maxTokens > model.maxOutputTokens))
+    ) {
+      throw new Error(`Invalid maxTokens for model ${model.id}`);
+    }
+    // A configured compatible endpoint keeps Chat Completions, including existing
+    // production deployments. Never silently route its key to a direct endpoint.
+    return direct ? model : { ...model, transport: 'chat-completions' };
+  }
+
+  private messages(options: LLMRequestOptions): LLMMessage[] {
+    const messages = [...options.messages];
+    if (options.systemPrompt && !messages.some((message) => message.role === 'system')) {
+      messages.unshift({ role: 'system', content: options.systemPrompt });
+    }
+    return messages;
+  }
+
+  private responsesInput(options: LLMRequestOptions): ResponseInput {
+    const input: ResponseInput = [];
+    for (const message of this.messages(options)) {
+      if (message.providerData) {
+        if (
+          message.role !== 'assistant' ||
+          message.providerData.protocol !== 'openai-responses' ||
+          message.providerData.model !== options.model
+        ) {
+          throw new Error(
+            'Cannot replay provider continuation with a different model or transport'
+          );
+        }
+        // Replay every native output item, including encrypted reasoning and call IDs.
+        // Do not replace this with normalized text/tool calls or item references.
+        for (const item of message.providerData.output) {
+          const replay = toResponseInputItem(item);
+          if (!replay) throw new Error('Native response contains an item that cannot be replayed');
+          input.push(replay);
+        }
+        continue;
+      }
+      if (message.role === 'tool') {
+        if (!message.tool_call_id) throw new Error('Tool result is missing tool_call_id');
+        if (typeof message.content !== 'string') throw new Error('Tool results must contain text');
+        input.push({
+          type: 'function_call_output',
+          call_id: message.tool_call_id,
+          output: message.content,
+        });
+        continue;
+      }
+      if (typeof message.content === 'string') {
+        if (message.content || !message.tool_calls?.length) {
+          input.push({ role: message.role, content: message.content });
+        }
+      } else {
+        const content: ResponseInputContent[] = message.content.map((part) => {
+          if (part.type === 'text' && part.text !== undefined) {
+            return { type: 'input_text', text: part.text };
+          }
+          if (part.type === 'image_url' && part.image_url) {
+            return {
+              type: 'input_image',
+              image_url: part.image_url.url,
+              detail: part.image_url.detail ?? 'auto',
+            };
+          }
+          throw new Error('Invalid multimodal message content');
+        });
+        input.push({ role: message.role, content });
+      }
+      for (const tool of message.tool_calls ?? []) {
+        input.push({
+          type: 'function_call',
+          call_id: tool.id,
+          name: tool.function.name,
+          arguments: JSON.stringify(tool.function.arguments),
+        });
+      }
+    }
+    return input;
+  }
+
+  private responsesParams(
+    options: LLMRequestOptions,
+    model: ModelDefinition
+  ): ResponseCreateParamsBase {
+    return {
+      model: options.model,
+      input: this.responsesInput(options),
+      max_output_tokens: options.maxTokens ?? 4096,
+      // Stateless continuation also works for zero-data-retention accounts.
+      store: false,
+      include: ['reasoning.encrypted_content'],
+      ...(model.supportsTemperature && { temperature: options.temperature ?? 0.7 }),
+      ...(options.tools?.length && {
+        tools: options.tools.map((tool) => ({
+          type: 'function' as const,
+          name: tool.function.name,
+          description: tool.function.description,
+          parameters: tool.function.parameters,
+          strict: false,
+        })),
+        tool_choice: 'auto' as const,
+      }),
+    };
+  }
+
+  private chatMessages(options: LLMRequestOptions): ChatCompletionMessageParam[] {
+    return this.messages(options).map((message): ChatCompletionMessageParam => {
+      if (message.providerData) {
+        if (
+          message.role !== 'assistant' ||
+          message.providerData.protocol !== 'openai-chat-completions' ||
+          message.providerData.model !== options.model
+        ) {
+          throw new Error(
+            'Cannot replay provider continuation with a different model or transport'
+          );
+        }
+        return message.providerData.message;
+      }
+      if (message.role === 'tool') {
+        if (!message.tool_call_id) throw new Error('Tool result is missing tool_call_id');
+        if (typeof message.content !== 'string') throw new Error('Tool results must contain text');
+        return { role: 'tool', content: message.content, tool_call_id: message.tool_call_id };
+      }
+      if (message.role === 'assistant') {
+        if (typeof message.content !== 'string')
+          throw new Error('Assistant content must contain text');
+        const result: ChatCompletionAssistantMessageParam = {
+          role: 'assistant',
+          content: message.content,
+        };
+        if (message.tool_calls?.length) {
+          result.tool_calls = message.tool_calls.map((tool) => ({
+            id: tool.id,
+            type: 'function',
+            function: {
+              name: tool.function.name,
+              arguments: JSON.stringify(tool.function.arguments),
+            },
+          }));
+        }
+        return result;
+      }
+      if (message.role === 'system') {
+        if (typeof message.content !== 'string')
+          throw new Error('System content must contain text');
+        return { role: 'system', content: message.content };
+      }
+      return {
+        role: 'user',
+        content:
+          typeof message.content === 'string'
+            ? message.content
+            : message.content.map((part) => {
+                if (part.type === 'text' && part.text !== undefined)
+                  return { type: 'text', text: part.text };
+                if (part.type === 'image_url' && part.image_url)
+                  return { type: 'image_url', image_url: part.image_url };
+                throw new Error('Invalid multimodal message content');
+              }),
+      };
+    });
+  }
+
+  private chatParams(
+    options: LLMRequestOptions,
+    model: ModelDefinition
+  ): ChatCompletionCreateParamsBase {
+    return {
+      model: options.model,
+      messages: this.chatMessages(options),
+      ...(model.supportsTemperature && { temperature: options.temperature ?? 0.7 }),
+      ...(model.supportsTemperature
+        ? { max_tokens: options.maxTokens ?? 4096 }
+        : { max_completion_tokens: options.maxTokens ?? 4096 }),
+      ...(options.tools?.length && { tools: options.tools, tool_choice: 'auto' as const }),
+    };
+  }
+
+  private fromResponse(response: Response, requestedModel: string): LLMResponse {
+    if (response.status === 'failed' || response.status === 'cancelled') {
+      throw new Error(`Response ended with status ${response.status}`);
+    }
+    const tools: ToolCall[] = [];
+    let content = '';
+    for (const item of response.output) {
+      if (item.type === 'function_call') {
+        if (!item.call_id || !item.name) throw new Error('Incomplete native function call');
+        tools.push({
+          id: item.call_id,
+          type: 'function',
+          function: { name: item.name, arguments: parseToolArguments(item.arguments) },
+        });
+      } else if (item.type === 'message') {
+        for (const part of item.content) {
+          if (part.type === 'output_text') content += part.text;
+          else if (part.type === 'refusal') content += part.refusal;
+        }
+      }
+    }
+    if (response.status === 'incomplete' && tools.length) {
+      throw new Error('Response ended before tool calls completed');
+    }
+    return {
+      content,
+      model: response.model,
+      toolCalls: tools.length ? tools : undefined,
+      providerData: {
+        protocol: 'openai-responses',
+        model: requestedModel,
+        output: response.output,
+      },
+      usage: response.usage
+        ? {
+            promptTokens: response.usage.input_tokens,
+            completionTokens: response.usage.output_tokens,
+            totalTokens: response.usage.total_tokens,
+            cost: resolveUsageCost(response),
+          }
+        : undefined,
+    };
+  }
+
+  private fromChat(
+    message: ChatMessage,
+    model: string,
+    requestedModel: string,
+    usage?: LLMUsage
+  ): LLMResponse {
+    const tools = message.tool_calls?.map((tool): ToolCall => {
+      if (tool.type !== 'function') throw new Error('Unsupported custom tool call');
+      if (!tool.id || !tool.function.name) throw new Error('Incomplete function call');
+      return {
+        id: tool.id,
+        type: 'function',
+        function: {
+          name: tool.function.name,
+          arguments: parseToolArguments(tool.function.arguments),
+        },
+      };
+    });
+    return {
+      content: message.content ?? message.refusal ?? '',
+      model,
+      toolCalls: tools?.length ? tools : undefined,
+      providerData: { protocol: 'openai-chat-completions', model: requestedModel, message },
+      usage,
+    };
+  }
+
+  private chatUsage(completion: { usage?: ChatCompletion['usage'] | null }): LLMUsage | undefined {
+    return completion.usage
+      ? {
+          promptTokens: completion.usage.prompt_tokens,
+          completionTokens: completion.usage.completion_tokens,
+          totalTokens: completion.usage.total_tokens,
+          cost: resolveUsageCost(completion),
+        }
+      : undefined;
+  }
+
+  private requestError(error: unknown, operation: string): LLMApiError {
+    const status = error instanceof OpenAI.APIError ? error.status : undefined;
+    const message = `OpenAI ${operation} failed${status ? ` (HTTP ${status})` : ''}`;
+    // API errors may contain request data. Never log the raw error/response body.
+    this.logger.error(message);
+    return new LLMApiError(message, this.name, error instanceof Error ? error : undefined);
   }
 
   async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
-    const messages = this.prepareMessages(options);
+    return this.generateWithClient(options, this.client);
+  }
 
+  private async generateWithClient(
+    options: LLMRequestOptions,
+    client: OpenAI
+  ): Promise<LLMResponse> {
+    const model = this.requestModel(options, client);
     try {
-      const completion = await withRetry(() =>
-        this.client.chat.completions.create({
-          model: options.model,
-          messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 4096,
+      if (model.transport === 'responses') {
+        const response = await client.responses.create({
+          ...this.responsesParams(options, model),
           stream: false,
-          ...(options.tools &&
-            options.tools.length > 0 && {
-              tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
-              tool_choice: 'auto',
-            }),
-        })
-      );
-
-      const message = completion.choices[0]?.message;
-
-      return {
-        content: message?.content || '',
-        model: completion.model,
-        toolCalls: message?.tool_calls?.map((tc) => ({
-          id: tc.id,
-          type: tc.type,
-          function: {
-            name: tc.function.name,
-            arguments:
-              typeof tc.function.arguments === 'string'
-                ? this.safeJsonParse(tc.function.arguments)
-                : tc.function.arguments,
-          },
-        })),
-        usage: {
-          promptTokens: completion.usage?.prompt_tokens ?? 0,
-          completionTokens: completion.usage?.completion_tokens ?? 0,
-          totalTokens: completion.usage?.total_tokens ?? 0,
-          cost: this.resolveUsageCost(completion),
-        },
-      };
-    } catch (error) {
-      const originalError = error instanceof Error ? error : new Error(String(error));
-      this.logger.error('OpenAI generateResponse failed', originalError, {
-        model: options.model,
-        errorMessage: originalError.message,
+        });
+        return this.fromResponse(response, options.model);
+      }
+      const completion = await client.chat.completions.create({
+        ...this.chatParams(options, model),
+        stream: false,
       });
-      throw new LLMApiError(
-        `OpenAI API request failed: ${originalError.message}`,
-        this.name,
-        originalError
-      );
+      const choice = completion.choices[0];
+      const message = choice?.message;
+      if (!message) throw new Error('No message returned by the model');
+      if (choice.finish_reason === 'length' && message.tool_calls?.length) {
+        throw new Error('Tool call output was truncated');
+      }
+      return this.fromChat(message, completion.model, options.model, this.chatUsage(completion));
+    } catch (error) {
+      throw this.requestError(error, 'request');
     }
   }
 
   async *generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
-    const messages = this.prepareMessages(options);
-
-    let stream:
-      | (Awaited<ReturnType<typeof this.client.chat.completions.create>> & {
-          controller?: AbortController;
-        })
-      | undefined;
-    try {
-      stream = await withRetry(() =>
-        this.client.chat.completions.create({
-          model: options.model,
-          messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 4096,
-          stream: true,
-          stream_options: { include_usage: true }, // Enable usage tracking in streaming
-          ...(options.tools &&
-            options.tools.length > 0 && {
-              tools: options.tools as OpenAI.Chat.Completions.ChatCompletionTool[],
-              tool_choice: 'auto',
-            }),
-        })
-      );
-    } catch (error: unknown) {
-      // Log full error details including OpenAI API response
-      const errorObj = error as Record<string, unknown>;
-      this.logger.error('OpenAI API request failed', error instanceof Error ? error : undefined, {
-        model: options.model,
-        messageCount: messages.length,
-        errorMessage: String(errorObj?.message || 'Unknown error'),
-        errorType: String(errorObj?.constructor?.name || 'Unknown'),
-        status: String(errorObj?.status || errorObj?.statusCode || ''),
-        code: String(errorObj?.code || ''),
-        type: String(errorObj?.type || ''),
-        errorString: String(error),
+    const model = this.requestModel(options, this.client);
+    if (model.transport === 'responses') {
+      const stream = this.client.responses.stream({
+        ...this.responsesParams(options, model),
+        stream: true,
       });
-      this.logger.debug('OpenAI API error details', {
-        messageCount: messages.length,
-        roles: messages.map((m) => m.role).join(', '),
-      });
-      throw error;
-    }
-
-    const toolCalls: Array<{
-      id: string;
-      type: string;
-      function: { name: string; arguments: string };
-    }> = [];
-
-    let usage: LLMUsage | undefined;
-
-    // Helper function to abort stream safely
-    const abortStream = (): void => {
       try {
-        // OpenAI SDK streams have a controller property for aborting
-        if (stream && 'controller' in stream && stream.controller instanceof AbortController) {
-          stream.controller.abort();
-        }
-      } catch {
-        // Ignore abort errors - stream may already be closed
-      }
-    };
-
-    try {
-      for await (const chunk of stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>) {
-        const delta = chunk.choices?.[0]?.delta;
-        const content = delta?.content || '';
-
-        // Capture usage from final chunk (OpenAI includes this when stream_options.include_usage is true)
-        if (chunk.usage) {
-          usage = {
-            promptTokens: chunk.usage.prompt_tokens,
-            completionTokens: chunk.usage.completion_tokens,
-            totalTokens: chunk.usage.total_tokens,
-            cost: this.resolveUsageCost(chunk),
-          };
-        }
-
-        // Handle tool calls in streaming
-        if (delta?.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            if (tc.index !== undefined) {
-              if (!toolCalls[tc.index]) {
-                toolCalls[tc.index] = {
-                  id: tc.id || '',
-                  type: tc.type || 'function',
-                  function: {
-                    name: tc.function?.name || '',
-                    arguments: tc.function?.arguments || '',
-                  },
-                };
-              } else {
-                if (tc.function?.arguments) {
-                  toolCalls[tc.index].function.arguments += tc.function.arguments;
-                }
-              }
-            }
+        for await (const event of stream) {
+          if (event.type === 'response.output_text.delta') {
+            yield { content: event.delta, done: false, model: options.model };
+          } else if (event.type === 'response.refusal.delta') {
+            yield { content: event.delta, done: false, model: options.model };
           }
         }
+        // SDK assembly is indexed by output item and handles interleaved calls.
+        const response = this.fromResponse(await stream.finalResponse(), options.model);
+        yield { ...response, content: '', done: true };
+      } catch (error) {
+        throw this.requestError(error, 'stream');
+      } finally {
+        stream.abort();
+      }
+      return;
+    }
 
-        if (content) {
-          yield { content, done: false, model: chunk.model };
+    let stream: Stream<ChatCompletionChunk> | undefined;
+    const calls = new Map<number, { id: string; name: string; arguments: string }>();
+    const reasoning: Record<string, unknown>[] = [];
+    let usage: LLMUsage | undefined;
+    let responseModel = options.model;
+    let text = '';
+    let refusal = '';
+    let finished = false;
+    try {
+      stream = await this.client.chat.completions.create({
+        ...this.chatParams(options, model),
+        stream: true,
+        stream_options: { include_usage: true },
+      });
+      for await (const chunk of stream) {
+        responseModel = chunk.model || responseModel;
+        if (chunk.usage) usage = this.chatUsage(chunk);
+        const choice = chunk.choices.find((candidate) => candidate.index === 0);
+        if (!choice) continue;
+        if (choice.finish_reason) {
+          if (choice.finish_reason === 'length' && calls.size)
+            throw new Error('Tool call output was truncated');
+          finished = true;
+        }
+        const delta = choice.delta;
+        if (delta.content) {
+          text += delta.content;
+          yield { content: delta.content, done: false, model: responseModel };
+        }
+        if (delta.refusal) {
+          refusal += delta.refusal;
+          yield { content: delta.refusal, done: false, model: responseModel };
+        }
+        for (const call of delta.tool_calls ?? []) {
+          const accumulated = calls.get(call.index) ?? { id: '', name: '', arguments: '' };
+          if (call.id) accumulated.id = call.id;
+          if (call.function?.name) accumulated.name += call.function.name;
+          accumulated.arguments += call.function?.arguments ?? '';
+          calls.set(call.index, accumulated);
+        }
+        // OpenRouter reasoning details are opaque continuation, never visible text.
+        const details: unknown = (delta as unknown as Record<string, unknown>).reasoning_details;
+        if (Array.isArray(details)) {
+          for (const detail of details) {
+            if (!detail || typeof detail !== 'object' || Array.isArray(detail)) {
+              throw new Error('Invalid reasoning detail');
+            }
+            // The gateway documents an ordered sequence of blocks; index is optional.
+            // Never invent a merge rule for encrypted data or signatures.
+            reasoning.push(detail as Record<string, unknown>);
+          }
         }
       }
-
-      // Final chunk with tool calls and usage
+      if (!finished) throw new Error('Stream ended before the model finished');
+      const message: ChatMessage = {
+        role: 'assistant',
+        content: text || null,
+        refusal: refusal || null,
+        ...(calls.size && {
+          tool_calls: [...calls]
+            .sort(([left], [right]) => left - right)
+            .map(([, call]) => ({
+              id: call.id,
+              type: 'function' as const,
+              function: { name: call.name, arguments: call.arguments },
+            })),
+        }),
+        ...(reasoning.length && { reasoning_details: reasoning }),
+      };
       yield {
+        ...this.fromChat(message, responseModel, options.model, usage),
         content: '',
         done: true,
-        model: options.model,
-        toolCalls:
-          toolCalls.length > 0
-            ? toolCalls.map((tc) => ({
-                id: tc.id,
-                type: 'function' as const,
-                function: {
-                  name: tc.function.name,
-                  arguments:
-                    typeof tc.function.arguments === 'string'
-                      ? this.safeJsonParse(tc.function.arguments)
-                      : tc.function.arguments,
-                },
-              }))
-            : undefined,
-        usage,
       };
     } catch (error) {
-      // Abort the stream on error to prevent resource leak
-      abortStream();
-
-      // Log full error details for debugging
-      const originalError = error instanceof Error ? error : new Error(String(error));
-      this.logger.error(
-        'OpenAI streaming error details',
-        new Error(`${originalError.message} - ${JSON.stringify(error, null, 2)}`)
-      );
-
-      throw new LLMApiError(
-        `OpenAI streaming error: ${originalError.message}`,
-        this.name,
-        originalError
-      );
+      throw this.requestError(error, 'stream');
     } finally {
-      // Ensure stream is aborted when generator is closed early (consumer breaks out of loop)
-      abortStream();
+      stream?.controller.abort();
     }
   }
 
   async generateEmbedding(text: string, model?: string): Promise<EmbeddingResult> {
-    const embeddingModel = model || this.getEmbeddingModels()[0]; // Use provided model or fallback to first available
-
-    this.logger.info(`Generating embedding with model: ${embeddingModel}`);
-    this.logger.debug('OpenAI embedding request', {
-      model: embeddingModel,
-      textLength: text.length,
-    });
-
+    const embeddingModel = model || this.getEmbeddingModels()[0];
     try {
-      const response = await withRetry(() =>
-        this.embeddingClient.embeddings.create({
-          model: embeddingModel,
-          input: text,
-          encoding_format: 'float',
-        })
-      );
-
-      const embeddingData = response.data[0]?.embedding;
-      if (!embeddingData) {
-        throw new Error('No embedding data returned from OpenAI API');
-      }
-
-      const result: EmbeddingResult = {
-        embedding: embeddingData,
+      const response = await this.embeddingClient.embeddings.create({
         model: embeddingModel,
-        usage: {
-          promptTokens: response.usage?.prompt_tokens ?? 0,
-          totalTokens: response.usage?.total_tokens ?? 0,
-        },
+        input: text,
+        encoding_format: 'float',
+      });
+      const embedding = response.data[0]?.embedding;
+      if (!embedding) throw new Error('No embedding returned by the model');
+      return {
+        embedding,
+        model: embeddingModel,
+        usage: response.usage
+          ? { promptTokens: response.usage.prompt_tokens, totalTokens: response.usage.total_tokens }
+          : undefined,
       };
-
-      this.logger.info('Embedding generated successfully');
-      this.logger.debug('OpenAI embedding result', {
-        model: embeddingModel,
-        dimensions: result.embedding.length,
-        promptTokens: result.usage?.promptTokens ?? 0,
-      });
-
-      return result;
     } catch (error) {
-      const originalError = error instanceof Error ? error : new Error(String(error));
-      this.logger.error('Embedding generation failed');
-      this.logger.debug('OpenAI embedding error', {
-        model: embeddingModel,
-        error: originalError.message,
-        hasStack: !!originalError.stack,
-      });
-      throw new LLMApiError(
-        `OpenAI embedding generation failed: ${originalError.message}`,
-        this.name,
-        originalError
-      );
+      throw this.requestError(error, 'embedding request');
     }
   }
 
@@ -507,176 +562,68 @@ export class OpenAIProvider implements LLMProvider {
     imagePath: string,
     options: VisionAnalysisOptions = {}
   ): Promise<VisionAnalysisResult> {
-    const fileName = path.basename(imagePath);
-
-    this.logger.info(`Analyzing image: ${fileName}`);
-    this.logger.debug('OpenAI image analysis started', {
-      imagePath,
-      fileName,
-      hasPrompt: !!options.prompt,
-      detail: options.detail || 'auto',
-      maxTokens: options.maxTokens || 1000,
-    });
-
-    // Validate image file
-    try {
-      await fs.promises.access(imagePath);
-    } catch {
-      this.logger.error(`Image file not found: ${imagePath}`);
-      throw new Error(`Image file not found: ${imagePath}`);
-    }
-
-    const ext = path.extname(imagePath).toLowerCase();
-    const supportedFormats = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
-    if (!supportedFormats.includes(ext)) {
-      this.logger.error(`Unsupported image format: ${ext}`);
-      throw new Error(
-        `Unsupported image format: ${ext}. Supported: ${supportedFormats.join(', ')}`
-      );
-    }
-
-    // Read and encode image
-    const imageBuffer = await fs.promises.readFile(imagePath);
-    const base64Image = imageBuffer.toString('base64');
-    const mimeType = this.getMimeType(ext);
-    const dataUrl = `data:${mimeType};base64,${base64Image}`;
-
-    return this.analyzeImageFromBase64(dataUrl, options);
+    const extension = path.extname(imagePath).toLowerCase();
+    const mimeTypes: Record<string, string> = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+    };
+    const mimeType = mimeTypes[extension];
+    if (!mimeType) throw new Error('Unsupported image format');
+    const image = await fs.promises.readFile(imagePath);
+    return this.analyzeImageFromBase64(
+      `data:${mimeType};base64,${image.toString('base64')}`,
+      options
+    );
   }
 
   async analyzeImageFromBase64(
     base64Data: string,
     options: VisionAnalysisOptions = {}
   ): Promise<VisionAnalysisResult> {
-    const startTime = Date.now();
-
-    this.logger.info('Analyzing base64 image');
-    this.logger.debug('OpenAI base64 image analysis started', {
-      base64Length: base64Data.length,
-      hasPrompt: !!options.prompt,
-      detail: options.detail || 'auto',
-      maxTokens: options.maxTokens || 1000,
-    });
-
+    const start = Date.now();
     try {
-      const model = options.model || this.getVisionModels()[0]; // Use agent's model or fallback to first available
-      const prompt = options.prompt || 'Analyze this image and describe what you see in detail.';
-
-      const response = await withRetry(() =>
-        this.visionClient.chat.completions.create({
-          model,
+      const response = await this.generateWithClient(
+        {
+          model: options.model || this.getVisionModels()[0],
+          temperature: options.temperature ?? 0.1,
+          maxTokens: options.maxTokens ?? 1000,
           messages: [
             {
               role: 'user',
               content: [
-                { type: 'text', text: prompt },
+                {
+                  type: 'text',
+                  text: options.prompt || 'Analyze this image and describe what you see in detail.',
+                },
                 {
                   type: 'image_url',
-                  image_url: {
-                    url: base64Data,
-                    detail: options.detail || 'auto',
-                  },
+                  image_url: { url: base64Data, detail: options.detail ?? 'auto' },
                 },
               ],
             },
           ],
-          max_tokens: options.maxTokens ?? 1000,
-          temperature: options.temperature ?? 0.1,
-        })
+        },
+        this.visionClient
       );
-
-      const processingTime = Date.now() - startTime;
-      const content = response.choices[0]?.message?.content || 'No analysis available';
-
-      const result: VisionAnalysisResult = {
-        content,
-        confidence: 1.0,
+      return {
+        content: response.content,
         metadata: {
-          model,
+          model: response.model,
           provider: this.name,
-          processingTime,
-          tokenUsage: response.usage
-            ? {
-                promptTokens: response.usage.prompt_tokens,
-                completionTokens: response.usage.completion_tokens,
-                totalTokens: response.usage.total_tokens,
-              }
-            : undefined,
+          processingTime: Date.now() - start,
+          tokenUsage: response.usage,
         },
       };
-
-      this.logger.info('Image analysis completed');
-      this.logger.debug('OpenAI image analysis result', {
-        model,
-        processingTime,
-        contentLength: content.length,
-        promptTokens: response.usage?.prompt_tokens ?? 0,
-        completionTokens: response.usage?.completion_tokens ?? 0,
-        totalTokens: response.usage?.total_tokens ?? 0,
-      });
-
-      return result;
     } catch (error) {
-      const processingTime = Date.now() - startTime;
-      const originalError = error instanceof Error ? error : new Error(String(error));
-
-      this.logger.error('Image analysis failed');
-      this.logger.debug('OpenAI image analysis error', {
-        processingTime,
-        error: originalError.message,
-        hasStack: !!originalError.stack,
-      });
-
       throw new VisionError(
-        `OpenAI vision analysis failed: ${originalError.message}`,
+        'OpenAI vision analysis failed',
         this.name,
-        originalError
+        error instanceof Error ? error : undefined
       );
     }
-  }
-
-  private getMimeType(extension: string): string {
-    const mimeTypes: Record<string, string> = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.gif': 'image/gif',
-      '.bmp': 'image/bmp',
-      '.webp': 'image/webp',
-    };
-
-    return mimeTypes[extension.toLowerCase()] || 'image/jpeg';
-  }
-
-  private prepareMessages(options: LLMRequestOptions): OpenAIMessage[] {
-    const messages = [...options.messages];
-
-    // Add system prompt if provided and no system message exists
-    if (options.systemPrompt && !messages.some((m) => m.role === 'system')) {
-      messages.unshift({ role: 'system', content: options.systemPrompt });
-    }
-
-    // Ensure tool_calls arguments are serialized as strings for OpenAI API
-    const processedMessages: OpenAIMessage[] = messages.map((message): OpenAIMessage => {
-      if (message.role === 'assistant' && message.tool_calls) {
-        return {
-          ...message,
-          tool_calls: message.tool_calls.map((tc) => ({
-            ...tc,
-            function: {
-              ...tc.function,
-              arguments:
-                typeof tc.function.arguments === 'string'
-                  ? tc.function.arguments
-                  : JSON.stringify(tc.function.arguments),
-            },
-          })),
-        };
-      }
-      return message as OpenAIMessage;
-    });
-
-    return processedMessages;
   }
 
   getEmbeddingProvider(): LLMProvider {
@@ -687,37 +634,7 @@ export class OpenAIProvider implements LLMProvider {
       getSupportedModels: () => [],
       getVisionModels: () => [],
       getEmbeddingModels: this.getEmbeddingModels.bind(this),
-      generateEmbedding: async (text: string, model?: string) => {
-        // Use the dedicated embedding client that was created with correct API key and base URL
-        const embeddingModel = model || this.getEmbeddingModels()[0]; // Use provided model or fallback to first available
-
-        this.logger.debug('Using dedicated embedding client', {
-          model: embeddingModel,
-          clientHasBaseURL: 'baseURL' in this.embeddingClient,
-          clientBaseURL: (this.embeddingClient as { baseURL?: string }).baseURL || 'none',
-          clientApiKey: '[REDACTED]',
-        });
-
-        const response = await this.embeddingClient.embeddings.create({
-          model: embeddingModel,
-          input: text,
-          encoding_format: 'float',
-        });
-
-        const embeddingData = response.data[0]?.embedding;
-        if (!embeddingData) {
-          throw new Error('No embedding data returned from OpenAI API');
-        }
-
-        return {
-          embedding: embeddingData,
-          model: embeddingModel,
-          usage: {
-            promptTokens: response.usage?.prompt_tokens ?? 0,
-            totalTokens: response.usage?.total_tokens ?? 0,
-          },
-        };
-      },
+      generateEmbedding: this.generateEmbedding.bind(this),
     };
   }
 
@@ -727,98 +644,10 @@ export class OpenAIProvider implements LLMProvider {
       generateResponse: this.generateResponse.bind(this),
       generateStreamResponse: this.generateStreamResponse.bind(this),
       getSupportedModels: () => [],
-      getVisionModels: this.getVisionModels.bind(this),
       getEmbeddingModels: () => [],
-      analyzeImage: async (imagePath: string, options?: VisionAnalysisOptions) => {
-        const imageBuffer = await fs.promises.readFile(imagePath);
-        const base64Image = imageBuffer.toString('base64');
-        const ext = path.extname(imagePath).toLowerCase();
-        const mimeType = this.getMimeType(ext);
-        const dataUrl = `data:${mimeType};base64,${base64Image}`;
-
-        return this.analyzeImageFromBase64WithClient(dataUrl, options, this.visionClient);
-      },
-      analyzeImageFromBase64: async (base64Data: string, options?: VisionAnalysisOptions) => {
-        return this.analyzeImageFromBase64WithClient(base64Data, options, this.visionClient);
-      },
+      getVisionModels: this.getVisionModels.bind(this),
+      analyzeImage: this.analyzeImage.bind(this),
+      analyzeImageFromBase64: this.analyzeImageFromBase64.bind(this),
     };
-  }
-
-  private async analyzeImageFromBase64WithClient(
-    base64Data: string,
-    options: VisionAnalysisOptions = {},
-    client: OpenAI
-  ): Promise<VisionAnalysisResult> {
-    const startTime = Date.now();
-
-    this.logger.debug('Using dedicated vision client', {
-      base64Length: base64Data.length,
-      hasPrompt: !!options.prompt,
-      clientHasBaseURL: 'baseURL' in client,
-    });
-
-    try {
-      const model = options.model || this.getVisionModels()[0]; // Use agent's model or fallback to first available
-      const prompt = options.prompt || 'Analyze this image and describe what you see in detail.';
-
-      const response = await withRetry(() =>
-        client.chat.completions.create({
-          model,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: prompt },
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: base64Data,
-                    detail: options.detail || 'auto',
-                  },
-                },
-              ],
-            },
-          ],
-          max_tokens: options.maxTokens ?? 1000,
-          temperature: options.temperature ?? 0.1,
-        })
-      );
-
-      const processingTime = Date.now() - startTime;
-      const content = response.choices[0]?.message?.content || 'No analysis available';
-
-      return {
-        content,
-        confidence: 1.0,
-        metadata: {
-          model,
-          provider: this.name,
-          processingTime,
-          tokenUsage: response.usage
-            ? {
-                promptTokens: response.usage.prompt_tokens,
-                completionTokens: response.usage.completion_tokens,
-                totalTokens: response.usage.total_tokens,
-              }
-            : undefined,
-        },
-      };
-    } catch (error) {
-      const processingTime = Date.now() - startTime;
-      const originalError = error instanceof Error ? error : new Error(String(error));
-
-      this.logger.error('OpenAI image analysis failed');
-      this.logger.debug('OpenAI image analysis error', {
-        processingTime,
-        error: originalError.message,
-        hasStack: !!originalError.stack,
-      });
-
-      throw new VisionError(
-        `OpenAI vision analysis failed: ${originalError.message}`,
-        this.name,
-        originalError
-      );
-    }
   }
 }

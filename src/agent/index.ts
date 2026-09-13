@@ -42,7 +42,14 @@ import {
 import { getDatabase } from '../database';
 import { getProviderForModel } from '../llm/models';
 import { getLLM } from '../llm';
-import { LLMRequestOptions, Tool, ToolCall } from '../llm/types';
+import { LLMRequestOptions, LLMResponse, LLMMessage, Tool } from '../llm/types';
+import {
+  collectStreamResponse,
+  requiresNativeHistory,
+  toAssistantMessage,
+  withAgentConversation,
+} from '../llm/utils';
+import { DEFAULT_TASK_CONFIG } from '../task/defaults';
 import { Logger, getLogger } from '../logger';
 import * as fs from 'fs/promises';
 import path from 'path';
@@ -386,7 +393,23 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
   // ===== MEMORY MODULE METHODS (when memory enabled) =====
 
-  async addMemory(content: string, metadata?: MetadataObject): Promise<MemoryType> {
+  async addMemory(
+    content: string,
+    metadata?: MetadataObject,
+    continuation?: Pick<
+      ContextMessage,
+      'role' | 'tool_calls' | 'tool_call_id' | 'providerData' | 'inputContent'
+    >
+  ): Promise<MemoryType> {
+    const nativeFields = continuation
+      ? {
+          role: continuation.role,
+          tool_calls: continuation.tool_calls,
+          tool_call_id: continuation.tool_call_id,
+          providerData: continuation.providerData,
+          inputContent: continuation.inputContent,
+        }
+      : {};
     if (this.modules.memory) {
       // Extract context fields from metadata for proper DB storage
       const context: { graphId?: string; taskId?: string; sessionId?: string } = {};
@@ -419,6 +442,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
             source: 'memory', // Mark as already saved to memory to prevent duplicate saves
             memory_id: memory.id,
           },
+          ...nativeFields,
         };
         await this.modules.context.addMessage(contextMessage);
       }
@@ -431,10 +455,16 @@ export class Agent extends BaseAgent implements IAgentWithModules {
         content,
         timestamp: new Date(),
         metadata,
+        ...nativeFields,
       };
 
       // Enforce session messages size limit to prevent unbounded memory growth
       if (this.sessionMessages.length >= MAX_SESSION_MESSAGES) {
+        if (requiresNativeHistory([...this.sessionMessages, contextMessage])) {
+          throw new Error(
+            'Native conversation exceeds the session message limit; start a new conversation'
+          );
+        }
         // Remove oldest messages from the beginning (not from the middle)
         const removeCount = Math.floor(MAX_SESSION_MESSAGES / 2);
         this.sessionMessages = this.sessionMessages.slice(removeCount);
@@ -987,14 +1017,18 @@ export class Agent extends BaseAgent implements IAgentWithModules {
 
   async clearContext(options?: { syncWithMemory?: boolean }): Promise<void> {
     await this.getContextModule().clearContext(options);
+    this.sessionMessages = [];
   }
 
   exportContext(): string {
-    return this.getContextModule().exportContext();
+    return this.hasMemory()
+      ? this.getContextModule().exportContext()
+      : JSON.stringify({ messages: this.sessionMessages });
   }
 
   importContext(data: string): void {
     this.getContextModule().importContext(data);
+    if (!this.hasMemory()) this.sessionMessages = this.getContextModule().getMessages();
   }
 
   async generateContextSummary(): Promise<ContextSummary> {
@@ -1087,9 +1121,21 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       return;
     }
 
+    const currentContext = this.getContext();
+    if (requiresNativeHistory(currentContext)) {
+      if (currentContext.some((message) => message.metadata?.graphId !== graphId)) {
+        throw new Error(
+          'Native conversation belongs to another context; start a new conversation before switching graphs'
+        );
+      }
+      // Storage already restored the exact native transcript. Loading text-only
+      // memory rows here would drop signatures, tool blocks and multimodal input.
+      return;
+    }
+
     try {
-      // Clear existing context
-      await this.clearContext();
+      // Clear existing context without deleting the memories being loaded.
+      await this.clearContext({ syncWithMemory: false });
 
       let allMemories: MemoryType[] = [];
 
@@ -1613,6 +1659,10 @@ export class Agent extends BaseAgent implements IAgentWithModules {
    * Protected by operation lock to prevent concurrent state corruption
    */
   async ask(prompt: string, options?: AskOptions): Promise<string> {
+    return withAgentConversation(this, () => this.askInConversation(prompt, options));
+  }
+
+  private async askInConversation(prompt: string, options?: AskOptions): Promise<string> {
     const release = await this.acquireOperationLock();
 
     try {
@@ -1653,12 +1703,7 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       }
     }
     let enhancedPrompt = prompt;
-    const messages: Array<{
-      role: 'user' | 'assistant' | 'system' | 'tool';
-      content: string;
-      tool_call_id?: string;
-      tool_calls?: ToolCall[];
-    }> = [];
+    const messages: LLMMessage[] = [];
 
     // Add system prompt if available
     const systemPrompt = this.getSystemPrompt();
@@ -1765,7 +1810,10 @@ export class Agent extends BaseAgent implements IAgentWithModules {
     for (const contextMsg of contextMessages) {
       messages.push({
         role: contextMsg.role,
-        content: contextMsg.content,
+        content: contextMsg.inputContent ?? contextMsg.content,
+        tool_calls: contextMsg.tool_calls,
+        tool_call_id: contextMsg.tool_call_id,
+        providerData: contextMsg.providerData,
       });
     }
 
@@ -1919,368 +1967,278 @@ export class Agent extends BaseAgent implements IAgentWithModules {
       tools: tools.length > 0 ? tools : undefined,
     };
 
-    // Handle streaming vs non-streaming
-    let response: string;
-
-    if (options?.stream) {
-      // Stream response
-      let fullContent = '';
-
-      for await (const chunk of llm.generateStreamResponse(llmOptions)) {
-        fullContent += chunk.content;
-        // If there's a callback for streaming, call it
-        if (options.onChunk) {
-          options.onChunk(chunk.content);
-        } else {
-          // If no callback, just output to console
-          process.stdout.write(chunk.content);
-        }
+    // Both modes use the same native tool loop and preserve the entire assistant turn.
+    const transcriptStart = messages.length;
+    const generateNext = (): Promise<LLMResponse> =>
+      options?.stream
+        ? collectStreamResponse(
+            llm.generateStreamResponse({ ...llmOptions, messages }),
+            llmOptions.model,
+            (content) => {
+              if (options.onChunk) options.onChunk(content);
+              else process.stdout.write(content);
+            }
+          )
+        : llm.generateResponse({ ...llmOptions, messages });
+    let llmResponse = await generateNext();
+    let toolIteration = 0;
+    while (llmResponse.toolCalls?.length) {
+      if (
+        toolIteration++ >= DEFAULT_TASK_CONFIG.maxToolIterations ||
+        llmResponse.toolCalls.length > DEFAULT_TASK_CONFIG.maxToolCalls
+      ) {
+        throw new Error('Tool execution limit reached before the model completed');
       }
-
-      if (!options.onChunk) {
-        process.stdout.write('\n'); // New line after streaming
-      }
-
-      response = fullContent;
-    } else {
-      // Single LLM call with tool handling
-      const llmResponse = await llm.generateResponse(llmOptions);
-
-      // Handle tool calls if present
-      if (llmResponse.toolCalls && llmResponse.toolCalls.length > 0) {
-        this.logger.debug('Processing tool calls', {
-          toolCallCount: llmResponse.toolCalls.length,
-          toolNames: llmResponse.toolCalls.map((tc) => tc.function.name),
-        });
-
-        // Add assistant message with tool calls
-        // IMPORTANT: OpenAI requires content to be a string (can be empty string or null) when tool_calls present
-        messages.push({
-          role: 'assistant',
-          content: llmResponse.content || '',
-          tool_calls: llmResponse.toolCalls,
-        });
-
-        // Execute each tool call
-        for (const toolCall of llmResponse.toolCalls) {
-          const toolName = toolCall.function?.name;
-          if (!toolName) {
-            this.logger.warn('Skipping tool call with missing function name', {
-              toolCallId: toolCall.id,
-            });
-            continue;
-          }
-
-          try {
-            let toolResult: string;
-
-            if (toolName.startsWith('mcp_')) {
-              // Handle MCP tool call
-              const mcpToolName = toolName.substring(4); // Remove 'mcp_' prefix
-
-              // Ensure arguments are properly formatted for MCP with type-safe parsing
-              let mcpArgs: Record<string, string | number | boolean | object | null>;
-              if (typeof toolCall.function.arguments === 'string') {
-                try {
-                  const parsed: unknown = JSON.parse(toolCall.function.arguments);
-                  // Validate parsed result is an object (not null, array, or primitive)
-                  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-                    throw new Error('MCP tool arguments must be a JSON object');
-                  }
-                  mcpArgs = parsed as Record<string, string | number | boolean | object | null>;
-                } catch (parseError) {
-                  const parseErr =
-                    parseError instanceof Error ? parseError : new Error(String(parseError));
-                  this.logger.error('Failed to parse MCP tool arguments', parseErr);
-                  throw new Error(`Invalid JSON in MCP tool arguments: ${parseErr.message}`);
-                }
-              } else if (
-                toolCall.function.arguments &&
-                typeof toolCall.function.arguments === 'object'
-              ) {
-                mcpArgs = toolCall.function.arguments as Record<
-                  string,
-                  string | number | boolean | object | null
-                >;
-              } else {
-                // Default to empty object if no arguments provided
-                mcpArgs = {};
-              }
-
-              if (this.modules.mcp) {
-                const mcpResult = await this.modules.mcp.callMCPTool(
-                  mcpToolName,
-                  mcpArgs as Record<string, import('../mcp/types').MCPValue>
-                );
-                toolResult = mcpResult.content.map((c) => c.text || '').join('\n');
-              } else {
-                toolResult = 'MCP module not available';
-              }
-            } else if (toolName.startsWith('plugin_')) {
-              // Handle plugin tool call
-              const pluginToolName = toolName.substring(7); // Remove 'plugin_' prefix
-
-              // Ensure arguments are properly formatted for plugin tools with type-safe parsing
-              let pluginArgs: Record<string, string | number | boolean | object | null>;
-              if (typeof toolCall.function.arguments === 'string') {
-                try {
-                  const parsed: unknown = JSON.parse(toolCall.function.arguments);
-                  // Validate parsed result is an object (not null, array, or primitive)
-                  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-                    throw new Error('Plugin tool arguments must be a JSON object');
-                  }
-                  pluginArgs = parsed as Record<string, string | number | boolean | object | null>;
-                } catch (parseError) {
-                  const parseErr =
-                    parseError instanceof Error ? parseError : new Error(String(parseError));
-                  this.logger.error('Failed to parse plugin tool arguments', parseErr);
-                  throw new Error(`Invalid JSON in plugin tool arguments: ${parseErr.message}`);
-                }
-              } else if (
-                toolCall.function.arguments &&
-                typeof toolCall.function.arguments === 'object'
-              ) {
-                pluginArgs = toolCall.function.arguments as Record<
-                  string,
-                  string | number | boolean | object | null
-                >;
-              } else {
-                // Default to empty object if no arguments provided
-                pluginArgs = {};
-              }
-
-              if (this.modules.plugin) {
-                const pluginResult = await this.modules.plugin.executeTool(
-                  {
-                    id: toolCall.id,
-                    name: pluginToolName,
-                    parameters: pluginArgs as Record<string, ToolParameterValue>,
-                  },
-                  { agentId: this.id, agent: this }
-                );
-
-                // Log metadata if present (for debugging and observability)
-                if (pluginResult.result.metadata) {
-                  this.logger.debug('Plugin tool returned metadata', {
-                    toolName: pluginToolName,
-                    toolCallId: toolCall.id,
-                    metadata: pluginResult.result.metadata,
-                  });
-                }
-
-                // Build tool result with optional metadata inclusion
-                if (pluginResult.result.success) {
-                  const resultData =
-                    typeof pluginResult.result.data === 'string'
-                      ? pluginResult.result.data
-                      : JSON.stringify(pluginResult.result.data);
-
-                  // Include metadata in response if present (allows LLM to see relevant context)
-                  if (
-                    pluginResult.result.metadata &&
-                    Object.keys(pluginResult.result.metadata).length > 0
-                  ) {
-                    toolResult = JSON.stringify({
-                      result: resultData,
-                      metadata: pluginResult.result.metadata,
-                    });
-                  } else {
-                    toolResult = resultData;
-                  }
-                } else {
-                  toolResult = `Error: ${pluginResult.result.error || 'Unknown error'}`;
-                }
-              } else {
-                toolResult = `Plugin module not available`;
-              }
-            } else {
-              // Handle other tool types (future implementations)
-              toolResult = `Tool ${toolName} not implemented yet`;
-            }
-
-            // CRITICAL: Tool result content cannot be empty for OpenAI API
-            if (!toolResult || toolResult.trim() === '') {
-              this.logger.warn('Empty tool result detected', {
-                toolName,
-                toolCallId: toolCall.id,
-                resultType: typeof toolResult,
-                resultValue: toolResult,
-              });
-              toolResult = 'Tool execution completed but returned no data.';
-            }
-
-            this.logger.debug('Tool result received', {
-              toolName,
-              toolCallId: toolCall.id,
-              resultLength: toolResult.length,
-              resultPreview: toolResult.slice(0, 200),
-            });
-
-            // Add tool result to messages
-            messages.push({
-              role: 'tool',
-              content: toolResult,
-              tool_call_id: toolCall.id,
-            });
-
-            this.logger.debug('Tool call executed', {
-              toolName,
-              toolCallId: toolCall.id,
-              resultLength: toolResult.length,
-            });
-          } catch (error) {
-            // Normalize tool error using ToolError class
-            const originalError = error instanceof Error ? error : new Error(String(error));
-            const toolType = toolName.startsWith('mcp_')
-              ? 'mcp'
-              : toolName.startsWith('plugin_')
-                ? 'plugin'
-                : 'unknown';
-            const actualToolName =
-              toolType === 'mcp'
-                ? toolName.substring(4)
-                : toolType === 'plugin'
-                  ? toolName.substring(7)
-                  : toolName;
-
-            // Determine error type based on error message
-            let errorType: 'not_found' | 'validation' | 'execution' | 'timeout' | 'unknown' =
-              'execution';
-            if (
-              originalError.message.includes('not found') ||
-              originalError.message.includes('not available')
-            ) {
-              errorType = 'not_found';
-            } else if (
-              originalError.message.includes('Invalid') ||
-              originalError.message.includes('validation')
-            ) {
-              errorType = 'validation';
-            } else if (
-              originalError.message.includes('timeout') ||
-              originalError.message.includes('timed out')
-            ) {
-              errorType = 'timeout';
-            }
-
-            // Determine if error is recoverable (LLM can try alternative approach)
-            const recoverable = errorType !== 'not_found';
-
-            const toolError = new ToolError(
-              `Tool '${actualToolName}' (${toolType}) failed: ${originalError.message}`,
-              actualToolName,
-              toolType,
-              errorType,
-              recoverable,
-              originalError
-            );
-
-            this.logger.error(`Tool call failed: ${toolName}`, toolError, {
-              toolType,
-              errorType,
-              recoverable,
-              toolCallId: toolCall.id,
-            });
-
-            // Add normalized error result to messages (LLM can use this to decide next action)
-            const errorResult = toolError.toToolResult();
-            messages.push({
-              role: 'tool',
-              content: JSON.stringify(errorResult),
-              tool_call_id: toolCall.id,
-            });
-          }
-        }
-
-        // Get final response from LLM with tool results
-        const toolMessages = messages.filter((m) => m.role === 'tool');
-        if (toolMessages.length > 0) {
-          const lastToolContent = toolMessages[toolMessages.length - 1]?.content || '';
-          this.logger.info(
-            `Sending tool results to LLM (${lastToolContent.length} chars, ${toolMessages.length} tool results)`
-          );
-          this.logger.debug('Tool result content preview', {
-            preview: lastToolContent.slice(0, 500),
-            totalLength: lastToolContent.length,
-            toolCount: toolMessages.length,
+      messages.push(toAssistantMessage(llmResponse));
+      // Execute each tool call
+      for (const toolCall of llmResponse.toolCalls) {
+        const toolName = toolCall.function?.name;
+        if (!toolName) {
+          this.logger.warn('Skipping tool call with missing function name', {
+            toolCallId: toolCall.id,
           });
+          continue;
         }
-        // Log full message structure for debugging OpenAI 400 errors
-        const messageStructure = messages.map((m) => ({
-          role: m.role,
-          contentPreview: typeof m.content === 'string' ? m.content.slice(0, 100) : 'non-string',
-          contentLength: typeof m.content === 'string' ? m.content.length : 0,
-          hasToolCalls: 'tool_calls' in m,
-          toolCallId: 'tool_call_id' in m ? m.tool_call_id : undefined,
-          toolCallsCount:
-            'tool_calls' in m && Array.isArray(m.tool_calls) ? m.tool_calls.length : 0,
-        }));
-
-        this.logger.debug('Sending tool results to LLM for final response', {
-          messageCount: messages.length,
-          toolMessageCount: toolMessages.length,
-          lastToolContentLength: toolMessages[toolMessages.length - 1]?.content.length || 0,
-          lastToolPreview: toolMessages[toolMessages.length - 1]?.content.slice(0, 100) || '',
-          messageStructure: JSON.stringify(messageStructure, null, 2),
-        });
-
-        const finalLlmOptions: LLMRequestOptions = {
-          ...llmOptions,
-          messages,
-          tools: undefined, // Don't include tools in follow-up call
-        };
 
         try {
-          const finalResponse = await llm.generateResponse(finalLlmOptions);
-          response = finalResponse.content;
+          let toolResult: string;
 
-          this.logger.debug('Final response generated after tool calls', {
-            responseLength: response.length,
-          });
-        } catch (finalResponseError) {
-          // Log the detailed error but return a friendly message to the user
-          this.logger.error(
-            'Failed to generate final response after tool execution',
-            finalResponseError instanceof Error
-              ? finalResponseError
-              : new Error(String(finalResponseError))
-          );
-          this.logger.debug('Tool execution was successful, but LLM response failed', {
-            errorMessage:
-              finalResponseError instanceof Error
-                ? finalResponseError.message
-                : String(finalResponseError),
-            toolResultsCount: toolMessages.length,
-            messageCount: messages.length,
-          });
+          if (toolName.startsWith('mcp_')) {
+            // Handle MCP tool call
+            const mcpToolName = toolName.substring(4); // Remove 'mcp_' prefix
 
-          // Create a user-friendly response based on tool results
-          const toolResultsSummary = toolMessages
-            .map((m, i) => {
+            // Ensure arguments are properly formatted for MCP with type-safe parsing
+            let mcpArgs: Record<string, string | number | boolean | object | null>;
+            if (typeof toolCall.function.arguments === 'string') {
               try {
-                const result = JSON.parse(m.content);
-                if (result.success === true) {
-                  return `✓ Tool ${i + 1} completed successfully`;
+                const parsed: unknown = JSON.parse(toolCall.function.arguments);
+                // Validate parsed result is an object (not null, array, or primitive)
+                if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                  throw new Error('MCP tool arguments must be a JSON object');
                 }
-              } catch {
-                // Not JSON, treat as plain text
+                mcpArgs = parsed as Record<string, string | number | boolean | object | null>;
+              } catch (parseError) {
+                const parseErr =
+                  parseError instanceof Error ? parseError : new Error(String(parseError));
+                this.logger.error('Failed to parse MCP tool arguments', parseErr);
+                throw new Error(`Invalid JSON in MCP tool arguments: ${parseErr.message}`);
               }
-              return null;
-            })
-            .filter(Boolean)
-            .join('\n');
+            } else if (
+              toolCall.function.arguments &&
+              typeof toolCall.function.arguments === 'object'
+            ) {
+              mcpArgs = toolCall.function.arguments as Record<
+                string,
+                string | number | boolean | object | null
+              >;
+            } else {
+              // Default to empty object if no arguments provided
+              mcpArgs = {};
+            }
 
-          response = toolResultsSummary
-            ? `I've completed the requested operations:\n\n${toolResultsSummary}\n\nHowever, I encountered a temporary issue generating a detailed response. The operations were successful though!`
-            : `I've processed your request and the operations completed successfully. However, I encountered a temporary issue generating a detailed response. Please try asking me to explain the results.`;
+            if (this.modules.mcp) {
+              const mcpResult = await this.modules.mcp.callMCPTool(
+                mcpToolName,
+                mcpArgs as Record<string, import('../mcp/types').MCPValue>
+              );
+              toolResult = mcpResult.content.map((c) => c.text || '').join('\n');
+            } else {
+              toolResult = 'MCP module not available';
+            }
+          } else if (toolName.startsWith('plugin_')) {
+            // Handle plugin tool call
+            const pluginToolName = toolName.substring(7); // Remove 'plugin_' prefix
+
+            // Ensure arguments are properly formatted for plugin tools with type-safe parsing
+            let pluginArgs: Record<string, string | number | boolean | object | null>;
+            if (typeof toolCall.function.arguments === 'string') {
+              try {
+                const parsed: unknown = JSON.parse(toolCall.function.arguments);
+                // Validate parsed result is an object (not null, array, or primitive)
+                if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                  throw new Error('Plugin tool arguments must be a JSON object');
+                }
+                pluginArgs = parsed as Record<string, string | number | boolean | object | null>;
+              } catch (parseError) {
+                const parseErr =
+                  parseError instanceof Error ? parseError : new Error(String(parseError));
+                this.logger.error('Failed to parse plugin tool arguments', parseErr);
+                throw new Error(`Invalid JSON in plugin tool arguments: ${parseErr.message}`);
+              }
+            } else if (
+              toolCall.function.arguments &&
+              typeof toolCall.function.arguments === 'object'
+            ) {
+              pluginArgs = toolCall.function.arguments as Record<
+                string,
+                string | number | boolean | object | null
+              >;
+            } else {
+              // Default to empty object if no arguments provided
+              pluginArgs = {};
+            }
+
+            if (this.modules.plugin) {
+              const pluginResult = await this.modules.plugin.executeTool(
+                {
+                  id: toolCall.id,
+                  name: pluginToolName,
+                  parameters: pluginArgs as Record<string, ToolParameterValue>,
+                },
+                { agentId: this.id, agent: this }
+              );
+
+              // Log metadata if present (for debugging and observability)
+              if (pluginResult.result.metadata) {
+                this.logger.debug('Plugin tool returned metadata', {
+                  toolName: pluginToolName,
+                  toolCallId: toolCall.id,
+                  metadata: pluginResult.result.metadata,
+                });
+              }
+
+              // Build tool result with optional metadata inclusion
+              if (pluginResult.result.success) {
+                const resultData =
+                  typeof pluginResult.result.data === 'string'
+                    ? pluginResult.result.data
+                    : JSON.stringify(pluginResult.result.data);
+
+                // Include metadata in response if present (allows LLM to see relevant context)
+                if (
+                  pluginResult.result.metadata &&
+                  Object.keys(pluginResult.result.metadata).length > 0
+                ) {
+                  toolResult = JSON.stringify({
+                    result: resultData,
+                    metadata: pluginResult.result.metadata,
+                  });
+                } else {
+                  toolResult = resultData;
+                }
+              } else {
+                toolResult = `Error: ${pluginResult.result.error || 'Unknown error'}`;
+              }
+            } else {
+              toolResult = `Plugin module not available`;
+            }
+          } else {
+            // Handle other tool types (future implementations)
+            toolResult = `Tool ${toolName} not implemented yet`;
+          }
+
+          // CRITICAL: Tool result content cannot be empty for OpenAI API
+          if (!toolResult || toolResult.trim() === '') {
+            this.logger.warn('Empty tool result detected', {
+              toolName,
+              toolCallId: toolCall.id,
+              resultType: typeof toolResult,
+              resultValue: toolResult,
+            });
+            toolResult = 'Tool execution completed but returned no data.';
+          }
+
+          this.logger.debug('Tool result received', {
+            toolName,
+            toolCallId: toolCall.id,
+            resultLength: toolResult.length,
+            resultPreview: toolResult.slice(0, 200),
+          });
+
+          // Add tool result to messages
+          messages.push({
+            role: 'tool',
+            content: toolResult,
+            tool_call_id: toolCall.id,
+          });
+
+          this.logger.debug('Tool call executed', {
+            toolName,
+            toolCallId: toolCall.id,
+            resultLength: toolResult.length,
+          });
+        } catch (error) {
+          // Normalize tool error using ToolError class
+          const originalError = error instanceof Error ? error : new Error(String(error));
+          const toolType = toolName.startsWith('mcp_')
+            ? 'mcp'
+            : toolName.startsWith('plugin_')
+              ? 'plugin'
+              : 'unknown';
+          const actualToolName =
+            toolType === 'mcp'
+              ? toolName.substring(4)
+              : toolType === 'plugin'
+                ? toolName.substring(7)
+                : toolName;
+
+          // Determine error type based on error message
+          let errorType: 'not_found' | 'validation' | 'execution' | 'timeout' | 'unknown' =
+            'execution';
+          if (
+            originalError.message.includes('not found') ||
+            originalError.message.includes('not available')
+          ) {
+            errorType = 'not_found';
+          } else if (
+            originalError.message.includes('Invalid') ||
+            originalError.message.includes('validation')
+          ) {
+            errorType = 'validation';
+          } else if (
+            originalError.message.includes('timeout') ||
+            originalError.message.includes('timed out')
+          ) {
+            errorType = 'timeout';
+          }
+
+          // Determine if error is recoverable (LLM can try alternative approach)
+          const recoverable = errorType !== 'not_found';
+
+          const toolError = new ToolError(
+            `Tool '${actualToolName}' (${toolType}) failed: ${originalError.message}`,
+            actualToolName,
+            toolType,
+            errorType,
+            recoverable,
+            originalError
+          );
+
+          this.logger.error(`Tool call failed: ${toolName}`, toolError, {
+            toolType,
+            errorType,
+            recoverable,
+            toolCallId: toolCall.id,
+          });
+
+          // Add normalized error result to messages (LLM can use this to decide next action)
+          const errorResult = toolError.toToolResult();
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify(errorResult),
+            tool_call_id: toolCall.id,
+          });
         }
-      } else {
-        response = llmResponse.content;
       }
-    }
 
-    // Add response to conversation (memory/context)
-    await this.addMemory(response, { role: 'assistant' });
+      llmResponse = await generateNext();
+    }
+    const response = llmResponse.content;
+    messages.push(toAssistantMessage(llmResponse));
+    if (options?.stream && !options.onChunk) process.stdout.write('\n');
+
+    // Persist tool-result pairs and opaque provider state, not just the final text.
+    for (const message of messages.slice(transcriptStart)) {
+      const content =
+        typeof message.content === 'string'
+          ? message.content
+          : message.content.map((part) => part.text ?? '').join('');
+      await this.addMemory(
+        content,
+        { role: message.role },
+        { ...message, inputContent: Array.isArray(message.content) ? message.content : undefined }
+      );
+    }
 
     // Save context to memory if enabled - propagate errors for visibility
     try {

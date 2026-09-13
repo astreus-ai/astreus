@@ -96,6 +96,72 @@ export async function getFileSizeAsync(filePath: string): Promise<number> {
   }
 }
 
+type DecryptedFields<T> = { [K in keyof T]: T[K] | string | null };
+
+/** Normalize driver-decoded JSON and SQLite JSON text without exposing data in errors. */
+export function parseStoredJson(value: unknown, fieldName: string): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new Error(`Invalid JSON in field ${fieldName}`);
+  }
+}
+
+export function validateContextJson(value: unknown): void {
+  if (
+    value !== null &&
+    (!Array.isArray(value) ||
+      value.some(
+        (message: unknown) =>
+          !message ||
+          typeof message !== 'object' ||
+          Array.isArray(message) ||
+          !('role' in message) ||
+          typeof message.role !== 'string' ||
+          !['system', 'user', 'assistant', 'tool'].includes(message.role) ||
+          !('content' in message) ||
+          typeof message.content !== 'string'
+      ))
+  ) {
+    throw new Error('Invalid contexts.contextData: expected an array of message objects or null');
+  }
+}
+
+function validateJsonValue(value: unknown, fieldName: string): void {
+  if (fieldName === 'contexts.contextData') validateContextJson(value);
+  if (JSON.stringify(value) === undefined) throw new Error(`Invalid JSON in field ${fieldName}`);
+}
+
+/** Both JSON columns use the same authenticated envelope. Text fields remain text. */
+export async function decryptJsonField(value: unknown, fieldName: string): Promise<string | null> {
+  let parsed = parseStoredJson(value, fieldName);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && '_encrypted' in parsed) {
+    const encryption = getEncryptionService();
+    if (
+      Object.keys(parsed).length !== 1 ||
+      typeof parsed._encrypted !== 'string' ||
+      !encryption.isEncrypted(parsed._encrypted)
+    ) {
+      throw new Error(`Invalid encrypted JSON envelope in field ${fieldName}`);
+    }
+    if (!encryption.isEnabled()) {
+      throw new Error(`Encryption must be enabled to decrypt field ${fieldName}`);
+    }
+    parsed = parseStoredJson(await encryption.decrypt(parsed._encrypted, fieldName), fieldName);
+  }
+  validateJsonValue(parsed, fieldName);
+  return parsed === null ? null : JSON.stringify(parsed);
+}
+
+async function encryptJsonField(value: unknown, fieldName: string): Promise<string | null> {
+  const plaintext = await decryptJsonField(value, fieldName);
+  if (plaintext === null) return null;
+  const encryption = getEncryptionService();
+  if (!encryption.isEnabled()) return plaintext;
+  return JSON.stringify({ _encrypted: await encryption.encrypt(plaintext, fieldName) });
+}
+
 /**
  * Centralized encryption utility for database fields
  * Encrypts sensitive fields based on centralized configuration
@@ -124,12 +190,6 @@ export async function encryptSensitiveFields(
 
   const encryption = getEncryptionService();
 
-  if (!encryption.isEnabled()) {
-    const logger = getLogger();
-    logger.debug(`Skipping encryption for ${tableName} (disabled)`);
-    return data;
-  }
-
   const encrypted = { ...data };
 
   // Get sensitive fields from centralized configuration
@@ -140,20 +200,8 @@ export async function encryptSensitiveFields(
     const fieldValue = encrypted[field];
     if (fieldValue !== undefined && fieldValue !== null) {
       try {
-        if (field === 'metadata') {
-          // Handle JSON metadata fields - wrap encrypted string in JSON
-          const metadataStr =
-            typeof fieldValue === 'string' ? fieldValue : JSON.stringify(fieldValue);
-          const encryptedStr = await encryption.encrypt(
-            metadataStr as string,
-            `${tableName}.${field}`
-          );
-          // Wrap in JSON object for JSONB compatibility
-          encrypted[field] = JSON.stringify({ _encrypted: encryptedStr });
-          encryptedFields.push(field);
-        } else if (field === 'contextData' && typeof fieldValue === 'string') {
-          // Handle JSON contextData field (special case for contexts table)
-          encrypted[field] = await encryption.encryptJSON(fieldValue, `${tableName}.${field}`);
+        if (field === 'metadata' || field === 'contextData') {
+          encrypted[field] = await encryptJsonField(fieldValue, `${tableName}.${field}`);
           encryptedFields.push(field);
         } else {
           // Handle string fields
@@ -170,7 +218,7 @@ export async function encryptSensitiveFields(
     }
   }
 
-  if (encryptedFields.length > 0) {
+  if (encryption.isEnabled() && encryptedFields.length > 0) {
     const logger = getLogger();
     logger.debug(`Encrypted ${encryptedFields.length} field(s) in ${tableName}`, {
       fields: encryptedFields,
@@ -184,10 +232,10 @@ export async function encryptSensitiveFields(
  * Centralized decryption utility for database fields
  * Decrypts sensitive fields based on centralized configuration
  */
-export async function decryptSensitiveFields(
-  data: Record<string, string | number | boolean | null | undefined | Date>,
+export async function decryptSensitiveFields<T extends Record<string, unknown>>(
+  data: T,
   tableName: string
-): Promise<Record<string, string | number | boolean | null | undefined | Date>> {
+): Promise<DecryptedFields<T>> {
   // Input validation
   if (typeof tableName !== 'string' || tableName.trim().length === 0) {
     throw new Error('decryptSensitiveFields: tableName must be a non-empty string');
@@ -208,11 +256,7 @@ export async function decryptSensitiveFields(
 
   const encryption = getEncryptionService();
 
-  if (!encryption.isEnabled()) {
-    return data;
-  }
-
-  const decrypted = { ...data };
+  const decrypted: Record<string, unknown> = { ...data };
 
   // Get sensitive fields from centralized configuration
   const fieldsToDecrypt = getSensitiveFields(tableName);
@@ -221,77 +265,11 @@ export async function decryptSensitiveFields(
     const fieldValue = decrypted[field];
     if (fieldValue !== undefined && fieldValue !== null) {
       try {
-        if (field === 'metadata') {
-          // Handle JSON metadata fields - check for wrapped encrypted format
-          let parsedMetadata: unknown;
-
-          // Try to parse as JSON
-          if (typeof fieldValue === 'string') {
-            try {
-              parsedMetadata = JSON.parse(fieldValue);
-            } catch {
-              parsedMetadata = fieldValue;
-            }
-          } else {
-            // fieldValue could be an object, number, boolean, or Date
-            parsedMetadata = fieldValue;
-          }
-
-          // Check if it's our encrypted wrapper format
-          if (
-            parsedMetadata !== null &&
-            parsedMetadata !== undefined &&
-            typeof parsedMetadata === 'object' &&
-            !Array.isArray(parsedMetadata) &&
-            '_encrypted' in parsedMetadata
-          ) {
-            const encryptedWrapper = parsedMetadata as { _encrypted: unknown };
-            const encryptedStr = String(encryptedWrapper._encrypted);
-            const decryptedStr = await encryption.decrypt(encryptedStr, `${tableName}.${field}`);
-            // Parse the decrypted JSON string
-            try {
-              const parsedResult = JSON.parse(decryptedStr);
-              // Ensure the result is a valid field type
-              if (
-                typeof parsedResult === 'string' ||
-                typeof parsedResult === 'number' ||
-                typeof parsedResult === 'boolean' ||
-                parsedResult === null
-              ) {
-                decrypted[field] = parsedResult;
-              } else {
-                // For objects/arrays, stringify back
-                decrypted[field] = JSON.stringify(parsedResult);
-              }
-            } catch {
-              decrypted[field] = decryptedStr;
-            }
-          } else {
-            // Not encrypted or old format - convert to valid field type
-            if (
-              typeof parsedMetadata === 'string' ||
-              typeof parsedMetadata === 'number' ||
-              typeof parsedMetadata === 'boolean' ||
-              parsedMetadata === null ||
-              parsedMetadata === undefined ||
-              parsedMetadata instanceof Date
-            ) {
-              decrypted[field] = parsedMetadata;
-            } else {
-              // For objects/arrays, stringify
-              decrypted[field] = JSON.stringify(parsedMetadata);
-            }
-          }
-        } else if (field === 'contextData') {
-          // Handle JSON contextData field (special case for contexts table)
-          const decryptedData = await encryption.decryptJSON(
-            String(fieldValue),
-            `${tableName}.${field}`
-          );
-          decrypted[field] =
-            typeof decryptedData === 'string' ? decryptedData : JSON.stringify(decryptedData);
-        } else {
-          // Handle string fields
+        if (field === 'metadata' || field === 'contextData') {
+          const json = await decryptJsonField(fieldValue, `${tableName}.${field}`);
+          // Validate either mode, but preserve plaintext driver types for existing callers.
+          if (encryption.isEnabled()) decrypted[field] = json;
+        } else if (encryption.isEnabled()) {
           decrypted[field] = await encryption.decrypt(String(fieldValue), `${tableName}.${field}`);
         }
       } catch (error) {
@@ -308,5 +286,5 @@ export async function decryptSensitiveFields(
     }
   }
 
-  return decrypted;
+  return decrypted as DecryptedFields<T>;
 }
