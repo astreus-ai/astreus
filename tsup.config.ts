@@ -1,7 +1,10 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: {
+    index: 'src/index.ts',
+    'llm/models': 'src/llm/models.ts',
+  },
   format: ['cjs', 'esm'],
   outExtension: ({ format }) => ({
     js: format === 'esm' ? '.mjs' : '.cjs',

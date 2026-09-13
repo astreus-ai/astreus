@@ -8,6 +8,7 @@ import { DEFAULT_CONTEXT_OPTIONS } from './defaults';
 import { getCompressionStrategy } from './strategies';
 import { Logger } from '../logger/types';
 import { getLogger } from '../logger';
+import { requiresNativeHistory } from '../llm/utils';
 
 export class ContextCompressor {
   private logger: Logger;
@@ -264,6 +265,17 @@ export class ContextCompressor {
           compressedMessages: messages,
           tokensReduced: 0,
           compressionRatio: 0,
+        };
+      }
+
+      if (requiresNativeHistory(messages)) {
+        return {
+          success: false,
+          compressedMessages: messages,
+          tokensReduced: 0,
+          compressionRatio: 0,
+          error:
+            'Native tool/thinking history cannot be summarized without invalidating continuation',
         };
       }
 

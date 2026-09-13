@@ -24,6 +24,8 @@ import {
 } from './types';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
+import type { LLMMessage } from '../llm/types';
+import { requiresNativeHistory } from '../llm/utils';
 
 interface TaskExecutionResult {
   type: 'task';
@@ -36,6 +38,7 @@ interface TaskExecutionResult {
     totalTokens: number;
     cost?: number;
   };
+  messages?: LLMMessage[];
   // Sub-agent execution metadata
   subAgentUsed?: boolean;
   delegationStrategy?: 'auto' | 'manual' | 'sequential';
@@ -671,6 +674,8 @@ export class Graph implements IAgentModule {
               if (shouldStreamLastNode && node.id === lastNode.id) {
                 this.executeNode(node, true, options?.onChunk, options?.onToolCall) // Pass stream=true and onChunk for last node
                   .then(async (result) => {
+                    // Complete context persistence before dependants can start.
+                    await this.saveResponseToMemory(node, result);
                     const timeoutId = this.activeNodeTimeouts.get(node.id);
                     if (timeoutId) {
                       clearTimeout(timeoutId);
@@ -680,7 +685,8 @@ export class Graph implements IAgentModule {
                     node.status = 'completed';
                     node.result = JSON.stringify(result);
 
-                    // Track usage for task nodes
+                    // Only this execution's usage belongs to this node result.
+                    node.usage = undefined;
                     if (result.type === 'task' && result.usage) {
                       node.usage = {
                         promptTokens: result.usage.promptTokens,
@@ -706,17 +712,6 @@ export class Graph implements IAgentModule {
                       usage: node.usage,
                       timestamp: new Date(),
                     });
-
-                    // Save assistant response to memory (wrapped to prevent unhandled rejection)
-                    try {
-                      await this.saveResponseToMemory(node, result);
-                    } catch (memoryError) {
-                      this.log(
-                        'warn',
-                        `Failed to save response to memory for node ${node.name}: ${memoryError instanceof Error ? memoryError.message : 'Unknown error'}`,
-                        node.id
-                      );
-                    }
                   })
                   .catch(async (error) => {
                     const timeoutId = this.activeNodeTimeouts.get(node.id);
@@ -754,6 +749,8 @@ export class Graph implements IAgentModule {
               } else {
                 this.executeNode(node, false, options?.onChunk, options?.onToolCall)
                   .then(async (result) => {
+                    // Complete context persistence before dependants can start.
+                    await this.saveResponseToMemory(node, result);
                     const timeoutId = this.activeNodeTimeouts.get(node.id);
                     if (timeoutId) {
                       clearTimeout(timeoutId);
@@ -763,7 +760,8 @@ export class Graph implements IAgentModule {
                     node.status = 'completed';
                     node.result = JSON.stringify(result);
 
-                    // Track usage for task nodes
+                    // Only this execution's usage belongs to this node result.
+                    node.usage = undefined;
                     if (result.type === 'task' && result.usage) {
                       node.usage = {
                         promptTokens: result.usage.promptTokens,
@@ -789,17 +787,6 @@ export class Graph implements IAgentModule {
                       usage: node.usage,
                       timestamp: new Date(),
                     });
-
-                    // Save assistant response to memory (wrapped to prevent unhandled rejection)
-                    try {
-                      await this.saveResponseToMemory(node, result);
-                    } catch (memoryError) {
-                      this.log(
-                        'warn',
-                        `Failed to save response to memory for node ${node.name}: ${memoryError instanceof Error ? memoryError.message : 'Unknown error'}`,
-                        node.id
-                      );
-                    }
                   })
                   .catch(async (error) => {
                     const timeoutId = this.activeNodeTimeouts.get(node.id);
@@ -949,7 +936,7 @@ export class Graph implements IAgentModule {
   }
 
   /**
-   * Aggregate usage statistics from all completed nodes
+   * Aggregate known usage without presenting an incomplete task cost as a total.
    */
   private aggregateUsage(): GraphUsage {
     const nodeUsages: Record<string, NodeUsage> = {};
@@ -958,16 +945,36 @@ export class Graph implements IAgentModule {
     let totalTokens = 0;
     let totalContextTokens = 0;
     let totalCost = 0;
+    let allCostsKnown = true;
     const modelsUsed = new Set<string>();
 
     for (const node of this.graph.nodes) {
+      const executedTask =
+        node.type === 'task' &&
+        (node.status === 'completed' ||
+          node.status === 'failed' ||
+          node.status === 'running' ||
+          node.taskId !== undefined ||
+          node.usage !== undefined);
+      if (executedTask) {
+        const cost = node.usage?.cost;
+        if (
+          node.status === 'running' ||
+          typeof cost !== 'number' ||
+          !Number.isFinite(cost) ||
+          cost < 0
+        ) {
+          allCostsKnown = false;
+        } else {
+          totalCost += cost;
+        }
+      }
       if (node.usage) {
         nodeUsages[node.id] = node.usage;
         totalPromptTokens += node.usage.promptTokens;
         totalCompletionTokens += node.usage.completionTokens;
         totalTokens += node.usage.totalTokens;
         totalContextTokens += node.usage.contextTokens ?? 0;
-        totalCost += node.usage.cost ?? 0;
         if (node.usage.model) {
           modelsUsed.add(node.usage.model);
         }
@@ -979,7 +986,7 @@ export class Graph implements IAgentModule {
       totalCompletionTokens,
       totalTokens,
       totalContextTokens,
-      totalCost,
+      ...(allCostsKnown && Number.isFinite(totalCost) ? { totalCost } : {}),
       nodeUsages,
       modelsUsed: Array.from(modelsUsed),
     };
@@ -1050,6 +1057,7 @@ export class Graph implements IAgentModule {
   ): Promise<NodeExecutionResult> {
     this.log('info', `Executing node ${node.name}`, node.id);
     node.status = 'running';
+    node.usage = undefined;
     node.updatedAt = new Date();
 
     // Notify state change: node started
@@ -1092,50 +1100,8 @@ export class Graph implements IAgentModule {
         );
       }
 
-      // Load conversation history from Memory if agent has memory enabled
-      if (this.graph.id && this.agent && this.agent.loadGraphContext) {
-        try {
-          // Use isolated=true for graph-only memories (no general agent memories)
-          await this.agent.loadGraphContext(this.graph.id, 100, true);
-          this.log(
-            'debug',
-            `Loaded isolated conversation history for graph ${this.graph.id}`,
-            node.id
-          );
-
-          // Monitor context size and warn if approaching limits
-          this.checkContextSize(node);
-        } catch (error) {
-          this.log(
-            'warn',
-            `Failed to load conversation history: ${error instanceof Error ? error.message : String(error)}`,
-            node.id
-          );
-        }
-      }
-
-      // Save user prompt to memory before execution (this also adds to context)
-      if (this.graph.id && node.prompt && this.agent && this.agent.addMemory) {
-        try {
-          const metadata: Record<string, string | boolean | number> = {
-            type: 'user_message',
-            role: 'user',
-            graphId: this.graph.id,
-            graphNodeId: node.id,
-          };
-          if (node.taskId) {
-            metadata.taskId = node.taskId;
-          }
-          await this.agent.addMemory(node.prompt, metadata);
-          this.log('debug', `Saved user prompt to memory`, node.id);
-        } catch (error) {
-          this.log(
-            'warn',
-            `Failed to save user prompt: ${error instanceof Error ? error.message : String(error)}`,
-            node.id
-          );
-        }
-      }
+      // Task owns context loading and complete transcript persistence under its
+      // per-agent conversation lock, including concurrently scheduled siblings.
 
       // Use the original prompt (context is already loaded in ContextManager)
       const enhancedPrompt = node.prompt;
@@ -1177,6 +1143,8 @@ export class Graph implements IAgentModule {
 
         const createdTask = await taskModule.createTask({
           prompt: contextualPrompt,
+          graphId: this.graph.id,
+          graphNodeId: node.id,
           metadata: {
             ...node.metadata,
             useSubAgents: true,
@@ -1220,6 +1188,7 @@ export class Graph implements IAgentModule {
             response: taskResponse.response,
             model: taskResponse.model,
             usage: taskResponse.usage,
+            messages: taskResponse.messages,
             subAgentUsed: true,
             delegationStrategy: node.subAgentDelegation ?? 'auto',
             coordinationPattern: node.subAgentCoordination ?? 'sequential',
@@ -1275,6 +1244,7 @@ export class Graph implements IAgentModule {
             response: taskResponse.response,
             model: taskResponse.model,
             usage: taskResponse.usage,
+            messages: taskResponse.messages,
           };
         } catch (execError) {
           throw new GraphNodeError(
@@ -1307,6 +1277,11 @@ export class Graph implements IAgentModule {
     if (!this.agent || !this.agent.addMemory || !this.graph.id || result.type !== 'task') {
       return;
     }
+    // A task transcript has already been persisted atomically with its execution.
+    if (result.messages) {
+      this.checkContextSize(node);
+      return;
+    }
 
     try {
       const metadata: Record<string, string | boolean | number> = {
@@ -1324,9 +1299,24 @@ export class Graph implements IAgentModule {
         metadata.completionTokens = result.usage.completionTokens;
         metadata.totalTokens = result.usage.totalTokens;
       }
-      await this.agent.addMemory(result.response, metadata);
-      this.log('debug', `Saved assistant response to memory`, node.id);
+      const transcript = result.messages ?? [
+        { role: 'user' as const, content: node.prompt ?? '' },
+        { role: 'assistant' as const, content: result.response },
+      ];
+      for (const message of transcript) {
+        await this.agent.addMemory(
+          message.content,
+          {
+            ...metadata,
+            role: message.role,
+            type: message.role === 'user' ? 'user_message' : 'assistant_response',
+          },
+          { ...message, inputContent: Array.isArray(message.content) ? message.content : undefined }
+        );
+      }
+      this.log('debug', `Saved task transcript to memory`, node.id);
     } catch (error) {
+      if (requiresNativeHistory(result.messages ?? [])) throw error;
       this.log(
         'warn',
         `Failed to save response to memory: ${error instanceof Error ? error.message : String(error)}`,
@@ -2253,7 +2243,8 @@ export class Graph implements IAgentModule {
    * Get aggregated usage statistics for the graph
    */
   getUsage(): GraphUsage | undefined {
-    return this.graph.usage || this.aggregateUsage();
+    // A cached total can predate a running or newly unpriced task.
+    return this.aggregateUsage();
   }
 
   /**
@@ -2275,9 +2266,9 @@ export class Graph implements IAgentModule {
   /**
    * Get total cost across all nodes
    */
-  getTotalCost(): number {
+  getTotalCost(): number | undefined {
     const usage = this.getUsage();
-    return usage?.totalCost ?? 0;
+    return usage?.totalCost;
   }
 
   /**
@@ -2327,8 +2318,10 @@ export class Graph implements IAgentModule {
       `  - Context: ${usage.totalContextTokens.toLocaleString()}`,
     ];
 
-    if (usage.totalCost > 0) {
+    if (usage.totalCost !== undefined) {
       lines.push(`Total Cost: $${usage.totalCost.toFixed(4)}`);
+    } else {
+      lines.push('Total Cost: unavailable (unpriced task usage)');
     }
 
     if (usage.modelsUsed.length > 0) {

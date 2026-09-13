@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { IAgentModule, IAgent } from '../agent/types';
+import { IAgentModule, IAgent, ISubAgentMethods } from '../agent/types';
 import { SubAgentRunOptions } from '../sub-agent/types';
 import {
   Task as TaskType,
@@ -16,9 +16,15 @@ import {
   LLMMessageContent,
   LLMMessageContentPart,
   Tool,
-  ToolCall,
 } from '../llm';
 import { LLMUsage } from '../llm/types';
+import {
+  collectStreamResponse,
+  requiresNativeHistory,
+  sumUsage,
+  toAssistantMessage,
+  withAgentConversation,
+} from '../llm/utils';
 import { Memory } from '../memory';
 import { Memory as MemoryType } from '../memory/types';
 import { Knex } from 'knex';
@@ -285,6 +291,13 @@ export class Task implements IAgentModule {
       ) => void;
     }
   ): Promise<TaskResponse> {
+    return withAgentConversation(this.agent, () => this.executeInConversation(taskId, options));
+  }
+
+  private async executeInConversation(
+    taskId: string,
+    options?: Parameters<Task['executeTask']>[1]
+  ): Promise<TaskResponse> {
     const startTime = Date.now();
 
     // User-facing info log
@@ -313,12 +326,17 @@ export class Task implements IAgentModule {
     await this.updateTaskStatus(taskId, 'in_progress');
 
     try {
+      // Graph context must load inside the same agent transaction as inference and persistence.
+      if (task.graphId && this.agent.loadGraphContext) {
+        await this.agent.loadGraphContext(task.graphId, 100, true);
+      }
       // Check if tools should be used for this specific task
       const taskUseTools = task.metadata?.useTools;
       const agentUseTools = this.agent.config.useTools;
       const shouldUseTools = taskUseTools !== undefined ? taskUseTools : agentUseTools !== false;
 
       let llmResponse: LLMResponse;
+      let conversationMessages: LLMMessage[] | undefined;
 
       // Add memory context if agent has memory enabled
       const agentHasMemory = this.agent.config.memory || false;
@@ -363,14 +381,8 @@ export class Task implements IAgentModule {
         this.agent.config.subAgents &&
         this.agent.config.subAgents.length > 0;
 
-      // If task should use sub-agents and agent has sub-agents, use agent.ask() for delegation
-      if (
-        taskUseSubAgents &&
-        hasSubAgents &&
-        this.agent &&
-        'ask' in this.agent &&
-        typeof this.agent.ask === 'function'
-      ) {
+      // Delegate directly under the task's parent turn, not through a recursive ask.
+      if (taskUseSubAgents && hasSubAgents) {
         // Prepare sub-agent options from task metadata
         const delegation = task.metadata?.subAgentDelegation;
         const coordination = task.metadata?.subAgentCoordination;
@@ -409,8 +421,16 @@ export class Task implements IAgentModule {
           subAgentOptions.useTools = shouldUseTools;
         }
 
-        // Execute task with sub-agent delegation using agent.ask()
-        const response = await this.agent.ask(task.prompt, subAgentOptions);
+        const delegatingAgent: IAgent & Partial<ISubAgentMethods> = this.agent;
+        if (!delegatingAgent.executeWithSubAgents) {
+          throw new Error('Sub-agent delegation is not available on this agent');
+        }
+        const response = await delegatingAgent.executeWithSubAgents(
+          task.prompt,
+          this.agent.config.subAgents ?? [],
+          { ...subAgentOptions },
+          options?.model || this.agent.config.model || DEFAULT_AGENT_CONFIG.model
+        );
 
         llmResponse = {
           content: response,
@@ -433,7 +453,12 @@ export class Task implements IAgentModule {
         // Add conversation context from agent (with bounds checking)
         const contextMessages = this.agent.getContext();
         const maxContextToAdd = Math.max(0, MAX_CONTEXT_MESSAGES - llmMessages.length - 1); // Reserve space for user message
-        const contextToAdd = contextMessages.slice(-maxContextToAdd); // Keep most recent context
+        if (contextMessages.length > maxContextToAdd && requiresNativeHistory(contextMessages)) {
+          throw new Error(
+            'Native conversation exceeds the context message limit; start a new conversation'
+          );
+        }
+        const contextToAdd = maxContextToAdd > 0 ? contextMessages.slice(-maxContextToAdd) : [];
 
         if (contextMessages.length > maxContextToAdd) {
           this.logger.debug('Context messages truncated due to limit', {
@@ -445,7 +470,10 @@ export class Task implements IAgentModule {
         for (const contextMsg of contextToAdd) {
           llmMessages.push({
             role: contextMsg.role,
-            content: contextMsg.content,
+            content: contextMsg.inputContent ?? contextMsg.content,
+            tool_calls: contextMsg.tool_calls,
+            tool_call_id: contextMsg.tool_call_id,
+            providerData: contextMsg.providerData,
           });
         }
 
@@ -636,405 +664,144 @@ export class Task implements IAgentModule {
           tools: tools.length > 0 ? tools : undefined,
         };
 
-        if (options?.stream) {
-          // Handle streaming with tool support
-          let fullContent = '';
-          const streamToolCalls: ToolCall[] = [];
-          let streamUsage: LLMUsage | undefined;
-
-          for await (const chunk of llm.generateStreamResponse(llmOptions)) {
-            fullContent += chunk.content;
-            if (chunk.content) {
-              // Use onChunk callback if available, otherwise fallback to process.stdout
-              if (options?.onChunk) {
-                options.onChunk(chunk.content);
-              } else {
-                process.stdout.write(chunk.content);
-              }
-            }
-            if (chunk.toolCalls) {
-              // Merge tool calls instead of replacing to avoid losing calls across chunks
-              for (const tc of chunk.toolCalls) {
-                const existingIndex = streamToolCalls.findIndex((t) => t.id === tc.id);
-                if (existingIndex >= 0) {
-                  // Update existing tool call (may have more complete arguments)
-                  streamToolCalls[existingIndex] = tc;
-                } else {
-                  // Add bounds checking to prevent unbounded array growth
-                  if (streamToolCalls.length >= Task.MAX_TOOL_CALLS) {
-                    this.logger.warn(
-                      'Maximum tool calls limit reached, ignoring additional tool calls',
-                      {
-                        maxToolCalls: Task.MAX_TOOL_CALLS,
-                        taskId,
-                      }
-                    );
-                    break;
-                  }
-                  streamToolCalls.push(tc);
+        const transcriptStart = llmMessages.length - 1;
+        const usages: (LLMUsage | undefined)[] = [];
+        const generateNext = async (): Promise<LLMResponse> => {
+          const response = options?.stream
+            ? await collectStreamResponse(
+                llm.generateStreamResponse({ ...llmOptions, messages: llmMessages }),
+                modelToUse,
+                (content) => {
+                  if (options.onChunk) options.onChunk(content);
+                  else process.stdout.write(content);
                 }
-              }
-            }
-            if (chunk.usage) {
-              streamUsage = chunk.usage;
-            }
+              )
+            : await llm.generateResponse({ ...llmOptions, messages: llmMessages });
+          usages.push(response.usage);
+          return response;
+        };
+        let currentResponse = await generateNext();
+        let toolIteration = 0;
+        while (currentResponse.toolCalls?.length) {
+          if (
+            toolIteration++ >= DEFAULT_TASK_CONFIG.maxToolIterations ||
+            currentResponse.toolCalls.length > Task.MAX_TOOL_CALLS
+          ) {
+            throw new Error('Tool execution limit reached before the model completed');
           }
+          llmMessages.push(toAssistantMessage(currentResponse));
+          // Execute each tool call
+          for (const toolCall of currentResponse.toolCalls) {
+            // Define these outside try block for catch access
+            const toolName = toolCall.function?.name || 'unknown';
+            let toolArgs: Record<string, unknown> = {};
 
-          // Handle tool calls with multi-turn agentic loop
-          const MAX_TOOL_ITERATIONS = DEFAULT_TASK_CONFIG.maxToolIterations; // Prevent infinite loops
-          let toolIteration = 0;
-          const allToolCalls: ToolCall[] = [...streamToolCalls];
+            // Parse arguments once
+            try {
+              const argsStr = toolCall.function?.arguments;
+              if (argsStr && typeof argsStr === 'string') {
+                toolArgs = JSON.parse(argsStr);
+              } else if (typeof argsStr === 'object' && argsStr !== null) {
+                toolArgs = argsStr as Record<string, unknown>;
+              }
+            } catch {
+              toolArgs = {};
+            }
 
-          while (streamToolCalls.length > 0 && toolIteration < MAX_TOOL_ITERATIONS) {
-            toolIteration++;
-            this.logger.debug(`Tool iteration ${toolIteration}`, {
-              toolCallCount: streamToolCalls.length,
-              toolNames: streamToolCalls.map((tc) => tc.function?.name),
-            });
+            // Notify tool call start
+            if (options?.onToolCall) {
+              const displayName = toolName.replace(/^(mcp_|plugin_)/, '');
+              options.onToolCall(displayName, toolArgs, 'start');
+            }
 
-            // Add assistant message with tool calls (copy array to avoid mutation issues)
-            llmMessages.push({
-              role: 'assistant',
-              content: fullContent || '',
-              tool_calls: [...streamToolCalls], // Copy to avoid reference mutation
-            });
+            try {
+              let toolResult: string;
 
-            // Execute each tool call
-            for (const toolCall of streamToolCalls) {
-              // Define these outside try block for catch access
-              const toolName = toolCall.function?.name || 'unknown';
-              let toolArgs: Record<string, unknown> = {};
+              // Validate tool call has required fields
+              if (!toolCall.function?.name) {
+                toolResult = 'Error: Invalid tool call - missing function name';
+              } else if (toolCall.function.name.startsWith('mcp_')) {
+                // Handle MCP tool
+                const mcpToolName =
+                  toolCall.function.name.length > 4 ? toolCall.function.name.substring(4) : '';
 
-              // Parse arguments once
-              try {
-                const argsStr = toolCall.function?.arguments;
-                if (argsStr && typeof argsStr === 'string') {
-                  toolArgs = JSON.parse(argsStr);
-                } else if (typeof argsStr === 'object' && argsStr !== null) {
-                  toolArgs = argsStr as Record<string, unknown>;
+                if (
+                  this.agent &&
+                  'callMCPTool' in this.agent &&
+                  typeof this.agent.callMCPTool === 'function'
+                ) {
+                  const mcpResult = await this.agent.callMCPTool(mcpToolName, toolArgs);
+                  toolResult = mcpResult?.content
+                    ? mcpResult.content.map((c: { text?: string }) => c.text || '').join('\n')
+                    : 'No content returned from MCP tool';
+                } else {
+                  toolResult = 'Error: MCP tools not available';
                 }
-              } catch {
-                toolArgs = {};
+              } else if (toolCall.function.name.startsWith('plugin_')) {
+                // Handle plugin tool
+                const pluginToolName =
+                  toolCall.function.name.length > 7 ? toolCall.function.name.substring(7) : '';
+
+                if (
+                  this.agent &&
+                  'executeTool' in this.agent &&
+                  typeof this.agent.executeTool === 'function'
+                ) {
+                  const pluginCallResult = await this.agent.executeTool({
+                    id:
+                      toolCall.id && toolCall.id.trim() !== ''
+                        ? toolCall.id
+                        : `tool-${crypto.randomUUID()}`,
+                    name: pluginToolName,
+                    parameters: toolArgs,
+                  });
+
+                  toolResult = pluginCallResult?.result
+                    ? pluginCallResult.result.success
+                      ? typeof pluginCallResult.result.data === 'string'
+                        ? pluginCallResult.result.data
+                        : JSON.stringify(pluginCallResult.result.data ?? null)
+                      : `Error: ${pluginCallResult.result.error || 'Unknown error'}`
+                    : 'Error: No result returned from plugin';
+                } else {
+                  toolResult = 'Error: Plugin tools not available';
+                }
+              } else {
+                toolResult = `Unknown tool type: ${toolCall.function.name}`;
               }
 
-              // Notify tool call start
+              // Notify tool call end
               if (options?.onToolCall) {
                 const displayName = toolName.replace(/^(mcp_|plugin_)/, '');
-                options.onToolCall(displayName, toolArgs, 'start');
+                options.onToolCall(displayName, toolArgs, 'end', toolResult);
               }
 
-              try {
-                let toolResult: string;
-
-                // Validate tool call has required fields
-                if (!toolCall.function?.name) {
-                  toolResult = 'Error: Invalid tool call - missing function name';
-                } else if (toolCall.function.name.startsWith('mcp_')) {
-                  // Handle MCP tool
-                  const mcpToolName =
-                    toolCall.function.name.length > 4 ? toolCall.function.name.substring(4) : '';
-
-                  if (
-                    this.agent &&
-                    'callMCPTool' in this.agent &&
-                    typeof this.agent.callMCPTool === 'function'
-                  ) {
-                    const mcpResult = await this.agent.callMCPTool(mcpToolName, toolArgs);
-                    toolResult = mcpResult?.content
-                      ? mcpResult.content.map((c: { text?: string }) => c.text || '').join('\n')
-                      : 'No content returned from MCP tool';
-                  } else {
-                    toolResult = 'Error: MCP tools not available';
-                  }
-                } else if (toolCall.function.name.startsWith('plugin_')) {
-                  // Handle plugin tool
-                  const pluginToolName =
-                    toolCall.function.name.length > 7 ? toolCall.function.name.substring(7) : '';
-
-                  if (
-                    this.agent &&
-                    'executeTool' in this.agent &&
-                    typeof this.agent.executeTool === 'function'
-                  ) {
-                    const pluginCallResult = await this.agent.executeTool({
-                      id:
-                        toolCall.id && toolCall.id.trim() !== ''
-                          ? toolCall.id
-                          : `tool-${crypto.randomUUID()}`,
-                      name: pluginToolName,
-                      parameters: toolArgs,
-                    });
-
-                    toolResult = pluginCallResult?.result
-                      ? pluginCallResult.result.success
-                        ? typeof pluginCallResult.result.data === 'string'
-                          ? pluginCallResult.result.data
-                          : JSON.stringify(pluginCallResult.result.data ?? null)
-                        : `Error: ${pluginCallResult.result.error || 'Unknown error'}`
-                      : 'Error: No result returned from plugin';
-                  } else {
-                    toolResult = 'Error: Plugin tools not available';
-                  }
-                } else {
-                  toolResult = `Unknown tool type: ${toolCall.function.name}`;
-                }
-
-                // Notify tool call end
-                if (options?.onToolCall) {
-                  const displayName = toolName.replace(/^(mcp_|plugin_)/, '');
-                  options.onToolCall(displayName, toolArgs, 'end', toolResult);
-                }
-
-                // Add tool result to messages
-                llmMessages.push({
-                  role: 'tool',
-                  content: toolResult,
-                  tool_call_id: toolCall.id,
-                });
-              } catch (error) {
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                // Notify tool call error
-                if (options?.onToolCall) {
-                  const displayName = toolName.replace(/^(mcp_|plugin_)/, '');
-                  options.onToolCall(displayName, toolArgs, 'end', `Error: ${errorMessage}`);
-                }
-                llmMessages.push({
-                  role: 'tool',
-                  content: `Error: ${errorMessage}`,
-                  tool_call_id: toolCall.id,
-                });
-              }
-            }
-
-            // Get next response from LLM with tool results (keep tools for multi-turn)
-            const nextLlmOptions = {
-              ...llmOptions,
-              messages: llmMessages,
-              tools: tools.length > 0 ? tools : undefined, // Keep tools for multi-turn
-            };
-
-            // Reset for next iteration
-            streamToolCalls.length = 0;
-            fullContent = '';
-
-            try {
-              for await (const chunk of llm.generateStreamResponse(nextLlmOptions)) {
-                fullContent += chunk.content;
-                if (chunk.content) {
-                  if (options?.onChunk) {
-                    options.onChunk(chunk.content);
-                  } else {
-                    process.stdout.write(chunk.content);
-                  }
-                }
-                // Collect new tool calls for next iteration
-                if (chunk.toolCalls) {
-                  for (const tc of chunk.toolCalls) {
-                    const existingIndex = streamToolCalls.findIndex((t) => t.id === tc.id);
-                    if (existingIndex >= 0) {
-                      streamToolCalls[existingIndex] = tc;
-                    } else if (streamToolCalls.length < Task.MAX_TOOL_CALLS) {
-                      streamToolCalls.push(tc);
-                      allToolCalls.push(tc);
-                    }
-                  }
-                }
-                if (chunk.usage) {
-                  if (streamUsage) {
-                    streamUsage.promptTokens += chunk.usage.promptTokens;
-                    streamUsage.completionTokens += chunk.usage.completionTokens;
-                    streamUsage.totalTokens += chunk.usage.totalTokens;
-                    streamUsage.cost = (streamUsage.cost ?? 0) + (chunk.usage.cost ?? 0);
-                  } else {
-                    streamUsage = chunk.usage;
-                  }
-                }
-              }
-            } catch (llmError) {
-              const errorMessage = llmError instanceof Error ? llmError.message : String(llmError);
-              const toolErrorResponse = `\n\nError during tool execution: ${errorMessage}`;
-              fullContent += toolErrorResponse;
-              if (options?.onChunk) {
-                options.onChunk(toolErrorResponse);
-              } else {
-                process.stdout.write(toolErrorResponse);
-              }
-              break; // Exit loop on error
-            }
-          }
-
-          if (toolIteration >= MAX_TOOL_ITERATIONS) {
-            this.logger.warn('Maximum tool iterations reached', {
-              maxIterations: MAX_TOOL_ITERATIONS,
-              taskId,
-            });
-          }
-
-          llmResponse = {
-            content: fullContent,
-            model: modelToUse,
-            toolCalls: allToolCalls,
-            usage: streamUsage,
-          };
-        } else {
-          // Non-streaming with multi-turn tool handling
-          let currentResponse = await llm.generateResponse(llmOptions);
-          let finalResponse = currentResponse.content;
-          const allToolCallsExecuted: ToolCall[] = [];
-          const totalUsage = currentResponse.usage;
-
-          const MAX_TOOL_ITERATIONS = DEFAULT_TASK_CONFIG.maxToolIterations;
-          let toolIteration = 0;
-
-          while (
-            currentResponse.toolCalls &&
-            currentResponse.toolCalls.length > 0 &&
-            toolIteration < MAX_TOOL_ITERATIONS
-          ) {
-            toolIteration++;
-            this.logger.debug(`Non-streaming tool iteration ${toolIteration}`, {
-              toolCallCount: currentResponse.toolCalls.length,
-              toolNames: currentResponse.toolCalls.map((tc) => tc.function?.name),
-            });
-
-            const currentToolCalls = currentResponse.toolCalls.slice(0, Task.MAX_TOOL_CALLS);
-            allToolCallsExecuted.push(...currentToolCalls);
-
-            // Add assistant message with tool calls
-            llmMessages.push({
-              role: 'assistant',
-              content: currentResponse.content || '',
-              tool_calls: currentToolCalls,
-            });
-
-            // Execute each tool call
-            for (const toolCall of currentToolCalls) {
-              try {
-                let toolResult: string;
-
-                if (!toolCall.function?.name) {
-                  toolResult = 'Error: Invalid tool call - missing function name';
-                } else if (toolCall.function.name.startsWith('mcp_')) {
-                  const mcpToolName =
-                    toolCall.function.name.length > 4 ? toolCall.function.name.substring(4) : '';
-                  let mcpArgs: Record<string, unknown> = {};
-                  try {
-                    const argsStr = toolCall.function.arguments;
-                    if (argsStr && typeof argsStr === 'string') {
-                      mcpArgs = JSON.parse(argsStr);
-                    } else if (typeof argsStr === 'object' && argsStr !== null) {
-                      mcpArgs = argsStr as Record<string, unknown>;
-                    }
-                  } catch {
-                    mcpArgs = {};
-                  }
-
-                  if (
-                    this.agent &&
-                    'callMCPTool' in this.agent &&
-                    typeof this.agent.callMCPTool === 'function'
-                  ) {
-                    const mcpResult = await this.agent.callMCPTool(mcpToolName, mcpArgs);
-                    toolResult = mcpResult?.content
-                      ? mcpResult.content.map((c: { text?: string }) => c.text || '').join('\n')
-                      : 'No content returned from MCP tool';
-                  } else {
-                    toolResult = 'Error: MCP tools not available';
-                  }
-                } else if (toolCall.function.name.startsWith('plugin_')) {
-                  const pluginToolName =
-                    toolCall.function.name.length > 7 ? toolCall.function.name.substring(7) : '';
-                  let pluginArgs: Record<string, unknown> = {};
-                  try {
-                    const argsStr = toolCall.function.arguments;
-                    if (argsStr && typeof argsStr === 'string') {
-                      pluginArgs = JSON.parse(argsStr);
-                    } else if (typeof argsStr === 'object' && argsStr !== null) {
-                      pluginArgs = argsStr as Record<string, unknown>;
-                    }
-                  } catch {
-                    pluginArgs = {};
-                  }
-
-                  if (
-                    this.agent &&
-                    'executeTool' in this.agent &&
-                    typeof this.agent.executeTool === 'function'
-                  ) {
-                    const pluginCallResult = await this.agent.executeTool({
-                      id:
-                        toolCall.id && toolCall.id.trim() !== ''
-                          ? toolCall.id
-                          : `tool-${crypto.randomUUID()}`,
-                      name: pluginToolName,
-                      parameters: pluginArgs,
-                    });
-
-                    toolResult = pluginCallResult?.result
-                      ? pluginCallResult.result.success
-                        ? typeof pluginCallResult.result.data === 'string'
-                          ? pluginCallResult.result.data
-                          : JSON.stringify(pluginCallResult.result.data ?? null)
-                        : `Error: ${pluginCallResult.result.error || 'Unknown error'}`
-                      : 'Error: No result returned from plugin';
-                  } else {
-                    toolResult = 'Error: Plugin tools not available';
-                  }
-                } else {
-                  toolResult = `Unknown tool type: ${toolCall.function.name}`;
-                }
-
-                llmMessages.push({
-                  role: 'tool',
-                  content: toolResult,
-                  tool_call_id: toolCall.id,
-                });
-              } catch (error) {
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                llmMessages.push({
-                  role: 'tool',
-                  content: `Error: ${errorMessage}`,
-                  tool_call_id: toolCall.id,
-                });
-              }
-            }
-
-            // Get next response with tools still available for multi-turn
-            try {
-              currentResponse = await llm.generateResponse({
-                ...llmOptions,
-                messages: llmMessages,
-                tools: tools.length > 0 ? tools : undefined,
+              // Add tool result to messages
+              llmMessages.push({
+                role: 'tool',
+                content: toolResult,
+                tool_call_id: toolCall.id,
               });
-              finalResponse = currentResponse.content;
-
-              if (currentResponse.usage && totalUsage) {
-                totalUsage.promptTokens += currentResponse.usage.promptTokens;
-                totalUsage.completionTokens += currentResponse.usage.completionTokens;
-                totalUsage.totalTokens += currentResponse.usage.totalTokens;
-                totalUsage.cost = (totalUsage.cost ?? 0) + (currentResponse.usage.cost ?? 0);
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              // Notify tool call error
+              if (options?.onToolCall) {
+                const displayName = toolName.replace(/^(mcp_|plugin_)/, '');
+                options.onToolCall(displayName, toolArgs, 'end', `Error: ${errorMessage}`);
               }
-            } catch (llmError) {
-              const errorMessage = llmError instanceof Error ? llmError.message : String(llmError);
-              finalResponse = `Error during tool execution: ${errorMessage}`;
-              break;
+              llmMessages.push({
+                role: 'tool',
+                content: `Error: ${errorMessage}`,
+                tool_call_id: toolCall.id,
+              });
             }
           }
 
-          if (toolIteration >= MAX_TOOL_ITERATIONS) {
-            this.logger.warn('Maximum tool iterations reached (non-streaming)', {
-              maxIterations: MAX_TOOL_ITERATIONS,
-              taskId,
-            });
-          }
-
-          llmResponse = {
-            content: finalResponse,
-            model: modelToUse,
-            usage: totalUsage,
-            toolCalls: allToolCallsExecuted,
-          };
+          currentResponse = await generateNext();
         }
+        llmMessages.push(toAssistantMessage(currentResponse));
+        conversationMessages = llmMessages.slice(transcriptStart);
+        llmResponse = { ...currentResponse, usage: sumUsage(usages) };
       }
 
       // Update task with response and mark as completed
@@ -1054,28 +821,30 @@ export class Task implements IAgentModule {
         status: 'completed',
       });
 
-      // Add task conversation to memory/context
-      // Skip if task is part of a graph - graph module handles memory saving with proper context
-      if (
-        !task.graphId &&
-        this.agent &&
-        'addMemory' in this.agent &&
-        typeof this.agent.addMemory === 'function'
-      ) {
-        await this.agent.addMemory(task.prompt, {
-          role: 'user',
-          type: 'task_execution',
-          taskId: taskId,
-          source: 'task',
-        });
-
-        await this.agent.addMemory(llmResponse.content, {
-          role: 'assistant',
-          type: 'task_response',
-          taskId: taskId,
-          model: llmResponse.model || '',
-          source: 'task',
-        });
+      // Persist the entire transcript before releasing the agent conversation lock.
+      conversationMessages ??= [
+        { role: 'user', content: task.prompt },
+        toAssistantMessage(llmResponse),
+      ];
+      if (this.agent && 'addMemory' in this.agent && typeof this.agent.addMemory === 'function') {
+        for (const message of conversationMessages) {
+          await this.agent.addMemory(
+            typeof message.content === 'string' ? message.content : task.prompt,
+            {
+              role: message.role,
+              type: message.role === 'user' ? 'task_execution' : 'task_response',
+              taskId,
+              model: llmResponse.model,
+              source: task.graphId ? 'graph' : 'task',
+              ...(task.graphId && { graphId: task.graphId }),
+              ...(task.graphNodeId && { graphNodeId: task.graphNodeId }),
+            },
+            {
+              ...message,
+              inputContent: Array.isArray(message.content) ? message.content : undefined,
+            }
+          );
+        }
       }
 
       if (!updatedTask) {
@@ -1087,6 +856,7 @@ export class Task implements IAgentModule {
         response: llmResponse.content,
         model: llmResponse.model,
         usage: llmResponse.usage,
+        messages: conversationMessages,
       };
     } catch (error) {
       // Mark task as failed

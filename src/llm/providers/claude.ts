@@ -1,46 +1,32 @@
-import {
+import Anthropic from '@anthropic-ai/sdk';
+import type {
+  ContentBlockParam,
+  TextBlockParam,
+  ImageBlockParam,
+  Message,
+  MessageCreateParamsBase,
+  MessageParam,
+} from '@anthropic-ai/sdk/resources/messages';
+import type {
   LLMProvider,
   LLMRequestOptions,
   LLMResponse,
   LLMStreamChunk,
   LLMConfig,
+  LLMMessageContent,
   VisionAnalysisOptions,
   VisionAnalysisResult,
   EmbeddingResult,
-  isStringContent,
-  isMultiModalContent,
 } from '../types';
-import Anthropic from '@anthropic-ai/sdk';
-import type { ContentBlockDeltaEvent, TextDelta } from '@anthropic-ai/sdk/resources/messages';
-import type {
-  ToolUseBlock,
-  ToolsBetaContentBlock,
-  ToolsBetaMessageParam,
-} from '@anthropic-ai/sdk/resources/beta/tools/messages';
+import { getModelDefinition, getModelsByProvider, getVisionModelsByProvider } from '../models';
+import { parseToolArguments, resolveUsageCost } from '../utils';
 import { getLogger } from '../../logger';
 import { Logger } from '../../logger/types';
 import { LLMApiError, VisionError } from '../../errors';
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Retry helper with exponential backoff
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
-  let lastError: Error | undefined;
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await fn();
-    } catch (error) {
-      lastError = error as Error;
-      if (i < maxRetries - 1) {
-        await new Promise((r) => setTimeout(r, Math.pow(2, i) * 1000));
-      }
-    }
-  }
-  if (!lastError) {
-    throw new Error('No retry attempts made');
-  }
-  throw lastError;
-}
+const DIRECT_BASE_URL = 'https://api.anthropic.com';
 
 export class ClaudeProvider implements LLMProvider {
   name = 'claude';
@@ -50,513 +36,269 @@ export class ClaudeProvider implements LLMProvider {
 
   constructor(config?: LLMConfig) {
     const apiKey = config?.apiKey || process.env.ANTHROPIC_API_KEY;
-
-    // Use provided logger or fallback to global logger
-    this.logger = config?.logger || getLogger();
-
-    if (!apiKey) {
+    if (!apiKey)
       throw new Error('Anthropic API key is required. Set ANTHROPIC_API_KEY environment variable.');
-    }
-
-    this.logger.info('Claude provider initialized');
-    this.logger.debug('Claude provider initialization', {
-      hasCustomBaseUrl: !!config?.baseUrl,
-      hasVisionBaseUrl: !!process.env.ANTHROPIC_VISION_BASE_URL,
-      supportsEmbeddings: false,
-      supportsVision: true,
-    });
-
-    // Default timeout: 2 minutes (120000ms)
+    this.logger = config?.logger || getLogger();
     const timeout = config?.timeout ?? 120000;
-
-    // Main client for chat completions (can use custom base URL)
-    // If baseUrl is explicitly null, don't use ANTHROPIC_BASE_URL fallback (for embedding/vision providers)
-    const chatBaseUrl =
-      config?.baseUrl === null ? undefined : config?.baseUrl || process.env.ANTHROPIC_BASE_URL;
     this.client = new Anthropic({
       apiKey,
       timeout,
-      ...(chatBaseUrl && { baseURL: chatBaseUrl }),
+      baseURL:
+        config?.baseUrl === null
+          ? DIRECT_BASE_URL
+          : config?.baseUrl || process.env.ANTHROPIC_BASE_URL || DIRECT_BASE_URL,
     });
-
-    // Dedicated vision client - NO fallback to ANTHROPIC_BASE_URL
-    const visionApiKey = process.env.ANTHROPIC_VISION_API_KEY || apiKey;
-    const visionBaseUrl = process.env.ANTHROPIC_VISION_BASE_URL; // Only dedicated URL, no fallback
-
-    // Create vision client with isolated configuration
-    const visionClientConfig: { apiKey: string; baseURL?: string; timeout: number } = {
-      apiKey: visionApiKey,
+    this.visionClient = new Anthropic({
+      apiKey: process.env.ANTHROPIC_VISION_API_KEY || apiKey,
+      baseURL: process.env.ANTHROPIC_VISION_BASE_URL || DIRECT_BASE_URL,
       timeout,
-    };
-
-    // Only add baseURL if we have a dedicated one, otherwise use Anthropic default
-    if (visionBaseUrl) {
-      visionClientConfig.baseURL = visionBaseUrl;
-    }
-    // Note: Anthropic SDK doesn't auto-read env vars like OpenAI, so no explicit default needed
-
-    this.visionClient = new Anthropic(visionClientConfig);
-  }
-
-  private sanitizeArguments(input: object): Record<string, string | number | boolean | null> {
-    const sanitized: Record<string, string | number | boolean | null> = {};
-    for (const [key, value] of Object.entries(input)) {
-      if (
-        typeof value === 'string' ||
-        typeof value === 'number' ||
-        typeof value === 'boolean' ||
-        value === null
-      ) {
-        sanitized[key] = value;
-      } else {
-        sanitized[key] = String(value); // Convert complex types to string
-      }
-    }
-    return sanitized;
+    });
+    this.logger.info('Claude provider initialized');
   }
 
   getSupportedModels(): string[] {
-    return [
-      'claude-sonnet-4-20250514',
-      'claude-opus-4-20250514',
-      'claude-3.7-sonnet-20250224',
-      'claude-3-5-sonnet-20241022',
-      'claude-3-5-sonnet-20240620',
-      'claude-3-5-haiku-20241022',
-      'claude-3-opus-20240229',
-      'claude-3-sonnet-20240229',
-      'claude-3-haiku-20240307',
-    ];
+    return getModelsByProvider('claude');
   }
 
   getVisionModels(): string[] {
-    return [
-      'claude-3-5-sonnet-20241022',
-      'claude-3-5-sonnet-20240620',
-      'claude-3-opus-20240229',
-      'claude-3-sonnet-20240229',
-      'claude-3-haiku-20240307',
-    ];
+    return getVisionModelsByProvider('claude');
   }
 
   getEmbeddingModels(): string[] {
-    // Claude doesn't currently offer embedding models, but structure is ready for future support
     return [];
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async generateEmbedding(_text: string, _model?: string): Promise<EmbeddingResult> {
-    // Claude doesn't currently support embeddings, but this method is ready for future implementation
-    throw new Error(
-      'Claude provider does not currently support embedding generation. Please use OpenAI, Gemini, or Ollama providers for embeddings.'
-    );
+  async generateEmbedding(): Promise<EmbeddingResult> {
+    throw new Error('Claude does not support embedding generation. Use OpenAI, Gemini, or Ollama.');
   }
 
-  async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
-    const { system, messages } = this.prepareMessages(options);
-
-    try {
-      const message = await withRetry(() =>
-        this.client.beta.tools.messages.create({
-          model: options.model,
-          messages: messages as ToolsBetaMessageParam[],
-          system,
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 4096,
-          stream: false,
-          ...(options.tools &&
-            options.tools.length > 0 && {
-              tools: options.tools.map((tool) => ({
-                name: tool.function.name,
-                description: tool.function.description,
-                input_schema: tool.function.parameters,
-              })),
-            }),
-        })
-      );
-
-      // Extract tool calls from Claude's response
-      const toolCalls = (message.content as ToolsBetaContentBlock[])
-        .filter((block): block is ToolUseBlock => block.type === 'tool_use')
-        .map((block) => ({
-          id: block.id,
-          type: 'function' as const,
-          function: {
-            name: block.name,
-            arguments: this.sanitizeArguments(block.input || {}),
-          },
-        }));
-
-      const textContent = (message.content as ToolsBetaContentBlock[])
-        .filter((block): block is Anthropic.Messages.TextBlock => block.type === 'text')
-        .map((block) => block.text)
-        .join('');
-
-      return {
-        content: textContent,
-        model: message.model,
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        usage: {
-          promptTokens: message.usage?.input_tokens ?? 0,
-          completionTokens: message.usage?.output_tokens ?? 0,
-          totalTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.output_tokens ?? 0),
-        },
-      };
-    } catch (error) {
-      const originalError = error instanceof Error ? error : new Error(String(error));
-      this.logger.error('Claude generateResponse failed', originalError, {
-        model: options.model,
-        errorMessage: originalError.message,
-      });
-      throw new LLMApiError(
-        `Claude API request failed: ${originalError.message}`,
-        this.name,
-        originalError
-      );
-    }
-  }
-
-  async *generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
-    const { system, messages } = this.prepareMessages(options);
-
-    let stream;
-    try {
-      stream = await withRetry(() =>
-        this.client.beta.tools.messages.create({
-          model: options.model,
-          messages: messages as ToolsBetaMessageParam[],
-          system,
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 4096,
-          stream: true,
-          ...(options.tools &&
-            options.tools.length > 0 && {
-              tools: options.tools.map((tool) => ({
-                name: tool.function.name,
-                description: tool.function.description,
-                input_schema: tool.function.parameters,
-              })),
-            }),
-        })
-      );
-    } catch (error) {
-      const originalError = error instanceof Error ? error : new Error(String(error));
-      this.logger.error('Claude stream initialization failed', originalError, {
-        model: options.model,
-        errorMessage: originalError.message,
-      });
-      throw new LLMApiError(
-        `Claude API stream request failed: ${originalError.message}`,
-        this.name,
-        originalError
-      );
-    }
-
-    const toolCalls: Array<{
-      id: string;
-      type: 'function';
-      function: { name: string; arguments: Record<string, string | number | boolean | null> };
-    }> = [];
-
-    try {
-      for await (const event of stream) {
-        if (event.type === 'content_block_delta') {
-          const deltaEvent = event as ContentBlockDeltaEvent;
-          if (deltaEvent.delta.type === 'text_delta') {
-            const textDelta = deltaEvent.delta as TextDelta;
-            const content = textDelta.text || '';
-            if (content) {
-              yield { content, done: false, model: options.model };
-            }
+  private contentBlocks(content: LLMMessageContent): (TextBlockParam | ImageBlockParam)[] {
+    if (typeof content === 'string') return content ? [{ type: 'text', text: content }] : [];
+    return content.map((part): TextBlockParam | ImageBlockParam => {
+      if (part.type === 'text' && part.text !== undefined) return { type: 'text', text: part.text };
+      if (part.type === 'image_url' && part.image_url) {
+        const match = part.image_url.url.match(
+          /^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/s
+        );
+        if (match) {
+          const mediaType = match[1];
+          if (
+            mediaType === 'image/jpeg' ||
+            mediaType === 'image/png' ||
+            mediaType === 'image/gif' ||
+            mediaType === 'image/webp'
+          ) {
+            return {
+              type: 'image',
+              source: { type: 'base64', media_type: mediaType, data: match[2] },
+            };
           }
-        } else if (event.type === 'content_block_start') {
-          // Standard streaming doesn't support tool_use in content_block_start
-          // Tool calls will be handled differently or in the final response
-        } else if (event.type === 'message_stop') {
-          yield {
-            content: '',
-            done: true,
-            model: options.model,
-            toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-          };
-          return;
         }
+        const url = new URL(part.image_url.url);
+        if (url.protocol !== 'https:' || url.username || url.password)
+          throw new Error('Invalid image URL');
+        return { type: 'image', source: { type: 'url', url: url.href } };
       }
-    } catch (error) {
-      const originalError = error instanceof Error ? error : new Error(String(error));
-      this.logger.error('Claude streaming error', originalError, {
-        model: options.model,
-        errorMessage: originalError.message,
-      });
-      throw new LLMApiError(
-        `Claude streaming error: ${originalError.message}`,
-        this.name,
-        originalError
-      );
-    }
+      throw new Error('Invalid multimodal message content');
+    });
   }
 
   private prepareMessages(options: LLMRequestOptions): {
     system?: string;
-    messages: ToolsBetaMessageParam[];
+    messages: MessageParam[];
   } {
-    let system = options.systemPrompt;
-    const messages = options.messages.filter((m) => m.role !== 'system');
-
-    // Find system message if no explicit system prompt
-    if (!system) {
-      const systemMessage = options.messages.find((m) => m.role === 'system');
-      if (systemMessage) {
-        system = isStringContent(systemMessage.content) ? systemMessage.content : '';
+    const system =
+      options.systemPrompt ||
+      options.messages
+        .filter((message) => message.role === 'system')
+        .map((message) =>
+          typeof message.content === 'string'
+            ? message.content
+            : message.content.map((part) => part.text ?? '').join('')
+        )
+        .join('\n') ||
+      undefined;
+    const messages: MessageParam[] = [];
+    for (const message of options.messages) {
+      if (message.role === 'system') continue;
+      let converted: MessageParam;
+      if (message.providerData) {
+        if (
+          message.role !== 'assistant' ||
+          message.providerData.protocol !== 'claude-messages' ||
+          message.providerData.model !== options.model
+        ) {
+          throw new Error(
+            'Cannot replay provider continuation with a different model or transport'
+          );
+        }
+        // Preserve every block, its order and signature, including empty thinking
+        // and redacted blocks. Rebuilding a signature invalidates the next request.
+        converted = { role: 'assistant', content: message.providerData.content };
+      } else if (message.role === 'tool') {
+        if (!message.tool_call_id) throw new Error('Tool result is missing tool_call_id');
+        converted = {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: message.tool_call_id,
+              content: this.contentBlocks(message.content),
+            },
+          ],
+        };
+      } else {
+        converted = {
+          role: message.role,
+          content: [
+            ...this.contentBlocks(message.content),
+            ...(message.tool_calls ?? []).map(
+              (tool): ContentBlockParam => ({
+                type: 'tool_use',
+                id: tool.id,
+                name: tool.function.name,
+                input: tool.function.arguments,
+              })
+            ),
+          ],
+        };
+      }
+      const previous = messages[messages.length - 1];
+      // Parallel tool results belong to one user turn immediately after tool_use.
+      if (
+        message.role === 'tool' &&
+        previous?.role === 'user' &&
+        Array.isArray(previous.content) &&
+        Array.isArray(converted.content)
+      ) {
+        previous.content.push(...converted.content);
+      } else {
+        messages.push(converted);
       }
     }
+    return { system, messages };
+  }
 
-    // Convert messages to Claude format
+  private requestParams(options: LLMRequestOptions): MessageCreateParamsBase {
+    const model = getModelDefinition(options.model);
+    if (!model || model.provider !== 'claude')
+      throw new Error(`Unsupported Claude model: ${options.model}`);
+    const maxTokens = options.maxTokens ?? 4096;
+    if (
+      !Number.isInteger(maxTokens) ||
+      maxTokens < 1 ||
+      (model.maxOutputTokens !== undefined && maxTokens > model.maxOutputTokens)
+    ) {
+      throw new Error(`Invalid maxTokens for model ${model.id}`);
+    }
     return {
-      system,
-      messages: messages.map((msg) => {
-        if (msg.role === 'tool') {
-          const toolCallId = msg.tool_call_id;
-          // Safely extract content with null checks
-          const contentText =
-            msg.content != null && isStringContent(msg.content) ? msg.content : '';
-
-          if (!toolCallId) {
-            this.logger.warn('Tool message missing tool_call_id, converting to user message', {
-              content: contentText.substring(0, 100),
-            });
-            // Return as user message when tool_call_id is missing
-            return {
-              role: 'user' as const,
-              content: contentText || 'Tool result (missing tool_call_id)',
-            } as ToolsBetaMessageParam;
-          }
-          return {
-            role: 'user' as const,
-            content: [
-              {
-                type: 'tool_result' as const,
-                tool_use_id: toolCallId,
-                content: [{ type: 'text' as const, text: contentText }],
-              },
-            ],
-          } as ToolsBetaMessageParam;
-        }
-
-        if (msg.tool_calls && msg.tool_calls.length > 0) {
-          // Filter out tool calls with null/undefined function properties
-          const validToolCalls = msg.tool_calls.filter(
-            (tc) => tc != null && tc.function != null && tc.function.name != null
-          );
-
-          if (validToolCalls.length === 0) {
-            // No valid tool calls, return as regular assistant message
-            return {
-              role: 'assistant' as const,
-              content: msg.content != null && isStringContent(msg.content) ? msg.content : '',
-            } as ToolsBetaMessageParam;
-          }
-
-          return {
-            role: 'assistant' as const,
-            content: [
-              ...(msg.content != null && isStringContent(msg.content) && msg.content.length > 0
-                ? [{ type: 'text' as const, text: msg.content }]
-                : []),
-              ...validToolCalls.map((tc) => ({
-                type: 'tool_use' as const,
-                id: tc.id || `tool_${Date.now()}`,
-                name: tc.function.name,
-                input: tc.function.arguments ?? {},
-              })),
-            ],
-          } as ToolsBetaMessageParam;
-        }
-
-        // Handle multi-modal content
-        if (isMultiModalContent(msg.content)) {
-          const claudeContent = msg.content
-            .map((part) => {
-              if (part.type === 'text') {
-                return { type: 'text' as const, text: part.text || '' };
-              } else if (part.type === 'image_url' && part.image_url) {
-                // Extract base64 data from data URL
-                const base64Match = part.image_url.url.match(/^data:(.+);base64,(.+)$/);
-                if (base64Match) {
-                  const mediaType = base64Match[1];
-                  const data = base64Match[2];
-                  return {
-                    type: 'image' as const,
-                    source: {
-                      type: 'base64' as const,
-                      media_type: mediaType as
-                        | 'image/jpeg'
-                        | 'image/png'
-                        | 'image/gif'
-                        | 'image/webp',
-                      data,
-                    },
-                  };
-                }
-              }
-              return { type: 'text' as const, text: '' };
-            })
-            .filter((part) => (part.type === 'text' ? part.text !== '' : true));
-
-          return {
-            role: msg.role as 'user' | 'assistant',
-            content: claudeContent,
-          } as ToolsBetaMessageParam;
-        }
-
-        // Handle string content
-        return {
-          role: msg.role as 'user' | 'assistant',
-          content: isStringContent(msg.content) ? msg.content : '',
-        } as Anthropic.Messages.MessageParam;
+      model: options.model,
+      ...this.prepareMessages(options),
+      max_tokens: maxTokens,
+      ...(model.supportsTemperature && { temperature: options.temperature ?? 0.7 }),
+      // Current models select adaptive thinking automatically. No manual budget,
+      // forced tool choice, sampling override or automatic model fallback.
+      ...(options.tools?.length && {
+        tools: options.tools.map((tool) => ({
+          name: tool.function.name,
+          description: tool.function.description,
+          input_schema: tool.function.parameters,
+        })),
+        tool_choice: { type: 'auto' as const },
       }),
     };
+  }
+
+  private fromMessage(message: Message, requestedModel: string): LLMResponse {
+    const toolCalls = message.content
+      .filter((block) => block.type === 'tool_use')
+      .map((block) => ({
+        id: block.id,
+        type: 'function' as const,
+        function: { name: block.name, arguments: parseToolArguments(block.input) },
+      }));
+    if (message.stop_reason === 'max_tokens' && toolCalls.length) {
+      throw new Error('Message ended before tool calls completed');
+    }
+    const usage = message.usage;
+    // Cache reads/writes are input too, and omitted-thinking tokens are output.
+    const input = usage
+      ? usage.input_tokens +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0)
+      : 0;
+    return {
+      content: message.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join(''),
+      model: message.model,
+      toolCalls: toolCalls.length ? toolCalls : undefined,
+      providerData: {
+        protocol: 'claude-messages',
+        model: requestedModel,
+        content: message.content,
+      },
+      usage: usage
+        ? {
+            promptTokens: input,
+            completionTokens: usage.output_tokens,
+            totalTokens: input + usage.output_tokens,
+            cost: resolveUsageCost(message),
+          }
+        : undefined,
+    };
+  }
+
+  private requestError(error: unknown): LLMApiError {
+    const status = error instanceof Anthropic.APIError ? error.status : undefined;
+    const message = `Claude request failed${status ? ` (HTTP ${status})` : ''}`;
+    this.logger.error(message);
+    return new LLMApiError(message, this.name, error instanceof Error ? error : undefined);
+  }
+
+  async generateResponse(options: LLMRequestOptions): Promise<LLMResponse> {
+    return this.generateWithClient(options, this.client);
+  }
+
+  private async generateWithClient(
+    options: LLMRequestOptions,
+    client: Anthropic
+  ): Promise<LLMResponse> {
+    const params = this.requestParams(options);
+    try {
+      return this.fromMessage(
+        await client.messages.create({ ...params, stream: false }),
+        options.model
+      );
+    } catch (error) {
+      throw this.requestError(error);
+    }
+  }
+
+  async *generateStreamResponse(options: LLMRequestOptions): AsyncIterableIterator<LLMStreamChunk> {
+    const stream = this.client.messages.stream(this.requestParams(options));
+    try {
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          yield { content: event.delta.text, done: false, model: options.model };
+        }
+      }
+      // The stable SDK assembles indexed JSON fragments, thinking signatures and
+      // message_start/message_delta usage into the same shape as a regular call.
+      const response = this.fromMessage(await stream.finalMessage(), options.model);
+      yield { ...response, content: '', done: true };
+    } catch (error) {
+      throw this.requestError(error);
+    } finally {
+      stream.abort();
+    }
   }
 
   async analyzeImage(
     imagePath: string,
     options: VisionAnalysisOptions = {}
   ): Promise<VisionAnalysisResult> {
-    const fileName = path.basename(imagePath);
-
-    this.logger.info(`Analyzing image: ${fileName}`);
-    this.logger.debug('Claude image analysis started', {
-      imagePath,
-      fileName,
-      hasPrompt: !!options.prompt,
-      maxTokens: options.maxTokens || 1000,
-    });
-
-    // Validate image file
-    try {
-      await fs.promises.access(imagePath);
-    } catch {
-      this.logger.error(`Image file not found: ${imagePath}`);
-      throw new Error(`Image file not found: ${imagePath}`);
-    }
-
-    const ext = path.extname(imagePath).toLowerCase();
-    const supportedFormats = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-    if (!supportedFormats.includes(ext)) {
-      this.logger.error(`Unsupported image format: ${ext}`);
-      throw new Error(
-        `Unsupported image format: ${ext}. Supported: ${supportedFormats.join(', ')}`
-      );
-    }
-
-    // Read and encode image
-    const imageBuffer = await fs.promises.readFile(imagePath);
-    const base64Image = imageBuffer.toString('base64');
-    const mimeType = this.getMimeType(ext);
-
-    return this.analyzeImageFromBase64(base64Image, { ...options, mimeType });
-  }
-
-  async analyzeImageFromBase64(
-    base64Data: string,
-    options: VisionAnalysisOptions & { mimeType?: string } = {}
-  ): Promise<VisionAnalysisResult> {
-    const startTime = Date.now();
-
-    this.logger.info('Analyzing base64 image');
-    this.logger.debug('Claude base64 image analysis started', {
-      base64Length: base64Data.length,
-      hasPrompt: !!options.prompt,
-      maxTokens: options.maxTokens || 1000,
-      mimeType: options.mimeType || 'image/jpeg',
-    });
-
-    try {
-      const model = options.model || this.getVisionModels()[0]; // Use agent's model or fallback to first available
-      const prompt = options.prompt || 'Analyze this image and describe what you see in detail.';
-      const mimeType = options.mimeType || 'image/jpeg';
-
-      // Remove data URL prefix if present
-      const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
-
-      const response = await withRetry(() =>
-        this.visionClient.messages.create({
-          model,
-          max_tokens: options.maxTokens ?? 1000,
-          temperature: options.temperature ?? 0.1,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-                    data: cleanBase64,
-                  },
-                },
-                {
-                  type: 'text',
-                  text: prompt,
-                },
-              ],
-            },
-          ],
-        })
-      );
-
-      const processingTime = Date.now() - startTime;
-      const content =
-        response.content[0]?.type === 'text' ? response.content[0].text : 'No analysis available';
-
-      const result: VisionAnalysisResult = {
-        content,
-        confidence: 1.0,
-        metadata: {
-          model,
-          provider: this.name,
-          processingTime,
-          tokenUsage: response.usage
-            ? {
-                promptTokens: response.usage.input_tokens,
-                completionTokens: response.usage.output_tokens,
-                totalTokens: response.usage.input_tokens + response.usage.output_tokens,
-              }
-            : undefined,
-        },
-      };
-
-      this.logger.info('Image analysis completed');
-      this.logger.debug('Claude image analysis result', {
-        model,
-        processingTime,
-        contentLength: content.length,
-        inputTokens: response.usage?.input_tokens ?? 0,
-        outputTokens: response.usage?.output_tokens ?? 0,
-      });
-
-      return result;
-    } catch (error) {
-      const processingTime = Date.now() - startTime;
-      const originalError = error instanceof Error ? error : new Error(String(error));
-
-      this.logger.error('Image analysis failed');
-      this.logger.debug('Claude image analysis error', {
-        processingTime,
-        error: originalError.message,
-        hasStack: !!originalError.stack,
-      });
-
-      throw new VisionError(
-        `Claude vision analysis failed: ${originalError.message}`,
-        this.name,
-        originalError
-      );
-    }
-  }
-
-  private getMimeType(extension: string): string {
     const mimeTypes: Record<string, string> = {
       '.jpg': 'image/jpeg',
       '.jpeg': 'image/jpeg',
@@ -564,8 +306,65 @@ export class ClaudeProvider implements LLMProvider {
       '.gif': 'image/gif',
       '.webp': 'image/webp',
     };
+    const mimeType = mimeTypes[path.extname(imagePath).toLowerCase()];
+    if (!mimeType) throw new Error('Unsupported image format');
+    const image = await fs.promises.readFile(imagePath);
+    return this.analyzeImageFromBase64(
+      `data:${mimeType};base64,${image.toString('base64')}`,
+      options
+    );
+  }
 
-    return mimeTypes[extension.toLowerCase()] || 'image/jpeg';
+  async analyzeImageFromBase64(
+    base64Data: string,
+    options: VisionAnalysisOptions & { mimeType?: string } = {}
+  ): Promise<VisionAnalysisResult> {
+    const start = Date.now();
+    if (!options.model) {
+      throw new Error(
+        'The previous Claude vision default claude-3-5-sonnet-20241022 is retired. Set a supported vision model explicitly.'
+      );
+    }
+    try {
+      const url = base64Data.startsWith('data:')
+        ? base64Data
+        : `data:${options.mimeType || 'image/jpeg'};base64,${base64Data}`;
+      const response = await this.generateWithClient(
+        {
+          model: options.model,
+          maxTokens: options.maxTokens ?? 1000,
+          temperature: options.temperature ?? 0.1,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'image_url', image_url: { url } },
+                {
+                  type: 'text',
+                  text: options.prompt || 'Analyze this image and describe what you see in detail.',
+                },
+              ],
+            },
+          ],
+        },
+        this.visionClient
+      );
+      return {
+        content: response.content,
+        metadata: {
+          model: response.model,
+          provider: this.name,
+          processingTime: Date.now() - start,
+          tokenUsage: response.usage,
+        },
+      };
+    } catch (error) {
+      throw new VisionError(
+        'Claude vision analysis failed',
+        this.name,
+        error instanceof Error ? error : undefined
+      );
+    }
   }
 
   getEmbeddingProvider(): LLMProvider {
@@ -586,111 +385,10 @@ export class ClaudeProvider implements LLMProvider {
       generateResponse: this.generateResponse.bind(this),
       generateStreamResponse: this.generateStreamResponse.bind(this),
       getSupportedModels: () => [],
-      getVisionModels: this.getVisionModels.bind(this),
       getEmbeddingModels: () => [],
-      analyzeImage: async (imagePath: string, options?: VisionAnalysisOptions) => {
-        const imageBuffer = await fs.promises.readFile(imagePath);
-        const base64Image = imageBuffer.toString('base64');
-        const ext = path.extname(imagePath).toLowerCase();
-        const mimeType = this.getMimeType(ext);
-
-        return this.analyzeImageFromBase64WithClient(
-          base64Image,
-          { ...options, mimeType },
-          this.visionClient
-        );
-      },
-      analyzeImageFromBase64: async (base64Data: string, options?: VisionAnalysisOptions) => {
-        return this.analyzeImageFromBase64WithClient(base64Data, options, this.visionClient);
-      },
+      getVisionModels: this.getVisionModels.bind(this),
+      analyzeImage: this.analyzeImage.bind(this),
+      analyzeImageFromBase64: this.analyzeImageFromBase64.bind(this),
     };
-  }
-
-  private async analyzeImageFromBase64WithClient(
-    base64Data: string,
-    options: VisionAnalysisOptions & { mimeType?: string } = {},
-    client: Anthropic
-  ): Promise<VisionAnalysisResult> {
-    const startTime = Date.now();
-
-    this.logger.debug('Using dedicated vision client', {
-      base64Length: base64Data.length,
-      hasPrompt: !!options.prompt,
-      mimeType: options.mimeType || 'image/jpeg',
-      clientHasBaseURL: 'baseURL' in client,
-    });
-
-    try {
-      const model = options.model || this.getVisionModels()[0]; // Use agent's model or fallback to first available
-      const prompt = options.prompt || 'Analyze this image and describe what you see in detail.';
-      const mimeType = options.mimeType || 'image/jpeg';
-
-      // Remove data URL prefix if present
-      const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
-
-      const response = await withRetry(() =>
-        client.messages.create({
-          model,
-          max_tokens: options.maxTokens ?? 1000,
-          temperature: options.temperature ?? 0.1,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-                    data: cleanBase64,
-                  },
-                },
-                {
-                  type: 'text',
-                  text: prompt,
-                },
-              ],
-            },
-          ],
-        })
-      );
-
-      const processingTime = Date.now() - startTime;
-      const content =
-        response.content[0]?.type === 'text' ? response.content[0].text : 'No analysis available';
-
-      return {
-        content,
-        confidence: 1.0,
-        metadata: {
-          model,
-          provider: this.name,
-          processingTime,
-          tokenUsage: response.usage
-            ? {
-                promptTokens: response.usage.input_tokens,
-                completionTokens: response.usage.output_tokens,
-                totalTokens: response.usage.input_tokens + response.usage.output_tokens,
-              }
-            : undefined,
-        },
-      };
-    } catch (error) {
-      const processingTime = Date.now() - startTime;
-      const originalError = error instanceof Error ? error : new Error(String(error));
-
-      this.logger.error('Claude image analysis failed');
-      this.logger.debug('Claude image analysis error', {
-        processingTime,
-        error: originalError.message,
-        hasStack: !!originalError.stack,
-      });
-
-      throw new VisionError(
-        `Claude vision analysis failed: ${originalError.message}`,
-        this.name,
-        originalError
-      );
-    }
   }
 }

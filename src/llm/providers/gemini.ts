@@ -10,6 +10,11 @@ import {
   isStringContent,
 } from '../types';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import {
+  getModelsByProvider,
+  getVisionModelsByProvider,
+  getEmbeddingModelsByProvider,
+} from '../models';
 import { getLogger } from '../../logger';
 import { Logger } from '../../logger/types';
 import { LLMApiError, VisionError } from '../../errors';
@@ -92,33 +97,15 @@ export class GeminiProvider implements LLMProvider {
   }
 
   getSupportedModels(): string[] {
-    return [
-      'gemini-2.5-pro',
-      'gemini-2.5-pro-deep-think',
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-2.0-flash',
-      'gemini-2.0-flash-thinking',
-      'gemini-2.0-flash-lite',
-      'gemini-2.0-pro-experimental',
-      'gemini-1.5-pro',
-      'gemini-1.5-flash',
-      'gemini-1.5-flash-8b',
-      'gemini-pro',
-    ];
+    return getModelsByProvider('gemini');
   }
 
   getVisionModels(): string[] {
-    return [
-      'gemini-1.5-pro',
-      'gemini-1.5-flash',
-      'gemini-1.0-pro-vision-latest',
-      'gemini-pro-vision',
-    ];
+    return getVisionModelsByProvider('gemini');
   }
 
   getEmbeddingModels(): string[] {
-    return ['text-embedding-004', 'embedding-001'];
+    return getEmbeddingModelsByProvider('gemini');
   }
 
   // Helper to create generationConfig - prevents duplicate code

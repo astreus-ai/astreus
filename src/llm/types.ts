@@ -1,3 +1,25 @@
+import type { ContentBlock } from '@anthropic-ai/sdk/resources/messages';
+import type { ChatCompletionMessage } from 'openai/resources/chat/completions';
+import type { ResponseOutputItem } from 'openai/resources/responses/responses';
+
+/** Opaque, model-bound continuation state. Persist and replay it without editing blocks. */
+export type LLMProviderData =
+  | { protocol: 'openai-responses'; model: string; output: ResponseOutputItem[] }
+  | {
+      protocol: 'openai-chat-completions';
+      model: string;
+      message: ChatCompletionMessage & { reasoning_details?: Record<string, unknown>[] };
+    }
+  | { protocol: 'claude-messages'; model: string; content: ContentBlock[] };
+
+export type ToolArgumentValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ToolArgumentValue[]
+  | { [key: string]: ToolArgumentValue };
+
 export interface LLMMessageContentPart {
   type: 'text' | 'image_url';
   text?: string;
@@ -14,6 +36,7 @@ export interface LLMMessage {
   content: LLMMessageContent;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  providerData?: LLMProviderData;
 }
 
 export interface ToolCall {
@@ -21,7 +44,7 @@ export interface ToolCall {
   type: 'function';
   function: {
     name: string;
-    arguments: Record<string, string | number | boolean | null>;
+    arguments: Record<string, ToolArgumentValue>;
   };
 }
 
@@ -74,6 +97,7 @@ export interface LLMResponse {
   content: string;
   model: string;
   toolCalls?: ToolCall[];
+  providerData?: LLMProviderData;
   usage?: LLMUsage;
 }
 
@@ -82,6 +106,7 @@ export interface LLMStreamChunk {
   done: boolean;
   model: string;
   toolCalls?: ToolCall[];
+  providerData?: LLMProviderData;
   usage?: LLMUsage;
 }
 

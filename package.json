@@ -1,6 +1,6 @@
 {
   "name": "@astreus-ai/astreus",
-  "version": "0.5.39",
+  "version": "0.6.0",
   "description": "Open-source AI agent framework for building autonomous systems that solve real-world tasks effectively.",
   "author": "Berke (pzzaworks)",
   "license": "MIT",
@@ -8,13 +8,38 @@
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./llm/models": {
+      "import": {
+        "types": "./dist/llm/models.d.ts",
+        "default": "./dist/llm/models.mjs"
+      },
+      "require": {
+        "types": "./dist/llm/models.d.cts",
+        "default": "./dist/llm/models.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "build": "tsup",
-    "lint": "eslint src --ext .ts",
-    "lint:fix": "eslint src --ext .ts --fix",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.ts\"",
-    "prepublishOnly": "npm run format && npm run lint && npm run build"
+    "lint": "eslint src tests --ext .ts",
+    "lint:fix": "eslint src tests --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.tests.json",
+    "prepublishOnly": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "ai",
@@ -26,12 +51,12 @@
     "memory"
   ],
   "dependencies": {
-    "@anthropic-ai/sdk": "0.20.9",
+    "@anthropic-ai/sdk": "0.125.0",
     "@google/generative-ai": "0.7.1",
     "dotenv": "16.6.1",
     "knex": "3.1.0",
     "ollama": "0.5.18",
-    "openai": "4.104.0",
+    "openai": "7.15.0",
     "pdfjs-dist": "4.10.38",
     "pg": "8.16.3",
     "pgvector": "0.1.8",
@@ -51,6 +76,7 @@
     "prettier": "3.6.2",
     "ts-node": "10.9.2",
     "tsup": "8.5.1",
+    "tsx": "4.23.13",
     "typescript": "5.8.3",
     "typescript-eslint": "8.31.1"
   },

@@ -14,6 +14,7 @@ import { DEFAULT_CONTEXT_OPTIONS } from './defaults';
 import { Logger } from '../logger/types';
 import { getLogger } from '../logger';
 import { getLLM } from '../llm';
+import { requiresNativeHistory } from '../llm/utils';
 import { getDatabase } from '../database';
 
 // Maximum number of messages to prevent unbounded growth
@@ -248,126 +249,135 @@ export class ContextManager implements IContextManager {
    * Add a message to the context
    */
   async addMessage(message: ContextMessage): Promise<void> {
+    if (
+      this.messages.length >= MAX_MESSAGE_COUNT &&
+      requiresNativeHistory([...this.messages, message])
+    ) {
+      throw new Error(
+        'Native conversation exceeds the context message limit; start a new conversation'
+      );
+    }
     // Queue this operation to prevent race conditions
-    this.pendingOperations = this.pendingOperations
-      .then(async () => {
-        // Acquire mutex lock
-        const lockAcquired = await this.acquireLock();
-        if (!lockAcquired) {
-          this.logger.error('Failed to add message - could not acquire lock');
-          return;
+    const operation = this.pendingOperations.then(async () => {
+      // Acquire mutex lock
+      const lockAcquired = await this.acquireLock();
+      if (!lockAcquired) {
+        this.logger.error('Failed to add message - could not acquire lock');
+        return;
+      }
+
+      try {
+        // Recheck under the queue lock: concurrent writers may have filled the limit.
+        if (
+          this.messages.length >= MAX_MESSAGE_COUNT &&
+          requiresNativeHistory([...this.messages, message])
+        ) {
+          throw new Error(
+            'Native conversation exceeds the context message limit; start a new conversation'
+          );
+        }
+        // Validate and normalize content
+        if (message.content === null || message.content === undefined) {
+          message.content = '';
         }
 
-        try {
-          // Validate and normalize content
-          if (message.content === null || message.content === undefined) {
-            message.content = '';
-          }
+        // Add timestamp if not provided
+        if (!message.timestamp) {
+          message.timestamp = new Date();
+        }
 
-          // Add timestamp if not provided
-          if (!message.timestamp) {
-            message.timestamp = new Date();
-          }
+        // Estimate tokens if not provided
+        if (message.tokens === undefined || message.tokens === null) {
+          message.tokens = this.compressor.estimateTokens(message.content);
+        }
 
-          // Estimate tokens if not provided
-          if (message.tokens === undefined || message.tokens === null) {
-            message.tokens = this.compressor.estimateTokens(message.content);
-          }
-
-          // Bounds check: prevent unbounded message array growth
-          if (this.messages.length >= MAX_MESSAGE_COUNT) {
-            this.logger.warn('Message limit reached, forcing compression', {
-              currentCount: this.messages.length,
-              maxCount: MAX_MESSAGE_COUNT,
-            });
-            // Force compression before adding new message
-            // Wait for any ongoing compression to complete before deciding
-            if (this.isCompressing) {
-              // Another compression is in progress, wait using promise-based waiting
-              this.logger.warn('Compression already in progress, waiting...');
-              // Use promise-based waiting instead of spin-wait
-              const compressionWaitResult = await this.waitForCompressionComplete(5000);
-              // If still compressing after timeout, log warning but don't delete messages
-              if (!compressionWaitResult) {
-                this.logger.warn(
-                  'Compression timeout reached, skipping message add to prevent data loss'
-                );
-                return;
-              }
-            } else {
-              try {
-                await this.compressContext();
-              } catch (error) {
-                this.logger.error(
-                  'Forced compression failed',
-                  error instanceof Error ? error : undefined
-                );
-                // Log detailed info about messages that would be removed (backup mechanism)
-                const removeCount = Math.floor(this.messages.length * 0.2);
-                const removedMessages = this.messages.slice(0, removeCount);
-                this.logger.warn('Removing messages due to compression failure', {
-                  removedCount: removeCount,
-                  removedMessagesSummary: removedMessages
-                    .map((m) => `[${m.role}] ${m.content.substring(0, 50)}...`)
-                    .join('; '),
-                });
-                this.messages = this.messages.slice(removeCount);
-              }
-            }
-          }
-
-          this.messages.push(message);
-          this.isDirty = true; // Mark context as dirty for saving
-
-          this.logger.debug('Message added to context', {
-            role: message.role,
-            tokens: message.tokens,
-            totalMessages: this.messages.length,
+        // Bounds check: prevent unbounded message array growth
+        if (this.messages.length >= MAX_MESSAGE_COUNT) {
+          this.logger.warn('Message limit reached, forcing compression', {
+            currentCount: this.messages.length,
+            maxCount: MAX_MESSAGE_COUNT,
           });
-
-          // Auto-compress if needed BEFORE saving (skip if already compressing)
-          if (this.autoCompress && !this.isCompressing && this.shouldCompress()) {
-            this.logger.debug('Auto-compression triggered', {
-              currentTokens: this.compressor.calculateTotalTokens(this.messages),
-              maxTokens: this.maxTokens,
-            });
-
+          // Force compression before adding new message
+          // Wait for any ongoing compression to complete before deciding
+          if (this.isCompressing) {
+            // Another compression is in progress, wait using promise-based waiting
+            this.logger.warn('Compression already in progress, waiting...');
+            // Use promise-based waiting instead of spin-wait
+            const compressionWaitResult = await this.waitForCompressionComplete(5000);
+            // If still compressing after timeout, log warning but don't delete messages
+            if (!compressionWaitResult) {
+              this.logger.warn(
+                'Compression timeout reached, skipping message add to prevent data loss'
+              );
+              return;
+            }
+          } else {
             try {
               await this.compressContext();
-              this.logger.debug('Auto-compression completed successfully');
             } catch (error) {
               this.logger.error(
-                'Auto-compression failed',
+                'Forced compression failed',
                 error instanceof Error ? error : undefined
               );
+              // Log detailed info about messages that would be removed (backup mechanism)
+              const removeCount = Math.floor(this.messages.length * 0.2);
+              const removedMessages = this.messages.slice(0, removeCount);
+              this.logger.warn('Removing messages due to compression failure', {
+                removedCount: removeCount,
+                removedMessagesSummary: removedMessages
+                  .map((m) => `[${m.role}] ${m.content.substring(0, 50)}...`)
+                  .join('; '),
+              });
+              this.messages = this.messages.slice(removeCount);
             }
           }
-
-          // Auto-save to storage after potential compression
-          try {
-            await this.saveToStorage();
-          } catch (error) {
-            this.logger.debug('Auto-save failed', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        } finally {
-          // Always release the lock
-          this.releaseLock();
         }
-      })
-      .catch((error): void => {
-        // Log error but don't release lock here - it's handled by finally block in the try/catch above
-        // The Promise chain should continue to work, and lock is always released in the finally
-        this.logger.error(
-          'Message add operation failed in Promise chain',
-          error instanceof Error ? error : undefined
-        );
-        // Don't re-throw to maintain Promise chain stability
-        // The error has been logged and handled
-      });
 
-    return this.pendingOperations;
+        this.messages.push(message);
+        this.isDirty = true; // Mark context as dirty for saving
+
+        this.logger.debug('Message added to context', {
+          role: message.role,
+          tokens: message.tokens,
+          totalMessages: this.messages.length,
+        });
+
+        // Auto-compress if needed BEFORE saving (skip if already compressing)
+        if (this.autoCompress && !this.isCompressing && this.shouldCompress()) {
+          this.logger.debug('Auto-compression triggered', {
+            currentTokens: this.compressor.calculateTotalTokens(this.messages),
+            maxTokens: this.maxTokens,
+          });
+
+          try {
+            await this.compressContext();
+            this.logger.debug('Auto-compression completed successfully');
+          } catch (error) {
+            this.logger.error(
+              'Auto-compression failed',
+              error instanceof Error ? error : undefined
+            );
+          }
+        }
+
+        // Auto-save to storage after potential compression
+        try {
+          await this.saveToStorage();
+        } catch (error) {
+          this.logger.debug('Auto-save failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        // Always release the lock
+        this.releaseLock();
+      }
+    });
+    // Keep the queue usable after failure without hiding this caller's rejection.
+    this.pendingOperations = operation.catch(() => {
+      this.logger.error('Message add operation failed');
+    });
+    return operation;
   }
 
   /**
@@ -403,6 +413,16 @@ export class ContextManager implements IContextManager {
    * Compress the context
    */
   async compressContext(): Promise<CompressionResult> {
+    if (requiresNativeHistory(this.messages)) {
+      return {
+        success: false,
+        compressedMessages: this.messages,
+        tokensReduced: 0,
+        compressionRatio: 0,
+        error:
+          'Native tool/thinking history cannot be summarized without invalidating continuation; start a new conversation',
+      };
+    }
     // Prevent concurrent compression operations
     if (this.isCompressing) {
       this.logger.debug('Compression already in progress, skipping');
@@ -598,7 +618,7 @@ export class ContextManager implements IContextManager {
    * Check if compression is needed
    */
   shouldCompress(): boolean {
-    return this.compressor.shouldCompress(this.messages);
+    return !requiresNativeHistory(this.messages) && this.compressor.shouldCompress(this.messages);
   }
 
   /**
@@ -629,18 +649,15 @@ export class ContextManager implements IContextManager {
       }
 
       // Validate and restore messages
-      const validRoles = ['user', 'assistant', 'system'] as const;
+      const validRoles = ['user', 'assistant', 'system', 'tool'] as const;
       type ValidRole = (typeof validRoles)[number];
 
       let invalidRoleCount = 0;
       this.messages = parsed.messages.map(
         (
-          msg: {
+          msg: Partial<Omit<ContextMessage, 'role' | 'timestamp'>> & {
             role?: string;
-            content?: string;
             timestamp?: string;
-            metadata?: MetadataObject;
-            tokens?: number;
           },
           index: number
         ) => {
@@ -658,6 +675,7 @@ export class ContextManager implements IContextManager {
           const role: ValidRole = isValidRole ? (msg.role as ValidRole) : 'user';
 
           return {
+            ...msg,
             role,
             content: msg.content || '',
             timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),

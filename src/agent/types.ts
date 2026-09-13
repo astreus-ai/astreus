@@ -40,7 +40,14 @@ export interface ITaskMethods {
  * Memory module methods - bound when Memory module is available
  */
 export interface IMemoryMethods {
-  addMemory(content: string, metadata?: MetadataObject): Promise<Memory>;
+  addMemory(
+    content: string,
+    metadata?: MetadataObject,
+    continuation?: Pick<
+      ContextMessage,
+      'role' | 'tool_calls' | 'tool_call_id' | 'providerData' | 'inputContent'
+    >
+  ): Promise<Memory>;
   getMemory(id: string): Promise<Memory | null>; // UUID
   searchMemories(query: string, options?: MemorySearchOptions): Promise<Memory[]>;
   listMemories(options?: MemorySearchOptions): Promise<Memory[]>;
@@ -181,7 +188,14 @@ export interface IAgent {
   exportContext?(): string;
   importContext?(data: string): void;
   // Memory methods (when memory enabled)
-  addMemory?(content: string, metadata?: MetadataObject): Promise<Memory>;
+  addMemory?(
+    content: string,
+    metadata?: MetadataObject,
+    continuation?: Pick<
+      ContextMessage,
+      'role' | 'tool_calls' | 'tool_call_id' | 'providerData' | 'inputContent'
+    >
+  ): Promise<Memory>;
   loadGraphContext?(graphId: string, limit?: number, isolated?: boolean): Promise<void>;
 }
 

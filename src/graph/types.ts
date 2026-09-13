@@ -89,7 +89,7 @@ export interface GraphUsage {
   totalCompletionTokens: number;
   totalTokens: number;
   totalContextTokens: number;
-  totalCost: number;
+  totalCost?: number; // Available only when every executed task has a known cost
   nodeUsages: Record<string, NodeUsage>; // Node ID -> usage mapping
   modelsUsed: string[]; // List of models used
 }

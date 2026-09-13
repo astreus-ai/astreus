@@ -1,4 +1,4 @@
-import { LLMUsage } from '../llm/types';
+import { LLMUsage, LLMMessage } from '../llm/types';
 import { MCPServerDefinition } from '../mcp/types';
 import { Plugin, PluginConfig } from '../plugin/types';
 import { MetadataObject } from '../types';
@@ -58,4 +58,6 @@ export interface TaskResponse {
   response: string;
   model?: string;
   usage?: LLMUsage;
+  /** Completed task transcript, including opaque provider continuation and tool results. */
+  messages?: LLMMessage[];
 }

@@ -1,9 +1,11 @@
-import { LLMProvider } from '../llm/types';
+import { LLMProvider, LLMMessage, LLMMessageContentPart } from '../llm/types';
 import { MetadataObject } from '../types';
 
-export interface ContextMessage {
-  role: 'user' | 'assistant' | 'system';
+export interface ContextMessage
+  extends Pick<LLMMessage, 'role' | 'tool_call_id' | 'tool_calls' | 'providerData'> {
   content: string;
+  /** Original multimodal input; content remains the readable text for context analysis. */
+  inputContent?: LLMMessageContentPart[];
   timestamp?: Date;
   metadata?: MetadataObject;
   tokens?: number;

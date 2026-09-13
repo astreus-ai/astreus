@@ -6,7 +6,7 @@ test/
 tests/
 
 # Development configuration files
-tsconfig.json
+tsconfig*.json
 tsup.config.ts
 eslint.config.js
 jest.config.js
