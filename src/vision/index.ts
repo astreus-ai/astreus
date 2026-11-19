@@ -23,18 +23,31 @@ export const ALLOWED_IMAGE_EXTENSIONS = [
 ];
 
 /**
- * Validates an image path for security and existence
- * Uses atomic file descriptor operations to prevent TOCTOU race conditions
+ * Validates an image path for security and existence and returns the real path to read.
+ * Symlinks are resolved before the containment check, so a link inside the working directory
+ * cannot point outside it, and callers must read the returned path rather than the input.
  * @throws Error if path is invalid or insecure
  */
-function validateImagePath(imagePath: string): void {
-  // Resolve and normalize the path to get absolute path
-  const resolvedPath = path.resolve(imagePath);
-  const cwd = path.resolve(process.cwd());
+function validateImagePath(imagePath: string): string {
+  const cwd = fs.realpathSync(process.cwd());
+  let resolvedPath: string;
+  try {
+    resolvedPath = fs.realpathSync(path.resolve(imagePath));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Image file not found: ${path.resolve(imagePath)}`);
+    }
+    throw error;
+  }
 
-  // Check if resolved path is within the current working directory
-  // This prevents path traversal attacks even with normalized paths
-  if (!resolvedPath.startsWith(cwd)) {
+  // path.relative, not a string prefix: `/app` must not accept `/app-secrets/x.png`
+  const relative = path.relative(cwd, resolvedPath);
+  if (
+    relative === '' ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
     throw new Error('Invalid image path: image path must be within working directory');
   }
 
@@ -50,8 +63,8 @@ function validateImagePath(imagePath: string): void {
   // Open the file with read-only flag, which atomically checks existence and opens
   let fd: number | null = null;
   try {
-    // O_RDONLY | O_NOFOLLOW equivalent - open read-only, don't follow symlinks
-    fd = fs.openSync(resolvedPath, fs.constants.O_RDONLY);
+    // Read-only and, where the platform supports it, refusing a symlink swapped in after the check
+    fd = fs.openSync(resolvedPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
 
     // Now use fstatSync on the file descriptor (not the path) to avoid TOCTOU
     const stats = fs.fstatSync(fd);
@@ -77,6 +90,8 @@ function validateImagePath(imagePath: string): void {
       }
     }
   }
+
+  return resolvedPath;
 }
 
 export interface VisionConfig {
@@ -280,8 +295,8 @@ export class Vision implements IAgentModule {
   }
 
   async analyzeImage(imagePath: string, options: AnalysisOptions = {}): Promise<string> {
-    // Validate image path for security
-    validateImagePath(imagePath);
+    // Validate image path for security; read the resolved real path from here on
+    const safePath = validateImagePath(imagePath);
 
     const fileName = path.basename(imagePath);
 
@@ -312,7 +327,7 @@ export class Vision implements IAgentModule {
         throw new Error('Vision provider does not support analyzeImage method');
       }
 
-      const result = await provider.analyzeImage(imagePath, visionOptions);
+      const result = await provider.analyzeImage(safePath, visionOptions);
 
       // User-facing success message
       this.logger.info(`Image analysis completed for ${fileName}`);
