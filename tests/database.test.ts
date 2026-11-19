@@ -40,7 +40,7 @@ function configureEncryption(enabled: boolean): void {
   resetEncryptionService();
 }
 
-async function findPostgres(): Promise<string> {
+async function findPostgres(): Promise<string | null> {
   const candidates = [
     process.env.ASTREUS_TEST_PG_BIN,
     '/opt/homebrew/opt/postgresql@17/bin',
@@ -56,14 +56,27 @@ async function findPostgres(): Promise<string> {
       continue;
     }
   }
-  const { stdout } = await execute('pg_config', ['--bindir'], { timeout: 5000 });
-  return stdout.trim();
+  try {
+    const { stdout } = await execute('pg_config', ['--bindir'], { timeout: 5000 });
+    const bin = stdout.trim();
+    await access(join(bin, 'initdb'));
+    return bin;
+  } catch {
+    return null;
+  }
 }
+
+// Resolved before any test runs: without local PostgreSQL binaries only the PostgreSQL cases
+// are skipped (and reported as skipped), so the SQLite and pure cases still run.
+const postgresBinary = await findPostgres();
+const postgresSkipReason =
+  postgresBinary === null ? 'PostgreSQL binaries not found; set ASTREUS_TEST_PG_BIN' : null;
 
 before(async () => {
   initializeLoggerSync({ level: 'silent', enableConsole: false });
   directory = await mkdtemp(join(tmpdir(), 'astreus-database-test-'));
-  postgresBin = await findPostgres();
+  if (postgresBinary === null) return;
+  postgresBin = postgresBinary;
   const socket = join(directory, 'socket');
   await mkdir(socket, { mode: 0o700 });
   await execute(
@@ -154,7 +167,8 @@ function corruptCipher(value: string): string {
 
 for (const type of ['sqlite', 'postgres'] as const) {
   for (const encrypted of [false, true]) {
-    test(`${type}: create/read/update preserves opaque messages and summary, encryption=${encrypted}`, async () => {
+    test(`${type}: create/read/update preserves opaque messages and summary, encryption=${encrypted}`, async (t) => {
+      if (type === 'postgres' && postgresSkipReason) return t.skip(postgresSkipReason);
       configureEncryption(encrypted);
       const database = await createDatabase(type);
       const sql = database.getKnex();
@@ -274,7 +288,8 @@ for (const type of ['sqlite', 'postgres'] as const) {
       await database.disconnect();
     });
 
-    test(`${type}: empty and null contexts remain distinct in storage, encryption=${encrypted}`, async () => {
+    test(`${type}: empty and null contexts remain distinct in storage, encryption=${encrypted}`, async (t) => {
+      if (type === 'postgres' && postgresSkipReason) return t.skip(postgresSkipReason);
       configureEncryption(encrypted);
       const database = await createDatabase(type);
       const sql = database.getKnex();
@@ -297,7 +312,8 @@ for (const type of ['sqlite', 'postgres'] as const) {
     });
   }
 
-  test(`${type}: tampering, wrong key, field substitution and malformed envelopes fail explicitly`, async () => {
+  test(`${type}: tampering, wrong key, field substitution and malformed envelopes fail explicitly`, async (t) => {
+    if (type === 'postgres' && postgresSkipReason) return t.skip(postgresSkipReason);
     configureEncryption(true);
     const database = await createDatabase(type);
     const sql = database.getKnex();
@@ -482,6 +498,7 @@ function createPool(max: number = 2, connectionString: string = postgresUrl): Kn
 }
 
 test('Tarn: tracks actual reuse, out-of-order release, held versus idle, and per-pool lifecycle', async (t) => {
+  if (postgresSkipReason) return t.skip(postgresSkipReason);
   const first = createPool();
   const second = createPool(1);
   const monitor = getPoolManager(first, 20, logger);
@@ -539,6 +556,7 @@ test('Tarn: tracks actual reuse, out-of-order release, held versus idle, and per
 });
 
 test('Tarn: query errors, rollback and acquisition failures leave no phantom checkouts', async (t) => {
+  if (postgresSkipReason) return t.skip(postgresSkipReason);
   const sql = createPool(1);
   const monitor = getPoolManager(sql, 20, logger);
   await assert.rejects(sql.raw('SELECT 1 / 0'));
@@ -578,7 +596,8 @@ test('Tarn: query errors, rollback and acquisition failures leave no phantom che
   await unavailable.destroy();
 });
 
-test('PostgreSQL: plaintext graph/node/edge metadata retains driver objects through save/load/save', async () => {
+test('PostgreSQL: plaintext graph/node/edge metadata retains driver objects through save/load/save', async (t) => {
+  if (postgresSkipReason) return t.skip(postgresSkipReason);
   configureEncryption(false);
   const database = await initializeDatabase(
     { type: 'postgres', connectionString: postgresUrl },
